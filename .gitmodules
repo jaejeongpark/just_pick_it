@@ -1,0 +1,4 @@
+[submodule "src/pinky_pro"]
+	path = src/pinky_pro
+	url = https://github.com/jaejeongpark/pinky_pro.git
+	branch = my-features

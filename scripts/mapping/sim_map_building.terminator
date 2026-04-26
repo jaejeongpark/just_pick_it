@@ -1,0 +1,54 @@
+[global_config]
+[keybindings]
+[profiles]
+  [[default]]
+    scrollback_lines = 2000
+    use_system_font = True
+[layouts]
+  [[sim_map_building]]
+    [[[window0]]]
+      type = Window
+      parent = ""
+      size = 1600, 960
+    [[[vpaned0]]]
+      type = VPaned
+      parent = window0
+      ratio = 0.85
+    [[[hpaned0]]]
+      type = HPaned
+      parent = vpaned0
+      ratio = 0.5
+    [[[vpaned1]]]
+      type = VPaned
+      parent = hpaned0
+      ratio = 0.5
+    [[[terminal_gazebo]]]
+      type = Terminal
+      parent = vpaned1
+      command = /home/jaejeong/pinky_pro/scripts/pane1_gazebo.sh
+      title = 1. Gazebo
+    [[[terminal_slam]]]
+      type = Terminal
+      parent = vpaned1
+      command = /home/jaejeong/pinky_pro/scripts/pane2_slam.sh
+      title = 2. SLAM
+    [[[vpaned2]]]
+      type = VPaned
+      parent = hpaned0
+      ratio = 0.5
+    [[[terminal_rviz]]]
+      type = Terminal
+      parent = vpaned2
+      command = /home/jaejeong/pinky_pro/scripts/pane3_rviz.sh
+      title = 3. RViz
+    [[[terminal_teleop]]]
+      type = Terminal
+      parent = vpaned2
+      command = /home/jaejeong/pinky_pro/scripts/pane4_teleop.sh
+      title = 4. Teleop
+    [[[terminal_map_saver]]]
+      type = Terminal
+      parent = vpaned0
+      command = /home/jaejeong/pinky_pro/scripts/pane5_map_saver.sh
+      title = 5. Map Saver
+[plugins]
