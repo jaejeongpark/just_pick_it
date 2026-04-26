@@ -1,5 +1,5 @@
 #!/bin/bash
-WS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../" && pwd)"
 source ~/venv/jazzy/bin/activate 2>/dev/null
 source /opt/ros/jazzy/setup.bash
 source "$WS_ROOT/install/local_setup.bash"
