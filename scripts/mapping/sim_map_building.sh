@@ -25,6 +25,7 @@ cat > "$TMP_CONFIG" << EOF
   [[default]]
     scrollback_lines = 2000
     use_system_font = True
+    exit_action = hold
 [layouts]
   [[sim_map_building]]
     [[[window0]]]
