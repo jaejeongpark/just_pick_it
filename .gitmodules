@@ -2,3 +2,7 @@
 	path = src/pinky_pro
 	url = https://github.com/jaejeongpark/pinky_pro.git
 	branch = my-features
+[submodule "src/mycobot_ros2"]
+	path = src/mycobot_ros2
+	url = https://github.com/jaejeongpark/mycobot_ros2.git
+	branch = my_feature
