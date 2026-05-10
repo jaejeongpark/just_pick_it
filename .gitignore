@@ -1,4 +1,13 @@
 build/
 install/
 log/
+__pycache__/
+*.py[cod]
+.venv/
+web/.venv/
+web/.env
 .claude/
+docs/
+AGENTS.md
+STATUS.md
+web/WEB_STATUS.md

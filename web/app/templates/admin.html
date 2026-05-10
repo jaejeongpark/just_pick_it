@@ -1,0 +1,524 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Just Pick It Admin</title>
+    <link rel="stylesheet" href="/static/css/style.css?v=20260510-map-env-setup">
+  </head>
+  <body class="admin-console" data-admin-page="{{ page }}">
+    <div class="admin-app-shell">
+      <aside class="admin-sidebar" aria-label="Admin navigation">
+        <div class="brand-lockup">
+          <div class="brand-mark">JP</div>
+          <div>
+            <strong>JUST PICK IT</strong>
+            <span>Control Console</span>
+          </div>
+        </div>
+        <nav class="side-nav">
+          <a class="{{ 'active' if page == 'dashboard' else '' }}" href="/admin">대시보드</a>
+          <a class="{{ 'active' if page == 'robots' else '' }}" href="/admin/robots">로봇 관리</a>
+          <a class="{{ 'active' if page == 'orders' else '' }}" href="/admin/orders">작업/주문 관리</a>
+          <a class="{{ 'active' if page == 'exceptions' else '' }}" href="/admin/exceptions">예외/알람 관리</a>
+          <a class="{{ 'active' if page == 'inventory' else '' }}" href="/admin/inventory">재고 관리</a>
+        </nav>
+        <div class="sidebar-footer">
+          <span id="socket-state" class="system-chip danger">offline</span>
+          <a class="nav-link" href="/customer">Admin</a>
+        </div>
+      </aside>
+
+      <div class="admin-main">
+        <header class="topbar">
+          <div>
+            <h1>{{ page_title }}</h1>
+          </div>
+        </header>
+
+        {% if page == 'dashboard' %}
+        <section class="summary-strip" aria-label="System summary">
+          <div class="summary-card robot-summary-card">
+            <div>
+              <span>로봇 상태 요약</span>
+              <strong><b id="summary-active-robots">0</b> / <b id="summary-robots">0</b></strong>
+              <small>가동 중</small>
+            </div>
+            <div id="robot-donut" class="donut-chart" aria-hidden="true"></div>
+            <div class="summary-legend">
+              <span><i class="legend-blue"></i>가동 <b id="summary-running-robots">0</b></span>
+              <span><i class="legend-gray"></i>대기 <b id="summary-idle-robots">0</b></span>
+              <span><i class="legend-yellow"></i>작업 <b id="summary-working-robots">0</b></span>
+              <span><i class="legend-red"></i>예외 <b id="summary-error-robots">0</b></span>
+            </div>
+          </div>
+          <div class="summary-card">
+            <span>진행 중인 주문</span>
+            <strong id="summary-tasks">0</strong>
+            <a class="summary-link" href="/admin/orders">주문 목록 보기 〉</a>
+          </div>
+          <div class="summary-card alert-card">
+            <span>예외/알람</span>
+            <strong id="summary-exceptions">0</strong>
+            <a class="summary-link" href="/admin/exceptions">알람 목록 보기 〉</a>
+          </div>
+          <div class="summary-card normal-card">
+            <div>
+              <span>시스템 상태</span>
+              <strong>정상</strong>
+              <small>모든 시스템 정상 동작 중</small>
+            </div>
+            <div class="system-pulse" aria-hidden="true"></div>
+          </div>
+          <div class="summary-card pickup-summary-card">
+            <span>픽업 슬롯</span>
+            <div id="pickup-summary-list" class="pickup-summary-list">-</div>
+          </div>
+          <div class="summary-card emergency-summary-card">
+            <div class="command-stack">
+              <button id="emergency-stop-button" class="danger-button" type="button">Emergency Stop</button>
+              <button id="resume-button" class="secondary-button" type="button">Resume</button>
+            </div>
+          </div>
+        </section>
+        {% endif %}
+
+        {% if page == 'dashboard' %}
+        <main class="page-shell dashboard-grid">
+          <section id="map-panel" class="section-band map-section">
+            <div class="section-heading">
+              <h2>미니맵</h2>
+              <span class="status-pill">Live</span>
+            </div>
+            <div class="facility-map warehouse-map" aria-label="Robot position overview">
+              <div class="map-robot-legend" aria-label="Robot color legend">
+                <span><i class="robot-dot-amr1"></i>AMR1</span>
+                <span><i class="robot-dot-amr2"></i>AMR2</span>
+                <span><i class="robot-dot-cobot1"></i>COBOT1</span>
+                <span><i class="robot-dot-cobot2"></i>COBOT2</span>
+              </div>
+              <div id="map-robot-layer" class="map-robot-layer" aria-hidden="true"></div>
+              <div class="template-dashboard-map" aria-hidden="true">
+                <div class="template-room room-left"></div>
+                <div class="template-room room-right"></div>
+                <div class="template-wall wall-main"></div>
+                <div class="template-wall wall-top"></div>
+                <div class="template-zone map-pickup">픽업 존</div>
+                <div class="template-zone map-sort">선별<br>작업 구역</div>
+                <div class="template-zone map-inspect">검사<br>작업 구역</div>
+                <div class="template-zone map-charge">충전소</div>
+                <div class="template-line line-blue"></div>
+                <div class="template-line line-green"></div>
+                <div class="template-line line-purple"></div>
+                <div class="template-pin pin-blue"></div>
+                <div class="template-pin pin-green"></div>
+                <div class="template-pin pin-purple"></div>
+                <div class="template-robot map-amr">AMR</div>
+                <div class="template-robot map-cobot-one">COBOT1</div>
+                <div class="template-robot map-cobot-two">COBOT2</div>
+                <span class="map-entrance">입구</span>
+                <span class="map-shelf shelf-a">선반 A</span>
+                <span class="map-shelf shelf-b">선반 B</span>
+              </div>
+              <svg class="warehouse-map-svg" viewBox="0 0 900 430" role="img" aria-label="Just Pick It warehouse map">
+                <defs>
+                  <g id="map-cube">
+                    <polygon points="12,0 24,7 24,21 12,28 0,21 0,7" fill="#050505"/>
+                    <polyline points="0,7 12,14 24,7" fill="none" stroke="#6b7280" stroke-width="1.4"/>
+                    <line x1="12" y1="14" x2="12" y2="28" stroke="#6b7280" stroke-width="1.4"/>
+                  </g>
+                  <g id="map-box">
+                    <polygon points="30,0 70,16 38,36 0,18" fill="#ffffff" stroke="#111827" stroke-width="3"/>
+                    <polygon points="0,18 38,36 38,72 0,52" fill="#ffffff" stroke="#111827" stroke-width="3"/>
+                    <polygon points="38,36 70,16 70,52 38,72" fill="#ffffff" stroke="#111827" stroke-width="3"/>
+                    <line x1="18" y1="8" x2="55" y2="27" stroke="#111827" stroke-width="3"/>
+                  </g>
+                  <g id="map-amr">
+                    <rect x="0" y="0" width="45" height="28" rx="7" fill="#0ea5e9"/>
+                    <circle cx="10" cy="28" r="4" fill="#111827"/>
+                    <circle cx="35" cy="28" r="4" fill="#111827"/>
+                    <text x="22.5" y="18" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="900">AMR</text>
+                  </g>
+                  <g id="map-arm">
+                    <path d="M10 88 L10 48 L34 48 L58 18" fill="none" stroke="#050505" stroke-width="12" stroke-linecap="square"/>
+                    <path d="M58 18 L90 36 L80 52 L52 36" fill="none" stroke="#050505" stroke-width="10" stroke-linecap="square"/>
+                    <circle cx="34" cy="48" r="9" fill="#ffffff" stroke="#050505" stroke-width="7"/>
+                    <rect x="0" y="88" width="74" height="14" fill="#050505"/>
+                  </g>
+                  <g id="route-arrow">
+                    <polygon points="0,14 16,0 26,0 15,14 26,28 16,28" fill="#facc15" stroke="#475569" stroke-width="2"/>
+                  </g>
+                </defs>
+                <rect x="8" y="54" width="884" height="362" fill="#ffffff" stroke="#111827" stroke-width="2"/>
+                <rect x="28" y="16" width="260" height="45" rx="8" fill="#ffffff" stroke="#111827" stroke-width="2"/>
+                <rect x="330" y="16" width="270" height="45" rx="8" fill="#ffffff" stroke="#111827" stroke-width="2"/>
+                <rect x="622" y="16" width="252" height="45" rx="8" fill="#ffffff" stroke="#111827" stroke-width="2"/>
+                <text x="158" y="45" text-anchor="middle" font-size="17" font-weight="900" fill="#111827">SORTING / LOADING</text>
+                <text x="465" y="45" text-anchor="middle" font-size="17" font-weight="900" fill="#111827">STANDBY / CHARGING</text>
+                <text x="748" y="45" text-anchor="middle" font-size="17" font-weight="900" fill="#111827">INSPECTION / UNLOADING</text>
+                <rect x="24" y="72" width="300" height="320" fill="#ffffff" stroke="#c2410c" stroke-width="5"/>
+                <rect x="334" y="72" width="270" height="320" fill="#ffffff" stroke="#3b82f6" stroke-width="5"/>
+                <rect x="614" y="72" width="260" height="320" fill="#ffffff" stroke="#84cc16" stroke-width="5"/>
+                <path d="M234 170 C210 170 205 196 205 216 L205 270 C205 296 220 316 246 316 L758 316 C782 316 792 294 792 270 L792 216 C792 190 775 170 748 170 Z" fill="none" stroke="#111827" stroke-width="2.4" stroke-dasharray="8 6"/>
+                <line x1="245" y1="170" x2="748" y2="170" stroke="#111827" stroke-width="2.4" stroke-dasharray="8 6"/>
+                <line x1="245" y1="316" x2="748" y2="316" stroke="#111827" stroke-width="2.4" stroke-dasharray="8 6"/>
+                <use href="#route-arrow" x="332" y="156"/>
+                <use href="#route-arrow" x="565" y="156"/>
+                <use href="#route-arrow" x="332" y="302" transform="rotate(180 345 316)"/>
+                <use href="#route-arrow" x="565" y="302" transform="rotate(180 578 316)"/>
+                <rect x="48" y="88" width="210" height="44" fill="#c9c9c9"/>
+                <rect x="48" y="132" width="42" height="218" fill="#c9c9c9"/>
+                <rect x="116" y="330" width="142" height="44" fill="#c9c9c9"/>
+                <use href="#map-cube" x="60" y="96"/><use href="#map-cube" x="100" y="96"/><use href="#map-cube" x="140" y="96"/><use href="#map-cube" x="180" y="96"/>
+                <use href="#map-cube" x="58" y="148"/><use href="#map-cube" x="58" y="188"/><use href="#map-cube" x="58" y="228"/><use href="#map-cube" x="58" y="268"/><use href="#map-cube" x="58" y="308"/>
+                <use href="#map-cube" x="130" y="338"/><use href="#map-cube" x="170" y="338"/><use href="#map-cube" x="210" y="338"/>
+                <use href="#map-arm" x="82" y="214"/>
+                <text x="122" y="348" text-anchor="middle" font-size="13" font-weight="900" fill="#111827">Sorting</text>
+                <text x="122" y="364" text-anchor="middle" font-size="13" font-weight="900" fill="#111827">Cobot</text>
+                <rect x="170" y="230" width="116" height="84" rx="16" fill="#fed7c3"/>
+                <text x="228" y="252" text-anchor="middle" font-size="13" font-weight="900" fill="#111827">Loading zone</text>
+                <text x="228" y="270" text-anchor="middle" font-size="14" font-weight="900" fill="#dc2626">Sorting</text>
+                <use href="#map-amr" x="205" y="280"/>
+                <rect x="424" y="92" width="90" height="75" rx="14" fill="#dbeafe"/>
+                <rect x="420" y="182" width="98" height="75" rx="14" fill="#dcfce7"/>
+                <rect x="424" y="272" width="90" height="75" rx="14" fill="#dbeafe"/>
+                <text x="469" y="114" text-anchor="middle" font-size="13" font-weight="900" fill="#111827">Standby zone</text>
+                <text x="469" y="130" text-anchor="middle" font-size="14" font-weight="900" fill="#dc2626">Standby</text>
+                <use href="#map-amr" x="447" y="135"/>
+                <text x="469" y="204" text-anchor="middle" font-size="13" font-weight="900" fill="#111827">Charging zone</text>
+                <text x="469" y="220" text-anchor="middle" font-size="14" font-weight="900" fill="#dc2626">Charging</text>
+                <use href="#map-amr" x="447" y="225"/>
+                <text x="510" y="242" font-size="12" font-weight="900" fill="#111827">CHG</text>
+                <text x="469" y="294" text-anchor="middle" font-size="13" font-weight="900" fill="#111827">Standby zone</text>
+                <text x="469" y="310" text-anchor="middle" font-size="14" font-weight="900" fill="#dc2626">Standby</text>
+                <use href="#map-amr" x="447" y="315"/>
+                <rect x="648" y="230" width="112" height="84" rx="16" fill="#ddd6fe"/>
+                <text x="704" y="252" text-anchor="middle" font-size="13" font-weight="900" fill="#111827">Unloading zone</text>
+                <text x="704" y="270" text-anchor="middle" font-size="14" font-weight="900" fill="#dc2626">Inspection</text>
+                <use href="#map-amr" x="682" y="280"/>
+                <use href="#map-arm" x="748" y="214"/>
+                <text x="796" y="348" text-anchor="middle" font-size="13" font-weight="900" fill="#111827">Inspection</text>
+                <text x="796" y="364" text-anchor="middle" font-size="13" font-weight="900" fill="#111827">Cobot</text>
+                <use href="#map-box" x="786" y="94" transform="scale(.78)"/>
+                <use href="#map-box" x="786" y="276" transform="scale(.78)"/>
+                <text x="820" y="182" text-anchor="middle" font-size="13" fill="#111827">Pickup</text>
+                <text x="820" y="198" text-anchor="middle" font-size="13" fill="#111827">Slot_1</text>
+                <text x="820" y="364" text-anchor="middle" font-size="13" fill="#111827">Pickup</text>
+                <text x="820" y="380" text-anchor="middle" font-size="13" fill="#111827">Slot_2</text>
+                <polygon points="860,158 892,158 892,148 908,168 892,188 892,178 860,178" fill="#0f766e"/>
+                <polygon points="860,340 892,340 892,330 908,350 892,370 892,360 860,360" fill="#0f766e"/>
+              </svg>
+              <div class="map-route route-top"></div>
+              <div class="map-route route-left"></div>
+              <div class="map-route route-right"></div>
+              <div class="map-route route-bottom"></div>
+              <div class="route-arrow arrow-left-top"></div>
+              <div class="route-arrow arrow-mid-top"></div>
+              <div class="route-arrow arrow-left-bottom"></div>
+              <div class="route-arrow arrow-mid-bottom"></div>
+
+              <section class="warehouse-section sorting-area" aria-label="Sorting and loading area">
+                <div class="warehouse-label">SORTING / LOADING</div>
+                <div class="shelf-bank shelf-top">
+                  <i></i><i></i><i></i><i></i>
+                </div>
+                <div class="shelf-bank shelf-left">
+                  <i></i><i></i><i></i><i></i><i></i>
+                </div>
+                <div class="shelf-bank shelf-bottom">
+                  <i></i><i></i><i></i><i></i>
+                </div>
+                <div class="cobot-unit sorting-cobot"><span>Sorting<br>Cobot</span></div>
+                <div class="work-zone loading-zone">
+                  <strong>Loading zone</strong>
+                  <span>Sorting</span>
+                  <div class="mini-amr">AMR</div>
+                </div>
+              </section>
+
+              <section class="warehouse-section standby-area" aria-label="Standby and charging area">
+                <div class="warehouse-label">STANDBY / CHARGING</div>
+                <div class="center-zone standby-zone top-zone">
+                  <strong>Standby zone</strong>
+                  <span>Standby</span>
+                  <div class="mini-amr">AMR</div>
+                </div>
+                <div class="center-zone charging-zone">
+                  <strong>Charging zone</strong>
+                  <span>Charging</span>
+                  <div class="mini-amr">AMR</div>
+                  <b>CHG</b>
+                </div>
+                <div class="center-zone standby-zone bottom-zone">
+                  <strong>Standby zone</strong>
+                  <span>Standby</span>
+                  <div class="mini-amr">AMR</div>
+                </div>
+              </section>
+
+              <section class="warehouse-section inspection-area" aria-label="Inspection and unloading area">
+                <div class="warehouse-label">INSPECTION / UNLOADING</div>
+                <div class="pickup-slot pickup-slot-one">
+                  <div class="box-icon"></div>
+                  <span>Pickup<br>Slot_1</span>
+                </div>
+                <div class="pickup-slot pickup-slot-two">
+                  <div class="box-icon"></div>
+                  <span>Pickup<br>Slot_2</span>
+                </div>
+                <div class="exit-arrow exit-one"></div>
+                <div class="exit-arrow exit-two"></div>
+                <div class="work-zone unloading-zone">
+                  <strong>Unloading zone</strong>
+                  <span>Inspection</span>
+                  <div class="mini-amr">AMR</div>
+                </div>
+                <div class="cobot-unit inspection-cobot"><span>Inspection<br>Cobot</span></div>
+              </section>
+            </div>
+          </section>
+
+          <section id="robot-panel" class="section-band robot-section">
+            <div class="section-heading">
+              <h2>로봇 상태</h2>
+              <a class="section-link" href="/admin/robots">전체 로봇 보기 〉</a>
+            </div>
+            <div id="robot-status" class="table-placeholder">Waiting for WebSocket data</div>
+          </section>
+
+          <section class="section-band ai-command-section">
+            <div class="section-heading">
+              <h2>AI Chat</h2>
+              <span id="dashboard-llm-status" class="ai-command-status idle">대기 중</span>
+            </div>
+            <form id="dashboard-llm-form" class="dashboard-llm-form">
+              <input id="dashboard-llm-input" type="text" autocomplete="off" placeholder="예: 1번 구역 순찰해줘">
+              <button id="dashboard-llm-submit" class="ai-chat-button" type="submit" aria-label="AI command"><span>AI</span> 명령</button>
+            </form>
+            <div class="ai-command-feedback">
+              <p id="dashboard-llm-result">명령을 입력하면 AI 응답이 여기에 표시됩니다.</p>
+            </div>
+          </section>
+
+          <section class="section-band task-summary-section">
+            <div class="section-heading">
+              <h2>진행 중인 주문 (최근)</h2>
+              <a class="section-link" href="/admin/orders">전체 주문 보기 〉</a>
+            </div>
+            <div id="task-list" class="table-placeholder">No tasks loaded</div>
+          </section>
+
+          <section id="exception-panel" class="section-band exception-summary-section">
+            <div class="section-heading">
+              <h2>예외/알람 (최근)</h2>
+              <a class="section-link" href="/admin/exceptions">전체 알람 보기 〉</a>
+            </div>
+            <div id="exception-list" class="table-placeholder">No exceptions loaded</div>
+          </section>
+
+          <section id="inventory-panel" class="section-band inventory-summary-section">
+            <div class="section-heading">
+              <h2>재고 요약</h2>
+              <a class="section-link" href="/admin/inventory">전체 재고 보기 〉</a>
+            </div>
+            <div id="inventory-list" class="table-placeholder">No products loaded</div>
+          </section>
+        </main>
+        {% elif page == 'map' %}
+        <main class="page-shell admin-page-grid">
+          <section id="map-panel" class="section-band full-span">
+            <div class="section-heading">
+              <h2>미니맵</h2>
+              <span class="status-pill">Live</span>
+            </div>
+            <div class="facility-map facility-map-large warehouse-map" aria-label="Robot position overview">
+              <div id="map-robot-layer" class="map-robot-layer" aria-hidden="true"></div>
+              <div class="map-route route-top"></div>
+              <div class="map-route route-left"></div>
+              <div class="map-route route-right"></div>
+              <div class="map-route route-bottom"></div>
+              <div class="route-arrow arrow-left-top"></div>
+              <div class="route-arrow arrow-mid-top"></div>
+              <div class="route-arrow arrow-left-bottom"></div>
+              <div class="route-arrow arrow-mid-bottom"></div>
+
+              <section class="warehouse-section sorting-area" aria-label="Sorting and loading area">
+                <div class="warehouse-label">SORTING / LOADING</div>
+                <div class="shelf-bank shelf-top">
+                  <i></i><i></i><i></i><i></i>
+                </div>
+                <div class="shelf-bank shelf-left">
+                  <i></i><i></i><i></i><i></i><i></i>
+                </div>
+                <div class="shelf-bank shelf-bottom">
+                  <i></i><i></i><i></i><i></i>
+                </div>
+                <div class="cobot-unit sorting-cobot"><span>Sorting<br>Cobot</span></div>
+                <div class="work-zone loading-zone">
+                  <strong>Loading zone</strong>
+                  <span>Sorting</span>
+                  <div class="mini-amr">AMR</div>
+                </div>
+              </section>
+
+              <section class="warehouse-section standby-area" aria-label="Standby and charging area">
+                <div class="warehouse-label">STANDBY / CHARGING</div>
+                <div class="center-zone standby-zone top-zone">
+                  <strong>Standby zone</strong>
+                  <span>Standby</span>
+                  <div class="mini-amr">AMR</div>
+                </div>
+                <div class="center-zone charging-zone">
+                  <strong>Charging zone</strong>
+                  <span>Charging</span>
+                  <div class="mini-amr">AMR</div>
+                  <b>CHG</b>
+                </div>
+                <div class="center-zone standby-zone bottom-zone">
+                  <strong>Standby zone</strong>
+                  <span>Standby</span>
+                  <div class="mini-amr">AMR</div>
+                </div>
+              </section>
+
+              <section class="warehouse-section inspection-area" aria-label="Inspection and unloading area">
+                <div class="warehouse-label">INSPECTION / UNLOADING</div>
+                <div class="pickup-slot pickup-slot-one">
+                  <div class="box-icon"></div>
+                  <span>Pickup<br>Slot_1</span>
+                </div>
+                <div class="pickup-slot pickup-slot-two">
+                  <div class="box-icon"></div>
+                  <span>Pickup<br>Slot_2</span>
+                </div>
+                <div class="exit-arrow exit-one"></div>
+                <div class="exit-arrow exit-two"></div>
+                <div class="work-zone unloading-zone">
+                  <strong>Unloading zone</strong>
+                  <span>Inspection</span>
+                  <div class="mini-amr">AMR</div>
+                </div>
+                <div class="cobot-unit inspection-cobot"><span>Inspection<br>Cobot</span></div>
+              </section>
+            </div>
+          </section>
+          <section id="robot-panel" class="section-band full-span">
+            <div class="section-heading">
+              <h2>로봇 상태</h2>
+              <a class="section-link" href="/admin/robots">전체 로봇 보기 〉</a>
+            </div>
+            <div id="robot-status" class="table-placeholder">Waiting for WebSocket data</div>
+          </section>
+        </main>
+        {% elif page == 'robots' %}
+        <main class="page-shell admin-page-grid robot-management-page">
+          <section id="robot-panel" class="section-band full-span robot-management-section">
+            <div class="section-heading">
+              <h2>로봇 관리</h2>
+            </div>
+            <div class="robot-management-toolbar" aria-label="Robot filters">
+              <input id="robot-search-input" type="search" placeholder="로봇 검색...">
+              <select id="robot-status-filter" aria-label="Robot status filter">
+                <option value="">상태 전체</option>
+                <option value="IDLE">대기</option>
+                <option value="MOVING">이동</option>
+                <option value="SORTING">선별</option>
+                <option value="DELIVERING">운반</option>
+                <option value="INSPECTING">검수</option>
+                <option value="CHARGING">충전</option>
+                <option value="RETURNING">복귀</option>
+                <option value="PARKING">파킹 중</option>
+                <option value="ERROR">예외</option>
+                <option value="OFFLINE">오프라인</option>
+              </select>
+              <select id="robot-type-filter" aria-label="Robot type filter">
+                <option value="">유형 전체</option>
+                <option value="AMR">AMR</option>
+                <option value="Cobot">Cobot</option>
+              </select>
+            </div>
+            <div id="robot-status" class="table-placeholder">Waiting for WebSocket data</div>
+            <div id="robot-detail-panel" class="robot-detail-panel"></div>
+          </section>
+        </main>
+        {% elif page == 'orders' %}
+        <main class="page-shell admin-page-grid orders-management-page">
+          <section id="order-panel" class="section-band orders-primary-section">
+            <div class="section-heading">
+              <h2>주문 목록</h2>
+              <button id="order-history-button" class="ghost-button" type="button">완료 주문 보기</button>
+            </div>
+            <div id="order-list" class="table-placeholder">No orders loaded</div>
+          </section>
+          <section class="section-band tasks-secondary-section">
+            <div class="section-heading">
+              <h2>작업 목록</h2>
+              <button id="task-view-button" class="ghost-button" type="button">작업 추가</button>
+            </div>
+            <div id="task-list" class="table-placeholder">No tasks loaded</div>
+          </section>
+          <section class="section-band full-span order-work-detail-section">
+            <div id="order-work-detail-panel" class="order-work-detail-panel">주문을 선택하면 상세가 표시됩니다</div>
+          </section>
+          <section class="section-band full-span pickup-management-section">
+            <div class="section-heading">
+              <h2>픽업 슬롯</h2>
+              <button id="pickup-slot-manage-button" class="ghost-button" type="button">관리하기</button>
+            </div>
+            <div id="pickup-slot-list" class="table-placeholder">No pickup slots loaded</div>
+          </section>
+        </main>
+        {% elif page == 'exceptions' %}
+        <main class="page-shell admin-page-grid">
+          <section id="exception-panel" class="section-band full-span">
+            <div class="section-heading">
+              <h2>예외/알람 목록</h2>
+              <button id="exception-history-button" class="ghost-button" type="button">History</button>
+            </div>
+            <div id="exception-list" class="table-placeholder">No exceptions loaded</div>
+          </section>
+        </main>
+        {% elif page == 'inventory' %}
+        <main class="page-shell admin-page-grid">
+          <section id="inventory-panel" class="section-band full-span">
+            <div class="section-heading">
+              <h2>재고 관리</h2>
+              <button id="inventory-manage-button" class="ghost-button" type="button">+ 재고 추가/수정</button>
+            </div>
+            <div id="inventory-list" class="table-placeholder">No products loaded</div>
+          </section>
+        </main>
+        {% endif %}
+      </div>
+    </div>
+
+    <section id="llm-panel" class="llm-panel" aria-label="LLM command panel" hidden>
+      <div class="llm-header">
+        <div>
+          <strong>LLM Command</strong>
+          <span>Patrol mock</span>
+        </div>
+        <button id="llm-close-button" class="ghost-button" type="button">Close</button>
+      </div>
+      <div id="llm-messages" class="llm-messages">
+        <div class="llm-message bot">순찰 명령이나 관제 질문을 입력하면 데모 응답을 보여줍니다.</div>
+      </div>
+      <form id="llm-form" class="llm-form">
+        <input id="llm-input" type="text" autocomplete="off" placeholder="예: 1번 구역 순찰해줘">
+        <button class="small-action-button" type="submit">Send</button>
+      </form>
+    </section>
+
+    <div id="modal-backdrop" class="modal-backdrop" hidden>
+      <section class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <div class="modal-header">
+          <h2 id="modal-title">Order Detail</h2>
+          <button id="modal-close-button" class="ghost-button" type="button">Close</button>
+        </div>
+        <div id="modal-body" class="modal-body"></div>
+      </section>
+    </div>
+
+    <script src="/static/js/admin.js?v=20260510-map-env-setup"></script>
+  </body>
+</html>
