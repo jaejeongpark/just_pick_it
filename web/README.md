@@ -5,6 +5,7 @@ FastAPI 기반 Control Server와 고객/관리자 UI를 두는 폴더입니다.
 웹은 쇼핑몰 자체가 아니라 **로봇 시스템 관제와 주문 흐름을 확인하기 위한 Control Server + UI**입니다.  
 최신 구현 계획은 [`../docs/web_plan.md`](../docs/web_plan.md), 작업 진행 기록은 [`WEB_STATUS.md`](WEB_STATUS.md)를 기준으로 봅니다.
 주문/로봇 상태 전이 흐름은 [`WORKFLOW.md`](WORKFLOW.md)에 따로 정리했습니다.
+로봇/Fleet/Vision/LLM에서 호출할 API 사용법은 [`API_USAGE.md`](API_USAGE.md)에 정리했습니다.
 
 ## Quick Start
 
@@ -330,15 +331,35 @@ CLAUDE_TIMEOUT_SECONDS=10
 실제 Fleet Manager/Control Bridge에서는 상태 판단을 Fleet 쪽에서 수행하고, Control Server는 받은 상태를 DB에 반영합니다.
 
 ```text
+GET   /api/fleet/tasks
 POST  /api/fleet/tasks
+GET   /api/fleet/orders/{order_id}/tasks
 PATCH /api/fleet/orders/{order_id}
+POST  /api/fleet/orders/{order_id}/assign-pickup-slot
 PATCH /api/fleet/tasks/{task_id}
 POST  /api/fleet/tasks/{task_id}/events
 GET   /api/fleet/tasks/{task_id}/events
 PATCH /api/fleet/robots/{robot_id}
+GET   /api/fleet/pickup-slots
 PATCH /api/fleet/pickup-slots/{slot_id}
 POST  /api/fleet/exceptions
 ```
+
+조회 예시:
+
+```bash
+curl "http://localhost:8000/api/fleet/tasks?robot_id=AMR1&status=QUEUED"
+curl "http://localhost:8000/api/fleet/orders/7/tasks"
+curl "http://localhost:8000/api/fleet/pickup-slots?status=EMPTY"
+```
+
+검수 시작 시점 픽업 슬롯 예약 예시:
+
+```bash
+curl -X POST http://localhost:8000/api/fleet/orders/7/assign-pickup-slot
+```
+
+이 API는 가장 낮은 번호의 `EMPTY` 슬롯을 하나 선택해 `RESERVED`로 바꾸고, `orders.pickup_slot_id`에 저장합니다.
 
 예시:
 
