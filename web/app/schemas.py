@@ -207,6 +207,35 @@ class FleetTaskRead(BaseModel):
     task_id: int
 
 
+class FleetTaskSummaryRead(BaseModel):
+    task_id: int
+    order_id: int | None = None
+    order_no: str | None = None
+    assigned_robot_id: str | None = None
+    task_type: str
+    status: str
+    source_zone_id: int | None = None
+    target_zone_id: int | None = None
+    result_message: str | None = None
+
+
+class FleetPickupSlotRead(BaseModel):
+    slot_id: int
+    slot_name: str
+    status: str
+    order_id: int | None = None
+    order_no: str | None = None
+
+
+class FleetPickupSlotAssignmentRead(BaseModel):
+    status: str
+    order_id: int
+    order_no: str
+    pickup_slot_id: int
+    slot_name: str
+    slot_status: str
+
+
 class FleetTaskEventCreate(BaseModel):
     robot_id: str | None = None
     from_status: TaskStatus | None = None

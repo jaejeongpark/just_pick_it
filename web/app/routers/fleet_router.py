@@ -9,6 +9,8 @@ from app.schemas import (
     FleetExceptionCreate,
     FleetExceptionRead,
     FleetOrderStateUpdate,
+    FleetPickupSlotAssignmentRead,
+    FleetPickupSlotRead,
     FleetPickupSlotStateUpdate,
     FleetRobotStateUpdate,
     FleetStateUpdateRead,
@@ -17,6 +19,9 @@ from app.schemas import (
     FleetTaskEventRead,
     FleetTaskRead,
     FleetTaskStateUpdate,
+    FleetTaskSummaryRead,
+    PickupSlotStatus,
+    TaskStatus,
 )
 from app.services.realtime import broadcast_all_status
 
@@ -34,6 +39,51 @@ def build_task_event_response(task_event: TaskEvent) -> dict:
         "event_name": task_event.event_name,
         "reason": task_event.reason,
         "created_at": task_event.created_at.isoformat() if task_event.created_at else None,
+    }
+
+
+def build_task_summary_response(db: Session, task: Task) -> dict:
+    order = db.get(Order, task.order_id) if task.order_id is not None else None
+
+    return {
+        "task_id": task.task_id,
+        "order_id": task.order_id,
+        "order_no": order.order_no if order else None,
+        "assigned_robot_id": task.assigned_robot_id,
+        "task_type": task.task_type,
+        "status": task.status,
+        "source_zone_id": task.source_zone_id,
+        "target_zone_id": task.target_zone_id,
+        "result_message": task.result_message,
+    }
+
+
+def build_pickup_slot_response(db: Session, pickup_slot: PickupSlot) -> dict:
+    active_order = (
+        db.query(Order)
+        .filter(Order.pickup_slot_id == pickup_slot.slot_id)
+        .filter(Order.status != "COMPLETED")
+        .order_by(Order.order_id.desc())
+        .first()
+    )
+
+    return {
+        "slot_id": pickup_slot.slot_id,
+        "slot_name": pickup_slot.slot_name,
+        "status": pickup_slot.status,
+        "order_id": active_order.order_id if active_order else None,
+        "order_no": active_order.order_no if active_order else None,
+    }
+
+
+def build_pickup_slot_assignment_response(order: Order, pickup_slot: PickupSlot) -> dict:
+    return {
+        "status": "ok",
+        "order_id": order.order_id,
+        "order_no": order.order_no,
+        "pickup_slot_id": pickup_slot.slot_id,
+        "slot_name": pickup_slot.slot_name,
+        "slot_status": pickup_slot.status,
     }
 
 
@@ -107,6 +157,45 @@ def create_fleet_task(
         "status": "ok",
         "task_id": task.task_id,
     }
+
+
+@router.get("/tasks", response_model=list[FleetTaskSummaryRead])
+def list_fleet_tasks(
+    robot_id: str | None = None,
+    status: TaskStatus | None = None,
+    order_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    task_query = db.query(Task)
+
+    if robot_id is not None:
+        task_query = task_query.filter(Task.assigned_robot_id == robot_id)
+
+    if status is not None:
+        task_query = task_query.filter(Task.status == status)
+
+    if order_id is not None:
+        task_query = task_query.filter(Task.order_id == order_id)
+
+    tasks = task_query.order_by(Task.task_id.desc()).all()
+    return [build_task_summary_response(db, task) for task in tasks]
+
+
+@router.get("/orders/{order_id}/tasks", response_model=list[FleetTaskSummaryRead])
+def list_order_tasks(
+    order_id: int,
+    db: Session = Depends(get_db),
+):
+    if not db.get(Order, order_id):
+        raise HTTPException(status_code=404, detail="order not found")
+
+    tasks = (
+        db.query(Task)
+        .filter(Task.order_id == order_id)
+        .order_by(Task.task_id)
+        .all()
+    )
+    return [build_task_summary_response(db, task) for task in tasks]
 
 
 @router.patch("/orders/{order_id}", response_model=FleetStateUpdateRead)
@@ -269,6 +358,74 @@ def update_robot_state(
     return {"status": "ok"}
 
 
+@router.post("/orders/{order_id}/assign-pickup-slot", response_model=FleetPickupSlotAssignmentRead)
+def assign_pickup_slot(
+    order_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    order = db.get(Order, order_id)
+
+    if not order:
+        raise HTTPException(status_code=404, detail="order not found")
+
+    if order.status == "COMPLETED":
+        raise HTTPException(status_code=409, detail="completed order cannot be assigned a pickup slot")
+
+    if order.pickup_slot_id is not None:
+        pickup_slot = db.get(PickupSlot, order.pickup_slot_id)
+
+        if not pickup_slot:
+            raise HTTPException(status_code=404, detail="pickup slot not found")
+
+        if pickup_slot.status == "BLOCKED":
+            raise HTTPException(status_code=409, detail="assigned pickup slot is blocked")
+
+        if pickup_slot.status == "EMPTY":
+            pickup_slot.status = "RESERVED"
+            db.commit()
+            background_tasks.add_task(broadcast_all_status)
+
+        return build_pickup_slot_assignment_response(order, pickup_slot)
+
+    pickup_slot = (
+        db.query(PickupSlot)
+        .filter(PickupSlot.status == "EMPTY")
+        .order_by(PickupSlot.slot_id)
+        .with_for_update(skip_locked=True)
+        .first()
+    )
+
+    if not pickup_slot:
+        raise HTTPException(status_code=409, detail="empty pickup slot not found")
+
+    pickup_slot.status = "RESERVED"
+    order.pickup_slot_id = pickup_slot.slot_id
+
+    db.commit()
+    db.refresh(order)
+    db.refresh(pickup_slot)
+    background_tasks.add_task(broadcast_all_status)
+    return build_pickup_slot_assignment_response(order, pickup_slot)
+
+
+@router.get("/pickup-slots", response_model=list[FleetPickupSlotRead])
+def list_pickup_slots(
+    status: PickupSlotStatus | None = None,
+    db: Session = Depends(get_db),
+):
+    slot_query = db.query(PickupSlot)
+
+    if status is not None:
+        slot_query = slot_query.filter(PickupSlot.status == status)
+
+    pickup_slots = slot_query.order_by(PickupSlot.slot_id).all()
+    return [
+        build_pickup_slot_response(db, pickup_slot)
+        for pickup_slot in pickup_slots
+    ]
+
+
 @router.patch("/pickup-slots/{slot_id}", response_model=FleetStateUpdateRead)
 def update_pickup_slot_state(
     slot_id: int,
@@ -321,4 +478,3 @@ def create_exception_report(
         "status": "ok",
         "exception_id": exception.exception_id,
     }
-

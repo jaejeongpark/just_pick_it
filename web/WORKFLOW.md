@@ -230,13 +230,14 @@ Admin UI
   Robots: AMR1 / 배송 task 진행 중
 ```
 
-### 3. Fleet Manager가 운반 완료 후 상태 업데이트
+### 3. Fleet Manager가 운반 완료 후 검수 시작
 
 호출:
 
 ```text
 PATCH /api/fleet/tasks/102      {"status":"SUCCESS"}
 PATCH /api/fleet/robots/AMR1    {"status":"IDLE"}
+POST  /api/fleet/orders/7/assign-pickup-slot
 PATCH /api/fleet/tasks/103      {"status":"RUNNING","assigned_robot_id":"COBOT2"}
 PATCH /api/fleet/robots/COBOT2  {"status":"INSPECTING","current_task_id":103}
 PATCH /api/fleet/orders/7       {"status":"INSPECTING"}
@@ -255,6 +256,11 @@ task
 robot
   AMR1.status: DELIVERING -> IDLE
   COBOT2.status: IDLE -> INSPECTING
+
+pickup_slot
+  첫 번째 EMPTY 슬롯 선택
+  status: EMPTY -> RESERVED
+  orders.pickup_slot_id에 slot_id 저장
 ```
 
 화면:
@@ -267,17 +273,16 @@ Admin UI
   Robots: COBOT2 / 검수 task 진행 중
 ```
 
-### 4. Fleet Manager가 검수 완료 후 상태 업데이트
+### 4. Fleet Manager가 검수 완료 후 하차 시작
 
 호출:
 
 ```text
 PATCH /api/fleet/tasks/103           {"status":"SUCCESS"}
 PATCH /api/fleet/robots/COBOT2       {"status":"IDLE"}
-PATCH /api/fleet/pickup-slots/1      {"status":"RESERVED"}
 PATCH /api/fleet/tasks/104           {"status":"RUNNING","assigned_robot_id":"AMR1"}
 PATCH /api/fleet/robots/AMR1         {"status":"UNLOADING","current_task_id":104}
-PATCH /api/fleet/orders/7            {"status":"DELIVERING","pickup_slot_id":1}
+PATCH /api/fleet/orders/7            {"status":"DELIVERING"}
 ```
 
 DB 변화:
@@ -297,11 +302,6 @@ robot
   COBOT2.status: INSPECTING -> IDLE
   AMR1.status: IDLE -> UNLOADING
   AMR1.current_task_id: UNLOAD task id
-
-pickup_slot
-  첫 번째 EMPTY 슬롯 선택
-  status: EMPTY -> RESERVED
-  orders.pickup_slot_id에 slot_id 저장
 ```
 
 화면:
@@ -499,15 +499,23 @@ BLOCKED
 Control Server는 Fleet Manager가 보낸 상태를 검증한 뒤 DB에 반영하고 UI에 보여줍니다.
 
 ```text
+GET   /api/fleet/tasks
 POST  /api/fleet/tasks
+GET   /api/fleet/orders/{order_id}/tasks
 PATCH /api/fleet/orders/{order_id}
+POST  /api/fleet/orders/{order_id}/assign-pickup-slot
 PATCH /api/fleet/tasks/{task_id}
 POST  /api/fleet/tasks/{task_id}/events
 GET   /api/fleet/tasks/{task_id}/events
 PATCH /api/fleet/robots/{robot_id}
+GET   /api/fleet/pickup-slots
 PATCH /api/fleet/pickup-slots/{slot_id}
 POST  /api/fleet/exceptions
 ```
+
+조회 API는 각 로봇 담당 노드나 Control Bridge가 현재 DB 기준 task queue/pickup slot 상태를 확인할 때 사용합니다.
+픽업 슬롯은 `assign-pickup-slot` API로 Control Server가 예약까지 한 번에 처리합니다.
+상태 판단과 다음 동작 결정은 외부 로봇/Fleet 쪽에서 하고, Control Server는 API로 받은 결과를 저장하는 역할로 둡니다.
 
 예시:
 
@@ -629,7 +637,7 @@ Exception History로 이동
 
 ```text
 1. 주문 접수 시점에는 픽업 칸을 배정하지 않는다.
-2. 검수 성공 후, 하차 작업 시작 직전에 픽업 칸을 배정한다.
+2. 검수 시작 시점에 픽업 칸을 배정한다.
 3. EMPTY 슬롯 중 낮은 번호를 선택하고 RESERVED로 변경한다.
 4. orders.pickup_slot_id에 선택한 slot_id를 저장한다.
 5. 하차 완료 시 pickup_slot.status를 OCCUPIED로 변경한다.
