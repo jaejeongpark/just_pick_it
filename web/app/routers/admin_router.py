@@ -15,7 +15,13 @@ from app.schemas import (
     ProductStockUpdate,
     ProductUpdate,
 )
-from app.services.demo_workflow import advance_order_workflow
+from app.services.demo_workflow import (
+    DEMO_ESTIMATED_DURATION_SECONDS,
+    DEMO_STEP_DELAY_SECONDS,
+    demo_run_is_active,
+    reserve_demo_run,
+    run_demo_order_sequence,
+)
 from app.services.llm_client import build_llm_message
 from app.services.realtime import admin_websockets, broadcast_all_status, get_admin_snapshot
 
@@ -234,21 +240,42 @@ def resume_system(
     return {"status": "ok"}
 
 
-@router.post("/orders/{order_id}/advance")
-def advance_order(
-    order_id: int,
+@router.post("/demo/run-order")
+def run_order_demo(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    order = db.get(Order, order_id)
+    if demo_run_is_active():
+        raise HTTPException(status_code=409, detail="demo is already running")
 
-    if not order:
-        raise HTTPException(status_code=404, detail="order not found")
+    has_available_product = (
+        db.query(Product.product_id)
+        .filter(Product.stock_qty > 0)
+        .first()
+        is not None
+    )
+    has_empty_pickup_slot = (
+        db.query(PickupSlot.slot_id)
+        .filter(PickupSlot.status.in_(("EMPTY", "RESERVED")))
+        .first()
+        is not None
+    )
 
-    advance_order_workflow(db, order)
-    db.commit()
-    background_tasks.add_task(broadcast_all_status)
-    return {"status": "ok"}
+    if not has_available_product:
+        raise HTTPException(status_code=400, detail="no product stock available")
+
+    if not has_empty_pickup_slot:
+        raise HTTPException(status_code=400, detail="no empty pickup slot available")
+
+    if not reserve_demo_run():
+        raise HTTPException(status_code=409, detail="demo is already running")
+
+    background_tasks.add_task(run_demo_order_sequence, DEMO_STEP_DELAY_SECONDS)
+    return {
+        "status": "started",
+        "step_delay_seconds": DEMO_STEP_DELAY_SECONDS,
+        "estimated_duration_seconds": DEMO_ESTIMATED_DURATION_SECONDS,
+    }
 
 
 @router.post("/products", response_model=ProductRead, status_code=201)

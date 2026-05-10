@@ -1476,6 +1476,32 @@ body {
   background: rgba(20, 184, 166, 0.08);
 }
 
+.demo-run-button {
+  min-height: 42px;
+  border: 1px solid rgba(245, 158, 11, 0.56);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(245, 158, 11, 0.22), rgba(15, 23, 42, 0.88));
+  color: #fde68a;
+  font: inherit;
+  font-weight: 900;
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease, transform 0.2s ease;
+}
+
+.demo-run-button:hover {
+  border-color: rgba(251, 191, 36, 0.88);
+  background:
+    linear-gradient(135deg, rgba(245, 158, 11, 0.34), rgba(15, 23, 42, 0.9));
+  transform: translateY(-1px);
+}
+
+.demo-run-button:disabled {
+  cursor: wait;
+  opacity: 0.68;
+  transform: none;
+}
+
 .admin-console .summary-strip {
   width: 100%;
   margin: 0 0 16px;

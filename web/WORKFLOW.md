@@ -59,6 +59,41 @@ Control Server API
 
 `psql` 등으로 DB를 직접 수정하는 것은 개발/복구 전용입니다. 이 경우 WebSocket broadcast가 자동으로 발생하지 않으므로 새로고침이 필요할 수 있습니다.
 
+## 외부 시스템 연동 원칙
+
+Fleet Manager, Control Bridge, Vision Server, LLM Server는 DB에 직접 접근하지 않습니다.
+
+```text
+외부 시스템
+  -> Control Server API 호출
+      -> Control Server가 DB 변경
+          -> WebSocket으로 Admin/Customer UI 갱신
+```
+
+역할 기준:
+
+```text
+Fleet Manager
+  - task queue 판단
+  - AMR/COBOT 배정
+  - 주문/작업/로봇/픽업슬롯 상태 전이 결정
+  - 결정 결과를 /api/fleet/* 로 보고
+
+Vision Server
+  - 인식/검수/감지 결과 생성
+  - 단순 예외 알림은 /api/fleet/exceptions 로 보고 가능
+  - 작업 성공/실패 판단이 필요한 결과는 Fleet Manager가 받아서 task/order 상태로 보고
+
+LLM Server
+  - 자연어 명령을 구조화
+  - Control Server가 LLM 응답을 받아 Admin UI에 표시하거나 Fleet에서 사용할 명령 형태로 전달
+
+Control Server
+  - 외부 시스템이 보낸 결과를 저장
+  - DB 변경 후 WebSocket broadcast
+  - Fleet의 판단을 대신하지 않음
+```
+
 ## 정상 주문 시나리오
 
 예시 주문: `ORD-0007`
@@ -69,9 +104,16 @@ Control Server API
 
 ```text
 COBOT1 : 상품 선별
-AMR1   : 상품 운반
+AMR1   : 상품 운반 + 픽업 슬롯 하차
 COBOT2 : 상품 검수
-AMR2   : 픽업 슬롯 하차
+```
+
+AMR 배정 원칙:
+
+```text
+주문 1건당 AMR 1대를 배정한다.
+같은 주문의 DELIVERY task와 UNLOAD task는 같은 AMR이 담당한다.
+다른 주문은 Fleet Manager 판단에 따라 다른 AMR을 배정할 수 있다.
 ```
 
 ### 1. 고객이 주문하기 클릭
@@ -123,7 +165,7 @@ task
   SORTING    : RUNNING, assigned_robot_id=COBOT1
   DELIVERY   : QUEUED,  assigned_robot_id=AMR1
   INSPECTION : QUEUED,  assigned_robot_id=COBOT2
-  UNLOAD     : QUEUED,  assigned_robot_id=AMR2
+  UNLOAD     : QUEUED,  assigned_robot_id=AMR1
 
 robot
   COBOT1.status: IDLE -> SORTING
@@ -233,8 +275,8 @@ Admin UI
 PATCH /api/fleet/tasks/103           {"status":"SUCCESS"}
 PATCH /api/fleet/robots/COBOT2       {"status":"IDLE"}
 PATCH /api/fleet/pickup-slots/1      {"status":"RESERVED"}
-PATCH /api/fleet/tasks/104           {"status":"RUNNING","assigned_robot_id":"AMR2"}
-PATCH /api/fleet/robots/AMR2         {"status":"UNLOADING","current_task_id":104}
+PATCH /api/fleet/tasks/104           {"status":"RUNNING","assigned_robot_id":"AMR1"}
+PATCH /api/fleet/robots/AMR1         {"status":"UNLOADING","current_task_id":104}
 PATCH /api/fleet/orders/7            {"status":"DELIVERING","pickup_slot_id":1}
 ```
 
@@ -253,7 +295,8 @@ task
 
 robot
   COBOT2.status: INSPECTING -> IDLE
-  AMR2.status: IDLE -> UNLOADING
+  AMR1.status: IDLE -> UNLOADING
+  AMR1.current_task_id: UNLOAD task id
 
 pickup_slot
   첫 번째 EMPTY 슬롯 선택
@@ -278,7 +321,7 @@ Admin UI
 
 ```text
 PATCH /api/fleet/tasks/104       {"status":"SUCCESS"}
-PATCH /api/fleet/robots/AMR2     {"status":"IDLE","current_task_id":null}
+PATCH /api/fleet/robots/AMR1     {"status":"IDLE","current_task_id":null}
 PATCH /api/fleet/pickup-slots/1  {"status":"OCCUPIED"}
 PATCH /api/fleet/orders/7        {"status":"PICKUP_READY"}
 ```
@@ -293,8 +336,8 @@ task
   UNLOAD: RUNNING -> SUCCESS
 
 robot
-  AMR2.status: UNLOADING -> IDLE
-  AMR2.current_task_id: null
+  AMR1.status: UNLOADING -> IDLE
+  AMR1.current_task_id: null
 
 pickup_slot
   status: RESERVED -> OCCUPIED

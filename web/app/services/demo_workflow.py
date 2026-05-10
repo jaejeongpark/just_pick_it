@@ -1,8 +1,12 @@
+import asyncio
+import random
 from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
-from app.models import ExceptionLog, Order, OrderItem, PickupSlot, Robot, Task
+from app.database import SessionLocal
+from app.models import ExceptionLog, Order, OrderItem, PickupSlot, Product, Robot, Task
+from app.services.realtime import broadcast_all_status
 
 
 # Fleet Manager가 붙기 전 UI 시연을 위한 demo helper다.
@@ -11,7 +15,7 @@ TASK_ROBOT_ID = {
     "SORTING": "COBOT1",
     "DELIVERY": "AMR1",
     "INSPECTION": "COBOT2",
-    "UNLOAD": "AMR2",
+    "UNLOAD": "AMR1",
 }
 
 TASK_ROBOT_PREFIX = {
@@ -36,6 +40,171 @@ ROBOT_STATUS_BY_TASK = {
 }
 
 FINAL_TASK_STATUSES = ("SUCCESS", "FAILED", "CANCELLED")
+DEMO_STEP_DELAY_SECONDS = 2
+DEMO_MAX_ADVANCE_STEPS = 8
+DEMO_ESTIMATED_DURATION_SECONDS = DEMO_STEP_DELAY_SECONDS * 6
+_demo_run_reserved = False
+
+
+def demo_run_is_active() -> bool:
+    return _demo_run_reserved
+
+
+def reserve_demo_run() -> bool:
+    global _demo_run_reserved
+
+    if _demo_run_reserved:
+        return False
+
+    _demo_run_reserved = True
+    return True
+
+
+def release_demo_run() -> None:
+    global _demo_run_reserved
+
+    _demo_run_reserved = False
+
+
+async def run_demo_order_sequence(
+    step_delay_seconds: int = DEMO_STEP_DELAY_SECONDS,
+) -> None:
+    try:
+        order_id = create_demo_order()
+        await broadcast_all_status()
+        await asyncio.sleep(step_delay_seconds)
+
+        for _ in range(DEMO_MAX_ADVANCE_STEPS):
+            if not advance_demo_order(order_id):
+                break
+
+            await broadcast_all_status()
+
+            if demo_order_is_pickup_ready(order_id):
+                break
+
+            await asyncio.sleep(step_delay_seconds)
+
+        await broadcast_all_status()
+    finally:
+        release_demo_run()
+
+
+def create_demo_order() -> int:
+    db = SessionLocal()
+
+    try:
+        prepare_demo_runtime_state(db)
+
+        products = (
+            db.query(Product)
+            .filter(Product.stock_qty > 0)
+            .order_by(Product.product_id)
+            .all()
+        )
+
+        if not products:
+            raise RuntimeError("no products available for demo order")
+
+        item_count = min(len(products), random.choice((1, 2)))
+        selected_products = random.sample(products, item_count)
+
+        order = Order(status="ORDER_RECEIVED", priority=1)
+        db.add(order)
+        db.flush()
+
+        order.order_no = f"ORD-{order.order_id:04d}"
+
+        for product in selected_products:
+            product.stock_qty -= 1
+            db.add(
+                OrderItem(
+                    order_id=order.order_id,
+                    product_id=product.product_id,
+                    quantity=1,
+                    status="WAITING",
+                )
+            )
+
+        order_id = order.order_id
+        db.commit()
+        return order_id
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def prepare_demo_runtime_state(db: Session) -> None:
+    # 데모 버튼은 현재 DB 상태와 무관하게 새 시나리오를 보여주기 위한 기능이다.
+    # 이전 테스트에서 남은 미완료 주문/task가 로봇을 잡고 있으면 새 주문이 ORDER_WAIT에 멈출 수 있다.
+    stale_orders = (
+        db.query(Order)
+        .filter(Order.status.notin_(("PICKUP_READY", "COMPLETED", "ERROR")))
+        .all()
+    )
+    stale_order_ids = [order.order_id for order in stale_orders]
+
+    for order in stale_orders:
+        order.status = "ERROR"
+
+    if stale_order_ids:
+        stale_tasks = (
+            db.query(Task)
+            .filter(Task.order_id.in_(stale_order_ids))
+            .all()
+        )
+
+        for task in stale_tasks:
+            if task.status not in FINAL_TASK_STATUSES:
+                task.status = "CANCELLED"
+            clear_robot_task(db, task)
+
+    robots = db.query(Robot).all()
+
+    for robot in robots:
+        if robot.status not in ("EMERGENCY_STOP", "ERROR", "OFFLINE"):
+            robot.status = "IDLE"
+            robot.current_task_id = None
+
+    pickup_slots = db.query(PickupSlot).filter(PickupSlot.status == "RESERVED").all()
+
+    for pickup_slot in pickup_slots:
+        pickup_slot.status = "EMPTY"
+
+
+def advance_demo_order(order_id: int) -> bool:
+    db = SessionLocal()
+
+    try:
+        order = db.get(Order, order_id)
+
+        if not order:
+            return False
+
+        if not order_tasks(db, order):
+            create_order_workflow(db, order)
+        else:
+            advance_order_workflow(db, order)
+
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def demo_order_is_pickup_ready(order_id: int) -> bool:
+    db = SessionLocal()
+
+    try:
+        order = db.get(Order, order_id)
+        return bool(order and order.status == "PICKUP_READY")
+    finally:
+        db.close()
 
 
 def create_order_workflow(db: Session, order: Order) -> None:
@@ -49,11 +218,18 @@ def create_order_workflow(db: Session, order: Order) -> None:
         start_next_task_for_order(db, order)
         return
 
+    order_amr_id = find_order_amr_id(db, order)
+
     for task_type in ("SORTING", "DELIVERY", "INSPECTION", "UNLOAD"):
+        assigned_robot_id = (
+            order_amr_id
+            if task_type in ("DELIVERY", "UNLOAD")
+            else find_robot_id(db, task_type)
+        )
         db.add(
             Task(
                 order_id=order.order_id,
-                assigned_robot_id=find_robot_id(db, task_type),
+                assigned_robot_id=assigned_robot_id,
                 task_type=task_type,
                 status="QUEUED",
             )
@@ -306,6 +482,22 @@ def find_robot_id(db: Session, task_type: str) -> str | None:
     )
 
     return fallback_robot.robot_id if fallback_robot else None
+
+
+def find_order_amr_id(db: Session, order: Order) -> str | None:
+    amrs = (
+        db.query(Robot)
+        .filter(Robot.robot_id.like("AMR%"))
+        .order_by(Robot.robot_id)
+        .all()
+    )
+
+    if not amrs:
+        return find_robot_id(db, "DELIVERY")
+
+    # 데모에서는 주문별 AMR을 고정해서 DELIVERY와 UNLOAD가 같은 AMR을 쓰게 한다.
+    index = (order.order_id - 1) % len(amrs)
+    return amrs[index].robot_id
 
 
 def robot_is_available(db: Session, robot: Robot) -> bool:
