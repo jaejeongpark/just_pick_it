@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Just Pick It Customer</title>
+    <link rel="stylesheet" href="/static/css/style.css?v=20260509-realtime">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Just Pick It</h1>
+        <p>고객 주문</p>
+      </div>
+      <nav class="topbar-actions" aria-label="Page navigation">
+        <a class="nav-link" href="/admin">Customer</a>
+      </nav>
+    </header>
+
+    <main class="page-shell">
+      <div class="customer-layout">
+        <section class="section-band">
+          <div class="section-heading">
+            <h2>상품 목록</h2>
+            <span id="product-count" class="status-pill">0개</span>
+          </div>
+          <div id="product-list" class="product-grid">
+            <p class="muted">상품을 불러오는 중입니다</p>
+          </div>
+        </section>
+
+        <aside class="side-stack">
+          <section class="section-band">
+            <div class="section-heading">
+              <h2>장바구니</h2>
+              <button id="clear-cart-button" class="ghost-button" type="button">비우기</button>
+            </div>
+            <div id="cart-list" class="cart-list">
+              <p class="muted">선택한 상품이 없습니다</p>
+            </div>
+            <button id="order-button" class="primary-button full-button" type="button" disabled>주문하기</button>
+          </section>
+        </aside>
+      </div>
+
+      <section class="order-status-section">
+        <div class="section-heading">
+          <h2>주문 상태</h2>
+          <span id="order-count-pill" class="status-pill">0건</span>
+        </div>
+        <div id="order-status-list" class="order-status-list">
+          <div class="empty-state">진행 중인 주문이 없습니다</div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/js/customer.js?v=20260509-realtime"></script>
+  </body>
+</html>

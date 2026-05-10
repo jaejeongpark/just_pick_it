@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+jinja2
+sqlalchemy
+psycopg2-binary
+python-dotenv
+pydantic
+websockets
+anthropic
+
+# ROS Python 패키지가 같은 venv에서 import될 때 필요한 기본 의존성입니다.
+setuptools
+pyyaml
+typeguard
