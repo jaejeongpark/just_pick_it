@@ -25,6 +25,7 @@ const taskList = document.querySelector("#task-list");
 const exceptionList = document.querySelector("#exception-list");
 const emergencyStopButton = document.querySelector("#emergency-stop-button");
 const resumeButton = document.querySelector("#resume-button");
+const demoRunButton = document.querySelector("#demo-run-button");
 const orderHistoryButton = document.querySelector("#order-history-button");
 const exceptionHistoryButton = document.querySelector("#exception-history-button");
 const robotManageButton = document.querySelector("#robot-manage-button");
@@ -322,10 +323,6 @@ function renderPickupSlotOptions(selectedSlotId) {
 }
 
 function renderOrderDetail(order) {
-  const advanceButton = canAdvanceOrder(order)
-    ? `<button class="small-action-button" type="button" data-advance-order="${order.order_id}">다음 단계</button>`
-    : "";
-
   return `
     <div class="modal-summary">
       <div>
@@ -355,7 +352,6 @@ function renderOrderDetail(order) {
       <button class="small-action-button" type="button" data-save-order-state="${order.order_id}">상태 저장</button>
       <button class="ghost-button danger-text-button" type="button" data-delete-order="${order.order_id}">주문 삭제</button>
     </div>
-    ${advanceButton ? `<div class="modal-actions">${advanceButton}</div>` : ""}
   `;
 }
 
@@ -621,10 +617,6 @@ function renderEmpty(target, text) {
   }
 
   target.innerHTML = `<div class="empty-state">${text}</div>`;
-}
-
-function canAdvanceOrder(order) {
-  return !["PICKUP_READY", "COMPLETED", "ERROR"].includes(order.status);
 }
 
 function findRobotTask(robot) {
@@ -2070,9 +2062,17 @@ async function updateRobotPanelState(robotId) {
   selectedRobotId = robotId;
 }
 
-async function advanceOrder(orderId) {
-  await postAdminAction(`/api/admin/orders/${orderId}/advance`);
-  openOrderDetail(orderId);
+async function runDemoOrder() {
+  const response = await fetch("/api/admin/demo/run-order", {
+    method: "POST",
+  });
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.detail || "failed to run demo");
+  }
+
+  return response.json();
 }
 
 async function updateProductStock(productId, stockQty) {
@@ -2342,6 +2342,27 @@ resumeButton?.addEventListener("click", async () => {
     await postAdminAction("/api/admin/resume");
   } finally {
     resumeButton.disabled = false;
+  }
+});
+
+demoRunButton?.addEventListener("click", async () => {
+  const originalText = demoRunButton.textContent;
+
+  demoRunButton.disabled = true;
+  demoRunButton.textContent = "데모 실행 중";
+
+  try {
+    const result = await runDemoOrder();
+    const releaseDelay = Number(result.estimated_duration_seconds || 12) * 1000;
+
+    window.setTimeout(() => {
+      demoRunButton.disabled = false;
+      demoRunButton.textContent = originalText;
+    }, releaseDelay);
+  } catch (error) {
+    alert(error.message);
+    demoRunButton.disabled = false;
+    demoRunButton.textContent = originalText;
   }
 });
 
@@ -2777,16 +2798,6 @@ modalBody?.addEventListener("click", (event) => {
     stockButton.disabled = true;
     updateProductStock(productId, stockQty).catch(() => {
       stockButton.disabled = false;
-    });
-    return;
-  }
-
-  const advanceButton = event.target.closest("button[data-advance-order]");
-
-  if (advanceButton) {
-    advanceButton.disabled = true;
-    advanceOrder(Number(advanceButton.dataset.advanceOrder)).catch(() => {
-      advanceButton.disabled = false;
     });
     return;
   }

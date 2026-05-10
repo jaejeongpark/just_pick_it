@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Just Pick It Admin</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260510-map-env-setup">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260510-demo-run">
   </head>
   <body class="admin-console" data-admin-page="{{ page }}">
     <div class="admin-app-shell">
@@ -24,6 +24,9 @@
           <a class="{{ 'active' if page == 'inventory' else '' }}" href="/admin/inventory">재고 관리</a>
         </nav>
         <div class="sidebar-footer">
+          {% if page == 'dashboard' %}
+          <button id="demo-run-button" class="demo-run-button" type="button">데모 실행</button>
+          {% endif %}
           <span id="socket-state" class="system-chip danger">offline</span>
           <a class="nav-link" href="/customer">Admin</a>
         </div>
@@ -519,6 +522,6 @@
       </section>
     </div>
 
-    <script src="/static/js/admin.js?v=20260510-map-env-setup"></script>
+    <script src="/static/js/admin.js?v=20260510-demo-run"></script>
   </body>
 </html>

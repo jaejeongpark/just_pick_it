@@ -9,12 +9,12 @@ INSERT INTO zone (zone_name, pos_x, pos_y, pos_z, pos_theta) VALUES
     ('PRODUCT_ZONE', 0.20, 0.80, 0.10, NULL);
 
 INSERT INTO product (name, image_url, stock_qty, storage_location) VALUES
-    ('Test Cola', '/static/images/test-cola.png', 4, 'PRODUCT_ZONE'),
-    ('Test Snack', '/static/images/test-snack.png', 4, 'PRODUCT_ZONE'),
-    ('Test Water', '/static/images/test-water.png', 4, 'PRODUCT_ZONE'),
-    ('Test Candy', '/static/images/test-candy.png', 4, 'PRODUCT_ZONE'),
-    ('Test Juice', '/static/images/test-juice.png', 4, 'PRODUCT_ZONE'),
-    ('Test Cookie', '/static/images/test-cookie.png', 4, 'PRODUCT_ZONE');
+    ('Test Cola', '/static/images/test-cola.png', 5, 'PRODUCT_ZONE'),
+    ('Test Snack', '/static/images/test-snack.png', 5, 'PRODUCT_ZONE'),
+    ('Test Water', '/static/images/test-water.png', 5, 'PRODUCT_ZONE'),
+    ('Test Candy', '/static/images/test-candy.png', 5, 'PRODUCT_ZONE'),
+    ('Test Juice', '/static/images/test-juice.png', 5, 'PRODUCT_ZONE'),
+    ('Test Cookie', '/static/images/test-cookie.png', 5, 'PRODUCT_ZONE');
 
 INSERT INTO pickup_slot (slot_name, status) VALUES
     ('Pickup_slot_1', 'EMPTY'),

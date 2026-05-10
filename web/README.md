@@ -33,6 +33,7 @@ web/scripts/run.sh
 ```text
 Customer UI : http://localhost:8000/customer
 Admin UI    : http://localhost:8000/admin
+API Docs    : http://localhost:8000/docs
 DB Health   : http://localhost:8000/api/health/db
 ```
 
@@ -63,22 +64,35 @@ cd ~/autonomous_sys_ws
 web/scripts/reset_demo_data.sh
 ```
 
+초기화 후 상품은 테스트 상품 6종이 각 5개씩 들어갑니다.
+
 브라우저:
 
 ```text
 Customer UI : http://localhost:8000/customer
 Admin UI    : http://localhost:8000/admin
+API Docs    : http://localhost:8000/docs
 DB Health   : http://localhost:8000/api/health/db
 ```
 
-DB를 데모 seed 기준으로 다시 만들고 싶으면:
+자동 데모 실행:
+
+```text
+1. Admin UI 접속
+2. 왼쪽 하단 데모 실행 버튼 클릭
+3. 랜덤 상품 주문 생성
+4. 2초 간격으로 주문 접수 -> task 생성 -> 선별 -> 배송 -> 검수 -> 픽업 준비 상태 전환
+5. Admin/Customer UI는 WebSocket으로 자동 갱신
+```
+
+DB 구조까지 다시 만들고 싶으면:
 
 ```bash
 cd ~/autonomous_sys_ws
 RESET_DB=1 web/scripts/setup.sh
 ```
 
-이미 DB가 세팅된 상태에서 시연 데이터를 깨끗하게 되돌리고 싶으면:
+이미 DB 구조가 세팅된 상태에서 시연 데이터만 seed 기준으로 초기화하고 싶으면:
 
 ```bash
 cd ~/autonomous_sys_ws
@@ -111,6 +125,7 @@ web/scripts/reset_demo_data.sh
 - Vision/Fleet 예외 보고 API
 - exception 처리 완료
 - 긴급정지 / 재개
+- 대시보드 데모 실행 버튼으로 주문 생성부터 픽업 준비까지 자동 상태 전환
 ```
 
 웹 쪽에서 아직 실제 외부 시스템과 연결하지 않은 것:
@@ -195,7 +210,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 이미 DB schema가 있으면 schema/seed 적용은 건너뜁니다.  
-DB를 완전히 다시 만들고 싶으면 `RESET_DB=1 web/scripts/setup.sh`를 사용합니다.
+테이블 구조, enum, index까지 다시 만들고 싶으면 `RESET_DB=1 web/scripts/setup.sh`를 사용합니다.
 기본 로컬 DB(`just_pick_it_user` / `just_pick_it`) 기준으로 DB/user를 만들고, `web/.env`의 `DATABASE_URL`로 schema/seed를 적용합니다.
 스크립트 내부에 각 단계별 한글 주석을 달아두었으므로, 동작이 궁금하면 파일을 직접 열어 확인합니다.
 
@@ -206,7 +221,7 @@ DB를 완전히 다시 만들고 싶으면 `RESET_DB=1 web/scripts/setup.sh`를 
 
 ### `web/scripts/reset_demo_data.sh`
 
-시연 전/후에 DB 데이터를 seed 기준으로 되돌립니다.
+시연 전/후에 DB 구조는 유지하고 데이터만 seed 기준으로 되돌립니다.
 
 ```text
 - task_event, exception_log, task 삭제
@@ -225,13 +240,51 @@ DB를 완전히 다시 만들고 싶으면 `RESET_DB=1 web/scripts/setup.sh`를 
 - 주문 없음
 - 작업 없음
 - 예외 없음
-- 상품은 db/seed.sql 기준 테스트 상품으로 복구
+- 상품은 db/seed.sql 기준 테스트 상품 6종, 각 5개로 복구
 - 로봇은 db/seed.sql 기준 AMR/COBOT 테스트 데이터로 복구
 - 픽업 슬롯은 db/seed.sql 기준으로 복구
 - product_id, order_id, task_id 등 PK 번호는 다시 1번부터 시작
 ```
 
 주의: 기존에 직접 추가한 상품/주문/task도 모두 사라집니다.
+
+`RESET_DB=1 web/scripts/setup.sh`와의 차이:
+
+```text
+RESET_DB=1 web/scripts/setup.sh
+  - DB schema를 삭제 후 재생성
+  - schema.sql과 seed.sql 재적용
+  - 테이블 구조나 enum이 바뀌었을 때 사용
+
+web/scripts/reset_demo_data.sh
+  - 기존 DB schema는 유지
+  - 테이블 데이터만 비운 뒤 seed.sql 재적용
+  - 시연 전 데이터를 깨끗하게 만들 때 사용
+```
+
+## 자동 데모 실행
+
+관리자 대시보드 왼쪽 하단의 `데모 실행` 버튼은 Fleet Manager 없이 화면 흐름을 빠르게 확인하기 위한 시연용 기능입니다.
+
+```text
+POST /api/admin/demo/run-order
+```
+
+동작:
+
+```text
+- 이전 테스트에서 남은 미완료 주문/task는 데모 진행을 막지 않도록 정리
+- 재고가 남은 상품 중 1~2종 랜덤 선택
+- 새 주문 생성
+- 선택 상품 재고 1개씩 차감
+- SORTING / DELIVERY / INSPECTION / UNLOAD task 생성
+- 주문 1건당 AMR 1대 배정
+- DELIVERY와 UNLOAD는 같은 AMR 사용
+- 2초 간격으로 task/order/robot/pickup_slot 상태 자동 전환
+- PICKUP_READY가 되면 고객 UI에 픽업 가능 상태 표시
+```
+
+실제 로봇 연동에서는 이 버튼 대신 Fleet Manager / Control Bridge가 `/api/fleet/*` API로 상태를 보고합니다.
 
 ## Environment
 
