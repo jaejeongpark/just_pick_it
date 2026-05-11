@@ -744,6 +744,7 @@ body {
 
 .status-assigned,
 .status-waiting,
+.status-standby,
 .status-parking {
   background: #eaf5ff;
   color: var(--blue);
@@ -2946,6 +2947,7 @@ body {
 
 .admin-console .status-assigned,
 .admin-console .status-waiting,
+.admin-console .status-standby,
 .admin-console .status-parking {
   border-color: rgba(96, 165, 250, 0.28);
   background: #172f57;
@@ -4726,7 +4728,7 @@ body {
 .dashboard-grid .warehouse-map .map-robot-legend {
   position: absolute;
   top: 50%;
-  right: clamp(24px, 4vw, 72px);
+  right: clamp(8px, 1.4vw, 24px);
   transform: translateY(-50%);
   width: 112px;
   margin: 0;

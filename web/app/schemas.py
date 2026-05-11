@@ -96,6 +96,7 @@ RobotStatus = Literal[
     "IDLE",
     "MOVING",
     "WAITING",
+    "STANDBY",
     "SORTING",
     "DELIVERING",
     "INSPECTING",
@@ -117,6 +118,8 @@ PickupSlotStatus = Literal[
 ]
 
 TaskType = Literal[
+    "STANDBY_LOAD",
+    "STANDBY_UNLOAD",
     "SORTING",
     "DELIVERY",
     "INSPECTION",

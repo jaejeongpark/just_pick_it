@@ -5,44 +5,61 @@ from datetime import UTC, datetime
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
-from app.models import ExceptionLog, Order, OrderItem, PickupSlot, Product, Robot, Task
+from app.models import ExceptionLog, Order, OrderItem, PickupSlot, Product, Robot, Task, TaskEvent
 from app.services.realtime import broadcast_all_status
 
 
 # Fleet Manager가 붙기 전 UI 시연을 위한 demo helper다.
 # 실제 운영에서는 Fleet Manager가 상태를 판단하고 Control Server는 그 상태를 DB에 반영한다.
+ORDER_TASK_TYPES = (
+    "STANDBY_LOAD",
+    "SORTING",
+    "DELIVERY",
+    "STANDBY_UNLOAD",
+    "INSPECTION",
+    "UNLOAD",
+)
+
 TASK_ROBOT_ID = {
+    "STANDBY_LOAD": "AMR1",
     "SORTING": "COBOT1",
     "DELIVERY": "AMR1",
+    "STANDBY_UNLOAD": "AMR1",
     "INSPECTION": "COBOT2",
-    "UNLOAD": "AMR1",
+    "UNLOAD": "COBOT2",
 }
 
 TASK_ROBOT_PREFIX = {
+    "STANDBY_LOAD": "AMR",
     "SORTING": "COBOT",
     "DELIVERY": "AMR",
+    "STANDBY_UNLOAD": "AMR",
     "INSPECTION": "COBOT",
-    "UNLOAD": "AMR",
+    "UNLOAD": "COBOT",
 }
 
 ORDER_STATUS_BY_TASK = {
+    "STANDBY_LOAD": "ORDER_WAIT",
     "SORTING": "SORTING",
     "DELIVERY": "DELIVERING",
+    "STANDBY_UNLOAD": "DELIVERING",
     "INSPECTION": "INSPECTING",
     "UNLOAD": "DELIVERING",
 }
 
 ROBOT_STATUS_BY_TASK = {
+    "STANDBY_LOAD": "STANDBY",
     "SORTING": "SORTING",
     "DELIVERY": "DELIVERING",
+    "STANDBY_UNLOAD": "STANDBY",
     "INSPECTION": "INSPECTING",
     "UNLOAD": "UNLOADING",
 }
 
 FINAL_TASK_STATUSES = ("SUCCESS", "FAILED", "CANCELLED")
 DEMO_STEP_DELAY_SECONDS = 2
-DEMO_MAX_ADVANCE_STEPS = 8
-DEMO_ESTIMATED_DURATION_SECONDS = DEMO_STEP_DELAY_SECONDS * 6
+DEMO_MAX_ADVANCE_STEPS = 10
+DEMO_ESTIMATED_DURATION_SECONDS = DEMO_STEP_DELAY_SECONDS * 8
 _demo_run_reserved = False
 
 
@@ -158,6 +175,13 @@ def prepare_demo_runtime_state(db: Session) -> None:
 
         for task in stale_tasks:
             if task.status not in FINAL_TASK_STATUSES:
+                record_task_event(
+                    db,
+                    task,
+                    "CANCELLED",
+                    "DEMO_STALE_TASK_CANCELLED",
+                    "Demo run cleaned stale task.",
+                )
                 task.status = "CANCELLED"
             clear_robot_task(db, task)
 
@@ -220,10 +244,10 @@ def create_order_workflow(db: Session, order: Order) -> None:
 
     order_amr_id = find_order_amr_id(db, order)
 
-    for task_type in ("SORTING", "DELIVERY", "INSPECTION", "UNLOAD"):
+    for task_type in ORDER_TASK_TYPES:
         assigned_robot_id = (
             order_amr_id
-            if task_type in ("DELIVERY", "UNLOAD")
+            if task_type in ("STANDBY_LOAD", "DELIVERY", "STANDBY_UNLOAD")
             else find_robot_id(db, task_type)
         )
         db.add(
@@ -271,6 +295,7 @@ def complete_order_workflow(db: Session, order: Order) -> None:
 
     for task in order_tasks(db, order):
         if task.status not in FINAL_TASK_STATUSES:
+            record_task_event(db, task, "SUCCESS", "ORDER_COMPLETED")
             task.status = "SUCCESS"
         clear_robot_task(db, task)
 
@@ -288,6 +313,7 @@ def fail_order_workflow(
     task = db.get(Task, task_id) if task_id else current_order_task(db, order)
 
     if task:
+        record_task_event(db, task, "FAILED", "ORDER_FAILED", detail)
         task.status = "FAILED"
         clear_robot_task(db, task)
 
@@ -355,6 +381,7 @@ def start_next_task_for_order(db: Session, order: Order) -> None:
         return
 
     if next_task.task_type not in ORDER_STATUS_BY_TASK:
+        record_task_event(db, next_task, "ASSIGNED", "TASK_ASSIGNED")
         next_task.status = "ASSIGNED"
         order.status = "ORDER_WAIT"
         return
@@ -362,13 +389,15 @@ def start_next_task_for_order(db: Session, order: Order) -> None:
     robot = db.get(Robot, next_task.assigned_robot_id) if next_task.assigned_robot_id else None
 
     if not robot or not robot_is_available(db, robot):
+        record_task_event(db, next_task, "ASSIGNED", "TASK_ASSIGNED")
         next_task.status = "ASSIGNED"
         order.status = "ORDER_WAIT"
         return
 
-    if next_task.task_type == "UNLOAD":
+    if next_task.task_type == "INSPECTION":
         reserve_pickup_slot(db, order)
 
+    record_task_event(db, next_task, "RUNNING", f"{next_task.task_type}_STARTED")
     next_task.status = "RUNNING"
     robot.current_task_id = next_task.task_id
     robot.status = ROBOT_STATUS_BY_TASK[next_task.task_type]
@@ -376,6 +405,7 @@ def start_next_task_for_order(db: Session, order: Order) -> None:
 
 
 def finish_task(db: Session, order: Order, task: Task) -> None:
+    record_task_event(db, task, "SUCCESS", f"{task.task_type}_DONE")
     task.status = "SUCCESS"
     clear_robot_task(db, task)
 
@@ -433,6 +463,26 @@ def update_order_items(db: Session, order: Order, status: str) -> None:
 
     for item in items:
         item.status = status
+
+
+def record_task_event(
+    db: Session,
+    task: Task,
+    to_status: str,
+    event_name: str,
+    reason: str | None = None,
+) -> None:
+    db.add(
+        TaskEvent(
+            task_id=task.task_id,
+            robot_id=task.assigned_robot_id,
+            from_status=task.status,
+            to_status=to_status,
+            event_name=event_name,
+            reason=reason,
+            created_at=datetime.now(UTC),
+        )
+    )
 
 
 def current_order_task(db: Session, order: Order) -> Task | None:

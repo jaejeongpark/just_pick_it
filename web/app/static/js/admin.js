@@ -77,8 +77,10 @@ const TASK_STATUSES = [
   "CANCELLED",
 ];
 const TASK_TYPES = [
+  "STANDBY_LOAD",
   "SORTING",
   "DELIVERY",
+  "STANDBY_UNLOAD",
   "INSPECTION",
   "UNLOAD",
   "PATROL",
@@ -86,14 +88,18 @@ const TASK_TYPES = [
   "RETURN_HOME",
 ];
 const ORDER_TASK_PIPELINE = [
+  "STANDBY_LOAD",
   "SORTING",
   "DELIVERY",
+  "STANDBY_UNLOAD",
   "INSPECTION",
   "UNLOAD",
 ];
 const DEFAULT_TASK_ROBOT = {
+  STANDBY_LOAD: "AMR",
   SORTING: "COBOT1",
   DELIVERY: "AMR",
+  STANDBY_UNLOAD: "AMR",
   INSPECTION: "COBOT2",
   UNLOAD: "AMR",
 };
@@ -101,6 +107,7 @@ const ROBOT_STATUSES = [
   "IDLE",
   "MOVING",
   "WAITING",
+  "STANDBY",
   "SORTING",
   "DELIVERING",
   "INSPECTING",
@@ -123,6 +130,8 @@ const PICKUP_SLOT_STATUSES = [
 const statusText = {
   ORDER_RECEIVED: "주문 접수",
   ORDER_WAIT: "주문 대기",
+  STANDBY_LOAD: "상차 대기",
+  STANDBY_UNLOAD: "하차 대기",
   SORTING: "선별 중",
   DELIVERY: "배송",
   INSPECTION: "검수",
@@ -138,6 +147,7 @@ const statusText = {
   IDLE: "대기",
   MOVING: "이동",
   WAITING: "대기",
+  STANDBY: "상하차 대기",
   UNLOADING: "하차",
   PATROLLING: "순찰",
   CHARGING: "충전",
@@ -420,11 +430,11 @@ function expectedTaskStatus(orderStatus, taskType) {
   const orderStage = {
     ORDER_RECEIVED: -1,
     ORDER_WAIT: -1,
-    SORTING: 0,
-    DELIVERING: 1,
-    INSPECTING: 2,
-    PICKUP_READY: 4,
-    COMPLETED: 4,
+    SORTING: 1,
+    DELIVERING: 2,
+    INSPECTING: 4,
+    PICKUP_READY: 6,
+    COMPLETED: 6,
     ERROR: -1,
   };
   const currentStage = orderStage[orderStatus] ?? -1;
@@ -672,7 +682,7 @@ function robotCategory(robot) {
     return "error";
   }
 
-  if (["IDLE", "WAITING", "PARKING", "RETURNING", "CHARGING"].includes(robot.status)) {
+  if (["IDLE", "WAITING", "STANDBY", "PARKING", "RETURNING", "CHARGING"].includes(robot.status)) {
     return "idle";
   }
 

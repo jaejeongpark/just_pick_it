@@ -1,11 +1,11 @@
 # Just Pick It API 사용 가이드
 
-이 문서는 웹/DB를 잘 모르는 팀원이 Swagger를 열지 않아도 로봇 노드, Fleet/Bridge, Vision, LLM 연동 API를 바로 사용할 수 있게 정리한 기준입니다.
+이 문서는 웹/DB를 잘 모르는 팀원이 Swagger를 열지 않아도 각 Robot Control Node, Vision, LLM 연동 API를 바로 사용할 수 있게 정리한 기준입니다.
 
 ## 기본 원칙
 
 ```text
-로봇/Fleet/Vision/LLM은 DB에 직접 접근하지 않는다.
+로봇 담당 노드/Vision/LLM은 DB에 직접 접근하지 않는다.
 상태 변경은 Control Server API를 호출한다.
 Control Server는 DB에 저장한 뒤 Admin/Customer UI로 WebSocket 갱신을 보낸다.
 ```
@@ -18,21 +18,24 @@ Customer UI
       -> DB 저장
       -> Admin/Customer UI 갱신
 
-Robot / Fleet / Bridge / Vision
+Robot Control Node / Vision / LLM
   -> Control Server API 호출
       -> DB 저장
       -> Admin/Customer UI 갱신
 ```
+
+`/api/fleet/*` 경로명은 기존 구현 호환을 위해 유지합니다.  
+현재 프로젝트 방향에서는 Fleet Manager 전용 API가 아니라 **각 로봇 담당 노드가 task/robot/order 상태를 보고하는 runtime API**로 사용합니다.
 
 ## Control Server가 담당하는 기능
 
 | 기능 | 설명 |
 |---|---|
 | DB 접근 | 주문, 상품, task, robot, pickup slot, exception을 PostgreSQL에 저장 |
-| 상태 변경 API | 외부 로봇/Fleet/Bridge가 보낸 상태를 검증하고 DB에 반영 |
+| 상태 변경 API | 외부 Robot Control Node/Vision/LLM이 보낸 상태를 검증하고 DB에 반영 |
 | 픽업 슬롯 배정 | 검수 시작 시점에 `EMPTY` 슬롯 하나를 `RESERVED`로 예약 |
 | 실시간 갱신 | DB 변경 후 Admin/Customer UI에 WebSocket broadcast |
-| 예외 기록 | Vision/Robot/Fleet에서 보낸 예외를 `exception_log`에 저장 |
+| 예외 기록 | Vision/Robot Control Node에서 보낸 예외를 `exception_log`에 저장 |
 | LLM 연결 | 관리자 자연어 명령을 Claude 또는 mock 응답으로 처리 |
 
 ## 서버 주소와 호출 방식
@@ -85,7 +88,7 @@ DB Health   : http://localhost:8000/api/health/db
 | 단계 | 호출 시점 | 호출자 | API | 요청 예시 | 결과 |
 |---|---|---|---|---|---|
 | 1 | 고객 주문 | Customer UI | `POST /api/orders` | `{items:[{product_id, quantity}]}` | `orders` 생성, 재고 차감, 주문 상태 `ORDER_RECEIVED` |
-| 2 | 주문 task 생성 | Fleet/Bridge 또는 담당 노드 | `POST /api/fleet/tasks` | `{order_id, task_type, status, assigned_robot_id}` | `task` 생성 |
+| 2 | 주문 task 생성 | 담당 노드 또는 Control Bridge | `POST /api/fleet/tasks` | `{order_id, task_type, status, assigned_robot_id}` | `task` 생성 |
 | 3 | 선별 시작 | Sorting Cobot | `PATCH /api/fleet/tasks/{task_id}` | `{status:"RUNNING"}` | 선별 task 진행 중 |
 | 4 | 선별 로봇 상태 보고 | Sorting Cobot | `PATCH /api/fleet/robots/COBOT1` | `{status:"SORTING", current_task_id}` | 로봇 상태 UI 갱신 |
 | 5 | 선별 완료 | Sorting Cobot | `PATCH /api/fleet/tasks/{task_id}` | `{status:"SUCCESS"}` | 선별 task 성공 |
@@ -94,11 +97,11 @@ DB Health   : http://localhost:8000/api/health/db
 | 8 | 배송 완료 | AMR | `PATCH /api/fleet/tasks/{task_id}` | `{status:"SUCCESS"}` | 배송 task 성공 |
 | 9 | 검수 시작 | Inspection Cobot | `POST /api/fleet/orders/{order_id}/assign-pickup-slot` | body 없음 | 빈 픽업 슬롯 1개를 `RESERVED`로 예약 |
 | 10 | 검수 진행 보고 | Inspection Cobot | `PATCH /api/fleet/tasks/{task_id}` | `{status:"RUNNING"}` | 검수 task 진행 중 |
-| 11 | 주문 상태 변경 | Inspection Cobot/Fleet | `PATCH /api/fleet/orders/{order_id}` | `{status:"INSPECTING"}` | 고객/관리자 UI에 검수 중 표시 |
+| 11 | 주문 상태 변경 | Inspection Cobot 담당 노드 | `PATCH /api/fleet/orders/{order_id}` | `{status:"INSPECTING"}` | 고객/관리자 UI에 검수 중 표시 |
 | 12 | 검수 성공 | Inspection Cobot | `PATCH /api/fleet/tasks/{task_id}` | `{status:"SUCCESS"}` | 검수 task 성공 |
-| 13 | 하차 시작 | AMR 또는 하차 담당 노드 | `PATCH /api/fleet/tasks/{task_id}` | `{status:"RUNNING"}` | 하차 task 진행 중 |
-| 14 | 하차 완료 | AMR 또는 하차 담당 노드 | `PATCH /api/fleet/pickup-slots/{slot_id}` | `{status:"OCCUPIED"}` | 픽업 슬롯이 상품 있음/픽업 대기 상태 |
-| 15 | 픽업 가능 처리 | AMR 또는 하차 담당 노드 | `PATCH /api/fleet/orders/{order_id}` | `{status:"PICKUP_READY"}` | 고객 UI에 픽업 가능 + 슬롯 번호 표시 |
+| 13 | 하차 시작 | Inspection Cobot 담당 노드 | `PATCH /api/fleet/tasks/{task_id}` | `{status:"RUNNING"}` | 하차 task 진행 중 |
+| 14 | 하차 완료 | Inspection Cobot 담당 노드 | `PATCH /api/fleet/pickup-slots/{slot_id}` | `{status:"OCCUPIED"}` | 픽업 슬롯이 상품 있음/픽업 대기 상태 |
+| 15 | 픽업 가능 처리 | Inspection Cobot 담당 노드 | `PATCH /api/fleet/orders/{order_id}` | `{status:"PICKUP_READY"}` | 고객 UI에 픽업 가능 + 슬롯 번호 표시 |
 | 16 | 고객 수령 | Customer UI | `POST /api/orders/{order_id}/complete` | body 없음 | 주문 완료, 픽업 슬롯 `EMPTY` |
 
 ## 핵심 API 상세
@@ -154,10 +157,12 @@ DB Health   : http://localhost:8000/api/health/db
 한 주문의 기본 task 예시:
 
 ```text
-SORTING    -> COBOT1
-DELIVERY   -> AMR1 또는 AMR2
-INSPECTION -> COBOT2
-UNLOAD     -> DELIVERY와 같은 AMR
+STANDBY_LOAD   -> AMR1 또는 AMR2
+SORTING        -> COBOT1
+DELIVERY       -> STANDBY_LOAD와 같은 AMR
+STANDBY_UNLOAD -> STANDBY_LOAD와 같은 AMR
+INSPECTION     -> COBOT2
+UNLOAD         -> COBOT2
 ```
 
 ### task 조회
@@ -307,7 +312,7 @@ assign-pickup-slot은 Control Server가 한 번에 예약해서 충돌 가능성
 
 | API | 사용 시점 | 요청 | 결과 |
 |---|---|---|---|
-| `POST /api/fleet/exceptions` | Vision/Robot/Fleet에서 예외 감지 | `{exception_type, robot_id, task_id, order_id, detail}` | Admin UI 예외/알람 표시 |
+| `POST /api/fleet/exceptions` | Vision/Robot Control Node에서 예외 감지 | `{exception_type, robot_id, task_id, order_id, detail}` | Admin UI 예외/알람 표시 |
 
 예시:
 
@@ -362,6 +367,20 @@ assign-pickup-slot은 Control Server가 한 번에 예약해서 충돌 가능성
 | `FAILED` | 실패 |
 | `CANCELLED` | 취소 |
 
+### task.task_type
+
+| 값 | 의미 |
+|---|---|
+| `STANDBY_LOAD` | AMR 상차 대기존 이동/대기 |
+| `STANDBY_UNLOAD` | AMR 하차 대기존 이동/대기 |
+| `SORTING` | 상품 선별/상차 |
+| `DELIVERY` | 상품 운반 |
+| `INSPECTION` | 상품 검수 |
+| `UNLOAD` | 픽업 슬롯 하차 |
+| `PATROL` | 순찰 |
+| `CHARGE` | 충전 |
+| `RETURN_HOME` | 복귀 |
+
 ### robot.status
 
 | 값 | 의미 |
@@ -369,6 +388,7 @@ assign-pickup-slot은 Control Server가 한 번에 예약해서 충돌 가능성
 | `IDLE` | 대기 |
 | `MOVING` | 이동 중 |
 | `WAITING` | 대기 중 |
+| `STANDBY` | AMR 상하차 대기 중 |
 | `SORTING` | 선별 중 |
 | `DELIVERING` | 배송 중 |
 | `INSPECTING` | 검수 중 |
@@ -409,7 +429,7 @@ assign-pickup-slot은 Control Server가 한 번에 예약해서 충돌 가능성
 
 ```text
 1. GET /api/fleet/tasks?robot_id=AMR1&status=QUEUED
-2. DELIVERY 또는 UNLOAD task 선택
+2. STANDBY_LOAD / DELIVERY / STANDBY_UNLOAD task 선택
 3. PATCH /api/fleet/tasks/{task_id} {"status":"RUNNING"}
 4. PATCH /api/fleet/robots/AMR1 {"status":"DELIVERING","current_task_id":task_id}
 5. 주행 중 주기적으로 PATCH /api/fleet/robots/AMR1로 위치/배터리 보고
@@ -421,7 +441,7 @@ assign-pickup-slot은 Control Server가 한 번에 예약해서 충돌 가능성
 
 ```text
 1. GET /api/fleet/tasks?robot_id=COBOT2&status=QUEUED
-2. INSPECTION task 선택
+2. INSPECTION 또는 UNLOAD task 선택
 3. 검수 시작 시 POST /api/fleet/orders/{order_id}/assign-pickup-slot
 4. 응답으로 받은 pickup_slot_id 저장
 5. PATCH /api/fleet/tasks/{task_id} {"status":"RUNNING"}

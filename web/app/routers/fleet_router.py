@@ -26,7 +26,7 @@ from app.schemas import (
 from app.services.realtime import broadcast_all_status
 
 
-router = APIRouter(prefix="/api/fleet", tags=["fleet"])
+router = APIRouter(prefix="/api/fleet", tags=["robot-runtime"])
 
 
 def build_task_event_response(task_event: TaskEvent) -> dict:
