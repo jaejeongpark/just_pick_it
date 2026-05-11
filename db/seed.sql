@@ -2,7 +2,8 @@
 
 INSERT INTO zone (zone_name, pos_x, pos_y, pos_z, pos_theta) VALUES
     ('LOADING_ZONE', 0.30, 0.40, 0.00, 0.00),
-    ('LOADING_WAIT_ZONE', 0.85, 0.40, 0.00, 0.00),
+    ('STANDBY_LOADING_ZONE', 0.85, 0.40, 0.00, 0.00),
+    ('STANDBY_UNLOADING_ZONE', 1.45, 0.40, 0.00, 3.14),
     ('UNLOADING_ZONE', 1.70, 0.40, 0.00, 3.14),
     ('HOME', 1.00, 0.50, 0.00, 0.00),
     ('CHARGING_ZONE', 1.00, 0.50, 0.00, 0.00),

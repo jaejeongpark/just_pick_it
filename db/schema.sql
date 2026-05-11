@@ -29,6 +29,7 @@ CREATE TYPE robot_status AS ENUM (
     'IDLE',
     'MOVING',
     'WAITING',
+    'STANDBY',
     'SORTING',
     'DELIVERING',
     'INSPECTING',
@@ -43,6 +44,8 @@ CREATE TYPE robot_status AS ENUM (
 );
 
 CREATE TYPE task_type AS ENUM (
+    'STANDBY_LOAD',
+    'STANDBY_UNLOAD',
     'SORTING',
     'DELIVERY',
     'INSPECTION',

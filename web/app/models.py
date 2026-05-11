@@ -42,6 +42,7 @@ robot_status_enum = ENUM(
     "IDLE",
     "MOVING",
     "WAITING",
+    "STANDBY",
     "SORTING",
     "DELIVERING",
     "INSPECTING",
@@ -58,6 +59,8 @@ robot_status_enum = ENUM(
 )
 
 task_type_enum = ENUM(
+    "STANDBY_LOAD",
+    "STANDBY_UNLOAD",
     "SORTING",
     "DELIVERY",
     "INSPECTION",

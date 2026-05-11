@@ -102,7 +102,7 @@ web/scripts/reset_demo_data.sh
 
 ## 현재 연결 상태
 
-웹과 DB 연결은 **고객/관리자 UI + DB 연동 + 실제 Fleet/Bridge 상태 보고 API 기준으로 동작하는 상태**입니다.
+웹과 DB 연결은 **고객/관리자 UI + DB 연동 + 실제 Robot Control Node 상태 보고 API 기준으로 동작하는 상태**입니다.
 
 완료된 것:
 
@@ -121,9 +121,9 @@ web/scripts/reset_demo_data.sh
 - 관리자 대시보드/로봇/작업·주문/예외/재고 페이지
 - 로봇/주문/task/픽업슬롯/예외/재고 상태 표시
 - 관리자 UI에서 로봇/주문/task/픽업슬롯/재고 상태 수정
-- 실제 Fleet/Bridge 연동용 상태 보고 API
+- 실제 Robot Control Node 연동용 상태 보고 API
 - task_event 기록/조회 API
-- Vision/Fleet 예외 보고 API
+- Vision/Robot 예외 보고 API
 - exception 처리 완료
 - 긴급정지 / 재개
 - 대시보드 데모 실행 버튼으로 주문 생성부터 픽업 준비까지 자동 상태 전환
@@ -132,14 +132,14 @@ web/scripts/reset_demo_data.sh
 웹 쪽에서 아직 실제 외부 시스템과 연결하지 않은 것:
 
 ```text
-- 실제 Fleet Manager / Control Bridge / ROS2 연결
+- 실제 Robot Control Node / Control Bridge / ROS2 연결
 - Claude API key 설정 후 실제 LLM 호출 테스트
 - 실제 Vision Server와의 영상 분석 요청/응답 연결
 - task_event를 관리자 UI 타임라인으로 보여주는 화면
 - 재고 임계치 알림을 exception/alert로 자동 생성하는 정책
 ```
 
-즉, 현재 웹은 **로컬 DB와 UI 관제 기준으로는 바로 시연 가능한 상태**이고, 남은 큰 작업은 외부 로봇/Fleet/Vision 시스템을 실제로 붙이는 일입니다.  
+즉, 현재 웹은 **로컬 DB와 UI 관제 기준으로는 바로 시연 가능한 상태**이고, 남은 큰 작업은 외부 Robot Control Node/Vision 시스템을 실제로 붙이는 일입니다.  
 LLM은 `ANTHROPIC_API_KEY`를 넣으면 Claude API로 호출하고, 비워두면 mock 응답으로 동작합니다.
 
 ## Structure
@@ -265,7 +265,7 @@ web/scripts/reset_demo_data.sh
 
 ## 자동 데모 실행
 
-관리자 대시보드 왼쪽 하단의 `데모 실행` 버튼은 Fleet Manager 없이 화면 흐름을 빠르게 확인하기 위한 시연용 기능입니다.
+관리자 대시보드 왼쪽 하단의 `데모 실행` 버튼은 실제 로봇 노드 없이 화면 흐름을 빠르게 확인하기 위한 시연용 기능입니다.
 
 ```text
 POST /api/admin/demo/run-order
@@ -278,14 +278,15 @@ POST /api/admin/demo/run-order
 - 재고가 남은 상품 중 1~2종 랜덤 선택
 - 새 주문 생성
 - 선택 상품 재고 1개씩 차감
-- SORTING / DELIVERY / INSPECTION / UNLOAD task 생성
+- STANDBY_LOAD / SORTING / DELIVERY / STANDBY_UNLOAD / INSPECTION / UNLOAD task 생성
 - 주문 1건당 AMR 1대 배정
-- DELIVERY와 UNLOAD는 같은 AMR 사용
+- STANDBY_LOAD / DELIVERY / STANDBY_UNLOAD는 같은 AMR 사용
+- INSPECTION / UNLOAD는 COBOT2 사용
 - 2초 간격으로 task/order/robot/pickup_slot 상태 자동 전환
 - PICKUP_READY가 되면 고객 UI에 픽업 가능 상태 표시
 ```
 
-실제 로봇 연동에서는 이 버튼 대신 Fleet Manager / Control Bridge가 `/api/fleet/*` API로 상태를 보고합니다.
+실제 로봇 연동에서는 이 버튼 대신 각 Robot Control Node 또는 Control Bridge가 `/api/fleet/*` API로 상태를 보고합니다.
 
 ## Environment
 
@@ -326,9 +327,12 @@ CLAUDE_TIMEOUT_SECONDS=10
 `ANTHROPIC_API_KEY`가 비어 있으면 `/api/admin/llm/messages`는 mock 응답으로 동작합니다.  
 키를 넣으면 Anthropic 공식 Python SDK로 Claude Messages API를 호출합니다.
 
-## Fleet / Bridge API
+## Robot Runtime API
 
-실제 Fleet Manager/Control Bridge에서는 상태 판단을 Fleet 쪽에서 수행하고, Control Server는 받은 상태를 DB에 반영합니다.
+`/api/fleet/*` 경로명은 기존 구현 호환을 위해 유지합니다.  
+현재 프로젝트 방향에서는 Fleet Manager 전용 API가 아니라 각 Robot Control Node 또는 Control Bridge가 task/robot/order 상태를 보고하는 runtime API로 사용합니다.
+
+각 로봇 담당 노드는 자기 로봇의 task 조회, 상태 보고, 예외 보고를 수행하고, Control Server는 받은 상태를 DB에 반영합니다.
 
 ```text
 GET   /api/fleet/tasks
