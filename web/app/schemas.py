@@ -149,34 +149,13 @@ class AdminPickupSlotCreate(BaseModel):
     status: PickupSlotStatus = "EMPTY"
 
 
-class AdminTaskCreate(BaseModel):
-    task_type: TaskType
-    status: TaskStatus = "QUEUED"
-    priority: int = Field(default=1, ge=0)
-    order_id: int | None = None
-    assigned_robot_id: str | None = None
-    source_zone_id: int | None = None
-    target_zone_id: int | None = None
-    result_message: str | None = None
-
-
-class FleetTaskCreate(BaseModel):
-    task_type: TaskType
-    order_id: int | None = None
-    assigned_robot_id: str | None = None
-    status: TaskStatus = "QUEUED"
-    priority: int = Field(default=1, ge=0)
-    source_zone_id: int | None = None
-    target_zone_id: int | None = None
-    result_message: str | None = None
-
-
 class FleetOrderStateUpdate(BaseModel):
     status: OrderStatus | None = None
     pickup_slot_id: int | None = None
 
 
 class FleetTaskStateUpdate(BaseModel):
+    current_status: TaskStatus | None = None
     status: TaskStatus | None = None
     assigned_robot_id: str | None = None
     result_message: str | None = None
@@ -197,11 +176,8 @@ class FleetPickupSlotStateUpdate(BaseModel):
 
 class FleetStateUpdateRead(BaseModel):
     status: str
-
-
-class FleetTaskRead(BaseModel):
-    status: str
-    task_id: int
+    previous_status: str | None = None
+    current_status: str | None = None
 
 
 class FleetZonePoseRead(BaseModel):

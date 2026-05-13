@@ -2,12 +2,11 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, WebSocke
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import ExceptionLog, Order, PickupSlot, Product, Robot, Task
+from app.models import ExceptionLog, PickupSlot, Product, Robot
 from app.schemas import (
     AdminLlmMessageCreate,
     AdminLlmMessageRead,
     AdminPickupSlotCreate,
-    AdminTaskCreate,
     ProductCreate,
     ProductRead,
     ProductStockUpdate,
@@ -128,92 +127,6 @@ def update_product(
     db.refresh(product)
     background_tasks.add_task(broadcast_all_status)
     return product
-
-
-@router.delete("/orders/{order_id}")
-def delete_order(
-    order_id: int,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-):
-    order = db.get(Order, order_id)
-
-    if not order:
-        raise HTTPException(status_code=404, detail="order not found")
-
-    task_ids = [
-        task_id
-        for (task_id,) in db.query(Task.task_id).filter(Task.order_id == order_id).all()
-    ]
-
-    if task_ids:
-        db.query(Robot).filter(Robot.current_task_id.in_(task_ids)).update(
-            {"current_task_id": None},
-            synchronize_session=False,
-        )
-        db.query(ExceptionLog).filter(ExceptionLog.task_id.in_(task_ids)).delete(
-            synchronize_session=False,
-        )
-
-    db.query(ExceptionLog).filter(ExceptionLog.order_id == order_id).delete(
-        synchronize_session=False,
-    )
-    db.delete(order)
-    db.commit()
-    background_tasks.add_task(broadcast_all_status)
-    return {"status": "ok"}
-
-
-@router.post("/tasks")
-def create_task(
-    task_create: AdminTaskCreate,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-):
-    if task_create.order_id is not None and not db.get(Order, task_create.order_id):
-        raise HTTPException(status_code=404, detail="order not found")
-
-    if task_create.assigned_robot_id is not None and not db.get(Robot, task_create.assigned_robot_id):
-        raise HTTPException(status_code=404, detail="robot not found")
-
-    task = Task(
-        order_id=task_create.order_id,
-        assigned_robot_id=task_create.assigned_robot_id,
-        task_type=task_create.task_type,
-        status=task_create.status,
-        priority=task_create.priority,
-        source_zone_id=task_create.source_zone_id,
-        target_zone_id=task_create.target_zone_id,
-        result_message=task_create.result_message,
-    )
-    db.add(task)
-    db.commit()
-    background_tasks.add_task(broadcast_all_status)
-    return {"status": "ok"}
-
-
-@router.delete("/tasks/{task_id}")
-def delete_task(
-    task_id: int,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-):
-    task = db.get(Task, task_id)
-
-    if not task:
-        raise HTTPException(status_code=404, detail="task not found")
-
-    db.query(Robot).filter(Robot.current_task_id == task_id).update(
-        {"current_task_id": None},
-        synchronize_session=False,
-    )
-    db.query(ExceptionLog).filter(ExceptionLog.task_id == task_id).delete(
-        synchronize_session=False,
-    )
-    db.delete(task)
-    db.commit()
-    background_tasks.add_task(broadcast_all_status)
-    return {"status": "ok"}
 
 
 @router.post("/pickup-slots")

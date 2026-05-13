@@ -15,43 +15,47 @@ from app.services.robot_runtime_policy import (
 # AMR 담당 task는 AMR이 대기 상태를 보고할 때 배정한다.
 ORDER_PRIORITY = 2
 PATROL_PRIORITY = 1
-AMR_ORDER_TASK_TYPES = ("STANDBY_LOAD", "STANDBY_UNLOAD")
+AMR_ORDER_TASK_TYPES = ("STANDBY_LOAD", "LOAD", "STANDBY_UNLOAD", "UNLOAD")
 ACTIVE_RUNTIME_TASK_STATUSES = ("ASSIGNED", "RUNNING", "PAUSED")
 ORDER_WORKFLOW_INACTIVE_STATUSES = ("PICKUP_READY", "COMPLETED", "ERROR")
 AMR_ASSIGNMENT_READY_STATUSES = ("IDLE", "STANDBY")
+ROBOT_STATUS_AFTER_TASK_SUCCESS = {
+    "STANDBY_LOAD": "WAITING",
+    "LOAD": "WAITING",
+    "STANDBY_UNLOAD": "WAITING",
+    "UNLOAD": "WAITING",
+}
 
 ORDER_TASK_TYPES = (
     "STANDBY_LOAD",
-    "SORTING",
     "LOAD",
+    "SORTING",
     "STANDBY_UNLOAD",
-    "INSPECTION",
     "UNLOAD",
+    "INSPECTION",
 )
 
 FIXED_TASK_ROBOT_ID = {
     "SORTING": "SORTING_COBOT",
-    "LOAD": "SORTING_COBOT",
     "INSPECTION": "INSPECTION_COBOT",
-    "UNLOAD": "INSPECTION_COBOT",
 }
 
 TASK_ZONE_NAMES = {
     "STANDBY_LOAD": (None, "STANDBY_LOADING_ZONE"),
+    "LOAD": ("STANDBY_LOADING_ZONE", "LOADING_ZONE"),
     "SORTING": ("PRODUCT_ZONE", "LOADING_ZONE"),
-    "LOAD": ("PRODUCT_ZONE", "LOADING_ZONE"),
     "STANDBY_UNLOAD": ("LOADING_ZONE", "STANDBY_UNLOADING_ZONE"),
+    "UNLOAD": ("STANDBY_UNLOADING_ZONE", "UNLOADING_ZONE"),
     "INSPECTION": ("UNLOADING_ZONE", "UNLOADING_ZONE"),
-    "UNLOAD": ("UNLOADING_ZONE", None),
 }
 
 ORDER_STATUS_BY_TASK = {
     "STANDBY_LOAD": "ORDER_WAIT",
+    "LOAD": "ORDER_WAIT",
     "SORTING": "SORTING",
-    "LOAD": "SORTING",
     "STANDBY_UNLOAD": "DELIVERING",
-    "INSPECTION": "INSPECTING",
     "UNLOAD": "DELIVERING",
+    "INSPECTION": "INSPECTING",
 }
 
 ROBOT_STATUS_BY_TASK = {
@@ -123,15 +127,29 @@ def resolve_order_task_robot_id(task_type: str) -> str | None:
     return FIXED_TASK_ROBOT_ID[task_type]
 
 
+def get_robot_for_update(db: Session, robot_id: str) -> Robot | None:
+    return (
+        db.query(Robot)
+        .filter(Robot.robot_id == robot_id)
+        .with_for_update()
+        .one_or_none()
+    )
+
+
 def assign_ready_tasks(db: Session, preferred_robot_id: str | None = None) -> int:
     db.flush()
 
     assigned_count = 0
-    preferred_robot = db.get(Robot, preferred_robot_id) if preferred_robot_id else None
+    preferred_robot = (
+        get_robot_for_update(db, preferred_robot_id)
+        if preferred_robot_id
+        else None
+    )
     tasks = (
         db.query(Task)
         .filter(Task.status == "QUEUED")
-        .order_by(Task.priority.desc(), Task.task_id)
+        .order_by(Task.priority, Task.task_id)
+        .with_for_update(skip_locked=True)
         .all()
     )
 
@@ -181,7 +199,7 @@ def resolve_task_assignment_robot(
     preferred_robot: Robot | None,
 ) -> Robot | None:
     if task.assigned_robot_id is not None:
-        return db.get(Robot, task.assigned_robot_id)
+        return get_robot_for_update(db, task.assigned_robot_id)
 
     if task.task_type not in AMR_ORDER_TASK_TYPES and task.task_type != "PATROL":
         return None
@@ -253,7 +271,10 @@ def robot_is_assignable(db: Session, robot: Robot | None, task: Task) -> bool:
         return False
 
     if robot.robot_id.startswith("AMR_"):
-        if robot.status not in AMR_ASSIGNMENT_READY_STATUSES:
+        if (
+            robot.status not in AMR_ASSIGNMENT_READY_STATUSES
+            and not task_is_amr_order_continuation(task, robot)
+        ):
             return False
 
         if not robot_battery_can_take_order(robot):
@@ -275,6 +296,15 @@ def robot_is_assignable(db: Session, robot: Robot | None, task: Task) -> bool:
     )
 
     return other_task is None
+
+
+def task_is_amr_order_continuation(task: Task, robot: Robot) -> bool:
+    return (
+        robot.status == "WAITING"
+        and task.task_type in AMR_ORDER_TASK_TYPES
+        and task.assigned_robot_id == robot.robot_id
+        and task.order_id is not None
+    )
 
 
 def apply_task_runtime_state(db: Session, task: Task) -> None:
@@ -312,16 +342,15 @@ def start_runtime_task(db: Session, task: Task) -> None:
 
 def finish_runtime_task(db: Session, task: Task) -> None:
     order = db.get(Order, task.order_id) if task.order_id else None
-    clear_robot_task(db, task)
+    clear_robot_task(db, task, robot_status_after_task_success(task))
 
     if not order:
         return
 
-    if task.task_type == "LOAD":
+    if task.task_type == "SORTING":
         update_order_items(db, order, "SORTED")
     elif task.task_type == "INSPECTION":
         update_order_items(db, order, "INSPECTED")
-    elif task.task_type == "UNLOAD":
         if order.pickup_slot_id:
             pickup_slot = db.get(PickupSlot, order.pickup_slot_id)
             if pickup_slot and pickup_slot.status != "BLOCKED":
@@ -329,7 +358,11 @@ def finish_runtime_task(db: Session, task: Task) -> None:
         order.status = "PICKUP_READY"
 
 
-def clear_robot_task(db: Session, task: Task) -> None:
+def robot_status_after_task_success(task: Task) -> str:
+    return ROBOT_STATUS_AFTER_TASK_SUCCESS.get(task.task_type, "IDLE")
+
+
+def clear_robot_task(db: Session, task: Task, next_status: str = "IDLE") -> None:
     if not task.assigned_robot_id:
         return
 
@@ -341,7 +374,7 @@ def clear_robot_task(db: Session, task: Task) -> None:
     robot.current_task_id = None
 
     if robot.status not in UNAVAILABLE_ROBOT_STATUSES:
-        robot.status = "IDLE"
+        robot.status = next_status
 
 
 def reserve_pickup_slot(db: Session, order: Order) -> bool:

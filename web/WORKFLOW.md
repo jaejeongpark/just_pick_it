@@ -8,7 +8,8 @@
 - Robot Control Node는 DB를 직접 보지 않고 Control Server API만 호출한다.
 - Cobot task는 생성 시점에 고정 로봇으로 배정한다.
 - AMR task는 주문 생성 시점에 바로 배정하지 않고, AMR이 대기 상태와 배터리를 보고할 때 배정한다.
-- 주문 task priority는 `2`, 순찰 task priority는 `1`이다.
+- priority 숫자가 작을수록 먼저 배정한다.
+- 순찰 task priority는 `1`, 주문 task priority는 `2`이다.
 - Robot Control Node는 배정된 `ASSIGNED` task를 조회하고, 시작/완료/실패를 보고한다.
 
 ---
@@ -56,13 +57,15 @@ DB 변화:
 | 순서 | task_type | status | priority | assigned_robot_id |
 |---|---|---|---|---|
 | 1 | `STANDBY_LOAD` | `QUEUED` | 2 | null |
-| 2 | `SORTING` | `QUEUED` | 2 | `SORTING_COBOT` |
-| 3 | `LOAD` | `QUEUED` | 2 | `SORTING_COBOT` |
+| 2 | `LOAD` | `QUEUED` | 2 | null |
+| 3 | `SORTING` | `QUEUED` | 2 | `SORTING_COBOT` |
 | 4 | `STANDBY_UNLOAD` | `QUEUED` | 2 | null |
-| 5 | `INSPECTION` | `QUEUED` | 2 | `INSPECTION_COBOT` |
-| 6 | `UNLOAD` | `QUEUED` | 2 | `INSPECTION_COBOT` |
+| 5 | `UNLOAD` | `QUEUED` | 2 | null |
+| 6 | `INSPECTION` | `QUEUED` | 2 | `INSPECTION_COBOT` |
 
 ### 1-2. AMR이 상차 대기존 복귀/대기 상태를 보고한다
+
+이 단계는 대기 중인 `PATROL` task가 없는 상태를 가정한다. `PATROL` task가 있으면 priority `1`이므로 주문 task보다 먼저 배정된다.
 
 호출:
 
@@ -87,7 +90,7 @@ Control Server 처리:
 | AMR 상태가 `IDLE` 또는 `STANDBY` | 배정 가능 |
 | battery_level >= 20 | 배정 가능 |
 | 진행 중 task 없음 | 배정 가능 |
-| priority 2 주문 task 존재 | 순찰보다 먼저 주문 task 배정 |
+| priority 1 순찰 task 없음 | priority 2 주문 task 배정 |
 
 DB 변화:
 
@@ -96,7 +99,7 @@ DB 변화:
 | `robot` | AMR 상태/위치/배터리 갱신 |
 | `task` | `STANDBY_LOAD.status`: `QUEUED` -> `ASSIGNED` |
 | `task` | `STANDBY_LOAD.assigned_robot_id`: null -> `AMR_1` |
-| `task` | 같은 주문의 `STANDBY_UNLOAD.assigned_robot_id`: null -> `AMR_1` |
+| `task` | 같은 주문의 `LOAD`, `STANDBY_UNLOAD`, `UNLOAD`도 `AMR_1`로 예약 |
 | `task_event` | `TASK_ASSIGNED` 기록 |
 
 ### 1-3. AMR이 배정 task를 조회하고 실행한다
@@ -132,6 +135,7 @@ PATCH /api/fleet/tasks/1
 
 request
 {
+  "current_status": "ASSIGNED",
   "status": "RUNNING",
   "result_message": "moving to standby loading zone"
 }
@@ -152,6 +156,7 @@ PATCH /api/fleet/tasks/1
 
 request
 {
+  "current_status": "RUNNING",
   "status": "SUCCESS",
   "result_message": "standby load completed"
 }
@@ -162,47 +167,10 @@ DB 변화:
 | 테이블 | 변화 |
 |---|---|
 | `task` | `STANDBY_LOAD.status`: `RUNNING` -> `SUCCESS` |
-| `robot` | `AMR_1.current_task_id=null`, `AMR_1.status="IDLE"` |
-| `task` | 다음 task `SORTING.status`: `QUEUED` -> `ASSIGNED` |
-
-### 1-4. SORTING_COBOT이 선별/상차를 진행한다
-
-조회:
-
-```text
-GET /api/fleet/tasks?robot_id=SORTING_COBOT&status=ASSIGNED
-```
-
-`SORTING` 시작/완료:
-
-```text
-PATCH /api/fleet/tasks/{sorting_task_id} {"status":"RUNNING"}
-PATCH /api/fleet/tasks/{sorting_task_id} {"status":"SUCCESS"}
-```
-
-완료 후 DB 변화:
-
-| 테이블 | 변화 |
-|---|---|
-| `task` | `SORTING.status`: `SUCCESS` |
+| `robot` | `AMR_1.current_task_id=null`, `AMR_1.status="WAITING"` |
 | `task` | 다음 task `LOAD.status`: `QUEUED` -> `ASSIGNED` |
 
-`LOAD` 시작/완료:
-
-```text
-PATCH /api/fleet/tasks/{load_task_id} {"status":"RUNNING"}
-PATCH /api/fleet/tasks/{load_task_id} {"status":"SUCCESS"}
-```
-
-완료 후 DB 변화:
-
-| 테이블 | 변화 |
-|---|---|
-| `task` | `LOAD.status`: `SUCCESS` |
-| `order_item` | 해당 주문 item `status="SORTED"` |
-| `task` | 예약된 `STANDBY_UNLOAD.status`: `QUEUED` -> `ASSIGNED` |
-
-### 1-5. AMR이 하차 대기 task를 수행한다
+### 1-4. AMR이 상차 구역으로 진입한다
 
 조회:
 
@@ -213,8 +181,54 @@ GET /api/fleet/tasks?robot_id=AMR_1&status=ASSIGNED
 실행:
 
 ```text
-PATCH /api/fleet/tasks/{standby_unload_task_id} {"status":"RUNNING"}
-PATCH /api/fleet/tasks/{standby_unload_task_id} {"status":"SUCCESS"}
+PATCH /api/fleet/tasks/{load_task_id} {"current_status":"ASSIGNED", "status":"RUNNING"}
+PATCH /api/fleet/tasks/{load_task_id} {"current_status":"RUNNING", "status":"SUCCESS"}
+```
+
+완료 후 DB 변화:
+
+| 테이블 | 변화 |
+|---|---|
+| `task` | `LOAD.status`: `SUCCESS` |
+| `robot` | `AMR_1.current_task_id=null`, `AMR_1.status="WAITING"` |
+| `task` | 다음 task `SORTING.status`: `QUEUED` -> `ASSIGNED` |
+
+### 1-5. SORTING_COBOT이 선별을 진행한다
+
+조회:
+
+```text
+GET /api/fleet/tasks?robot_id=SORTING_COBOT&status=ASSIGNED
+```
+
+`SORTING` 시작/완료:
+
+```text
+PATCH /api/fleet/tasks/{sorting_task_id} {"current_status":"ASSIGNED", "status":"RUNNING"}
+PATCH /api/fleet/tasks/{sorting_task_id} {"current_status":"RUNNING", "status":"SUCCESS"}
+```
+
+완료 후 DB 변화:
+
+| 테이블 | 변화 |
+|---|---|
+| `task` | `SORTING.status`: `SUCCESS` |
+| `order_item` | 해당 주문 item `status="SORTED"` |
+| `task` | 예약된 `STANDBY_UNLOAD.status`: `QUEUED` -> `ASSIGNED` |
+
+### 1-6. AMR이 하차 대기 task를 수행한다
+
+조회:
+
+```text
+GET /api/fleet/tasks?robot_id=AMR_1&status=ASSIGNED
+```
+
+실행:
+
+```text
+PATCH /api/fleet/tasks/{standby_unload_task_id} {"current_status":"ASSIGNED", "status":"RUNNING"}
+PATCH /api/fleet/tasks/{standby_unload_task_id} {"current_status":"RUNNING", "status":"SUCCESS"}
 ```
 
 DB 변화:
@@ -222,17 +236,32 @@ DB 변화:
 | 테이블 | 변화 |
 |---|---|
 | `task` | `STANDBY_UNLOAD.status`: `SUCCESS` |
-| `robot` | `AMR_1.current_task_id=null`, `AMR_1.status="IDLE"` |
+| `robot` | `AMR_1.current_task_id=null`, `AMR_1.status="WAITING"` |
+| `task` | 다음 task `UNLOAD.status`: `QUEUED` -> `ASSIGNED` |
+
+### 1-7. AMR이 하차 구역으로 진입한다
+
+실행:
+
+```text
+PATCH /api/fleet/tasks/{unload_task_id} {"current_status":"ASSIGNED", "status":"RUNNING"}
+PATCH /api/fleet/tasks/{unload_task_id} {"current_status":"RUNNING", "status":"SUCCESS"}
+```
+
+DB 변화:
+
+| 테이블 | 변화 |
+|---|---|
+| `task` | `UNLOAD.status`: `SUCCESS` |
+| `robot` | `AMR_1.current_task_id=null`, `AMR_1.status="WAITING"` |
 | `task` | 다음 task `INSPECTION.status`: `QUEUED` -> `ASSIGNED` |
 
-AMR은 이후 상차 대기존으로 복귀한 뒤 다시 `PATCH /api/fleet/robots/{robot_id}`로 상태와 배터리를 보고한다. 그 시점에 다음 주문이 있으면 Control Server가 그 AMR에 다음 주문을 배정한다.
-
-### 1-6. INSPECTION_COBOT이 검수/하차를 진행한다
+### 1-8. INSPECTION_COBOT이 검수를 진행한다
 
 `INSPECTION` 시작 시:
 
 ```text
-PATCH /api/fleet/tasks/{inspection_task_id} {"status":"RUNNING"}
+PATCH /api/fleet/tasks/{inspection_task_id} {"current_status":"ASSIGNED", "status":"RUNNING"}
 ```
 
 DB 변화:
@@ -246,7 +275,7 @@ DB 변화:
 `INSPECTION` 완료 시:
 
 ```text
-PATCH /api/fleet/tasks/{inspection_task_id} {"status":"SUCCESS"}
+PATCH /api/fleet/tasks/{inspection_task_id} {"current_status":"RUNNING", "status":"SUCCESS"}
 ```
 
 DB 변화:
@@ -254,22 +283,12 @@ DB 변화:
 | 테이블 | 변화 |
 |---|---|
 | `order_item` | 해당 주문 item `status="INSPECTED"` |
-| `task` | 다음 task `UNLOAD.status`: `QUEUED` -> `ASSIGNED` |
-
-`UNLOAD` 완료 시:
-
-```text
-PATCH /api/fleet/tasks/{unload_task_id} {"status":"SUCCESS"}
-```
-
-DB 변화:
-
-| 테이블 | 변화 |
-|---|---|
 | `pickup_slot` | `RESERVED` -> `OCCUPIED` |
 | `orders` | `status="PICKUP_READY"` |
 
-### 1-7. 고객이 수령 완료한다
+AMR은 이후 상차 대기존으로 복귀한 뒤 다시 `PATCH /api/fleet/robots/{robot_id}`로 상태와 배터리를 보고한다. 그 시점에 다음 주문이 있으면 Control Server가 그 AMR에 다음 주문을 배정한다.
+
+### 1-9. 고객이 수령 완료한다
 
 호출:
 
@@ -308,7 +327,7 @@ Control Server 처리:
 | 1 | LLM 또는 local parser가 `PATROL`, `A_ZONE`으로 해석한다. |
 | 2 | `zone` 테이블에서 `A_ZONE`을 찾는다. |
 | 3 | `PATROL` task를 생성한다. |
-| 4 | 주문보다 낮은 priority `1`을 저장한다. |
+| 4 | 주문보다 높은 priority `1`을 저장한다. |
 
 DB 생성:
 
@@ -335,8 +354,8 @@ request
 
 | 조건 | 처리 |
 |---|---|
-| priority 2 주문 task 있음 | 주문 task 먼저 배정 |
-| priority 2 주문 task 없음 | priority 1 순찰 task 배정 |
+| priority 1 순찰 task 있음 | 순찰 task 먼저 배정 |
+| priority 1 순찰 task 없음 | priority 2 주문 task 배정 |
 
 DB 변화:
 
@@ -425,6 +444,7 @@ PATCH /api/fleet/robots/AMR_1
 ```text
 PATCH /api/fleet/tasks/4
 {
+  "current_status": "RUNNING",
   "status": "FAILED",
   "result_message": "human detected"
 }
@@ -457,8 +477,8 @@ DB 변화:
 
 | task 종류 | priority | 설명 |
 |---|---|---|
-| 주문 task | 2 | 고객 주문 처리 우선 |
-| 순찰 task | 1 | 대기 AMR이 있고 주문 task가 없을 때 수행 |
+| 순찰 task | 1 | 대기 AMR이 있을 때 주문 task보다 먼저 수행 |
+| 주문 task | 2 | 고객 주문 처리 |
 
 ---
 

@@ -22,11 +22,11 @@ from app.main import app  # noqa: E402
 
 EXPECTED_ORDER_TASKS = (
     ("STANDBY_LOAD", "AMR_1"),
+    ("LOAD", "AMR_1"),
     ("SORTING", "SORTING_COBOT"),
-    ("LOAD", "SORTING_COBOT"),
     ("STANDBY_UNLOAD", "AMR_1"),
+    ("UNLOAD", "AMR_1"),
     ("INSPECTION", "INSPECTION_COBOT"),
-    ("UNLOAD", "INSPECTION_COBOT"),
 )
 
 
@@ -159,10 +159,10 @@ def assert_task_plan(tasks: list[dict]) -> None:
 
 def initial_robot_for_task(task_type: str) -> str | None:
     return {
+        "LOAD": None,
         "SORTING": "SORTING_COBOT",
-        "LOAD": "SORTING_COBOT",
+        "UNLOAD": None,
         "INSPECTION": "INSPECTION_COBOT",
-        "UNLOAD": "INSPECTION_COBOT",
     }.get(task_type)
 
 
@@ -195,7 +195,7 @@ def assigned_task_for_robot(
 
     for task in tasks:
         if task["task_type"] == expected_task_type:
-            assert_true(task["target_zone_pose"] or expected_task_type == "UNLOAD", "task target pose")
+            assert_true(task["target_zone_pose"], "task target pose")
             return task
 
     raise AssertionError(f"{robot_id} has no assigned {expected_task_type} task: {tasks}")
@@ -205,6 +205,7 @@ def run_task(client: TestClient, task: dict) -> None:
     response = client.patch(
         f"/api/fleet/tasks/{task['task_id']}",
         json={
+            "current_status": task["status"],
             "status": "RUNNING",
         },
     )
@@ -215,6 +216,7 @@ def finish_task(client: TestClient, task: dict) -> None:
     response = client.patch(
         f"/api/fleet/tasks/{task['task_id']}",
         json={
+            "current_status": "RUNNING",
             "status": "SUCCESS",
         },
     )

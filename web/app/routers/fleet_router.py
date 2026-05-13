@@ -15,10 +15,8 @@ from app.schemas import (
     FleetPickupSlotStateUpdate,
     FleetRobotStateUpdate,
     FleetStateUpdateRead,
-    FleetTaskCreate,
     FleetTaskEventCreate,
     FleetTaskEventRead,
-    FleetTaskRead,
     FleetTaskStateUpdate,
     FleetTaskSummaryRead,
     OrderStatus,
@@ -144,38 +142,6 @@ def sync_order_pickup_slot(db: Session, order: Order, previous_slot_id: int | No
         pickup_slot.status = "RESERVED"
 
 
-@router.post("/tasks", response_model=FleetTaskRead, status_code=201)
-def create_fleet_task(
-    task_create: FleetTaskCreate,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-):
-    if task_create.order_id is not None and not db.get(Order, task_create.order_id):
-        raise HTTPException(status_code=404, detail="order not found")
-
-    if task_create.assigned_robot_id is not None and not db.get(Robot, task_create.assigned_robot_id):
-        raise HTTPException(status_code=404, detail="robot not found")
-
-    task = Task(
-        order_id=task_create.order_id,
-        assigned_robot_id=task_create.assigned_robot_id,
-        task_type=task_create.task_type,
-        status=task_create.status,
-        priority=task_create.priority,
-        source_zone_id=task_create.source_zone_id,
-        target_zone_id=task_create.target_zone_id,
-        result_message=task_create.result_message,
-    )
-    db.add(task)
-    db.commit()
-    db.refresh(task)
-    background_tasks.add_task(broadcast_all_status)
-    return {
-        "status": "ok",
-        "task_id": task.task_id,
-    }
-
-
 @router.get("/tasks", response_model=list[FleetTaskSummaryRead])
 def list_fleet_tasks(
     robot_id: str | None = None,
@@ -258,10 +224,25 @@ def update_task_state(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    task = db.get(Task, task_id)
+    task = (
+        db.query(Task)
+        .filter(Task.task_id == task_id)
+        .with_for_update()
+        .one_or_none()
+    )
 
     if not task:
         raise HTTPException(status_code=404, detail="task not found")
+
+    if state_update.current_status is not None and task.status != state_update.current_status:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "task status conflict",
+                "expected_status": state_update.current_status,
+                "current_status": task.status,
+            },
+        )
 
     previous_status = task.status
 
@@ -269,7 +250,12 @@ def update_task_state(
         task.status = state_update.status
 
     if state_update.assigned_robot_id is not None:
-        robot = db.get(Robot, state_update.assigned_robot_id)
+        robot = (
+            db.query(Robot)
+            .filter(Robot.robot_id == state_update.assigned_robot_id)
+            .with_for_update()
+            .one_or_none()
+        )
 
         if not robot:
             raise HTTPException(status_code=404, detail="robot not found")
@@ -295,7 +281,11 @@ def update_task_state(
     apply_task_runtime_state(db, task)
     db.commit()
     background_tasks.add_task(broadcast_all_status)
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "previous_status": previous_status,
+        "current_status": task.status,
+    }
 
 
 @router.post("/tasks/{task_id}/events", response_model=FleetTaskEventRead, status_code=201)
@@ -305,13 +295,32 @@ def create_task_event(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    task = db.get(Task, task_id)
+    task = (
+        db.query(Task)
+        .filter(Task.task_id == task_id)
+        .with_for_update()
+        .one_or_none()
+    )
 
     if not task:
         raise HTTPException(status_code=404, detail="task not found")
 
     if event_create.robot_id is not None and not db.get(Robot, event_create.robot_id):
         raise HTTPException(status_code=404, detail="robot not found")
+
+    if (
+        event_create.update_task_status
+        and event_create.from_status is not None
+        and task.status != event_create.from_status
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "task status conflict",
+                "expected_status": event_create.from_status,
+                "current_status": task.status,
+            },
+        )
 
     from_status = event_create.from_status or task.status
     task_event = TaskEvent(
@@ -362,7 +371,12 @@ def update_robot_state(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    robot = db.get(Robot, robot_id)
+    robot = (
+        db.query(Robot)
+        .filter(Robot.robot_id == robot_id)
+        .with_for_update()
+        .one_or_none()
+    )
 
     if not robot:
         raise HTTPException(status_code=404, detail="robot not found")
@@ -423,7 +437,7 @@ def list_fleet_orders(
 
     orders = (
         order_query
-        .order_by(Order.priority.desc(), Order.order_id)
+        .order_by(Order.priority, Order.order_id)
         .limit(50)
         .all()
     )

@@ -78,32 +78,21 @@ const TASK_STATUSES = [
   "FAILED",
   "CANCELLED",
 ];
-const TASK_TYPES = [
-  "STANDBY_LOAD",
-  "SORTING",
-  "LOAD",
-  "STANDBY_UNLOAD",
-  "INSPECTION",
-  "UNLOAD",
-  "PATROL",
-  "CHARGE",
-  "RETURN_HOME",
-];
 const ORDER_TASK_PIPELINE = [
   "STANDBY_LOAD",
-  "SORTING",
   "LOAD",
+  "SORTING",
   "STANDBY_UNLOAD",
-  "INSPECTION",
   "UNLOAD",
+  "INSPECTION",
 ];
 const DEFAULT_TASK_ROBOT = {
   STANDBY_LOAD: "AMR_1",
+  LOAD: "AMR_1",
   SORTING: "SORTING_COBOT",
-  LOAD: "SORTING_COBOT",
   STANDBY_UNLOAD: "AMR_1",
+  UNLOAD: "AMR_1",
   INSPECTION: "INSPECTION_COBOT",
-  UNLOAD: "INSPECTION_COBOT",
 };
 const ROBOT_DISPLAY_NAMES = {
   AMR_1: "AMR 1",
@@ -159,9 +148,9 @@ const statusText = {
   PICKUP_READY: "픽업 준비",
   COMPLETED: "완료",
   ERROR: "예외",
-  IDLE: "대기",
+  IDLE: "유휴",
   MOVING: "이동",
-  WAITING: "대기",
+  WAITING: "작업 대기",
   STANDBY: "상하차 대기",
   LOADING: "상차 중",
   UNLOADING: "하차",
@@ -388,7 +377,6 @@ function renderOrderDetail(order) {
         <select id="order-pickup-slot-select">${renderPickupSlotOptions(order.pickup_slot_id)}</select>
       </div>
       <button class="small-action-button" type="button" data-save-order-state="${order.order_id}">상태 저장</button>
-      <button class="ghost-button danger-text-button" type="button" data-delete-order="${order.order_id}">주문 삭제</button>
     </div>
   `;
 }
@@ -468,7 +456,7 @@ function expectedTaskStatus(orderStatus, taskType) {
     ORDER_WAIT: -1,
     SORTING: 2,
     DELIVERING: 3,
-    INSPECTING: 4,
+    INSPECTING: 5,
     PICKUP_READY: 6,
     COMPLETED: 6,
     ERROR: -1,
@@ -1787,32 +1775,12 @@ function renderTaskDetail(task) {
         <select id="task-robot-select">${renderRobotOptions(task.assigned_robot_id)}</select>
       </div>
       <button class="small-action-button" type="button" data-save-task-state="${task.task_id}">상태 저장</button>
-      <button class="ghost-button danger-text-button" type="button" data-delete-task="${task.task_id}">작업 삭제</button>
     </div>
   `;
 }
 
 function renderTaskManager(tasks) {
   return `
-    <div class="state-editor-form">
-      <div>
-        <label for="new-task-type">작업 타입</label>
-        <select id="new-task-type">${renderOptions(TASK_TYPES, "SORTING")}</select>
-      </div>
-      <div>
-        <label for="new-task-status">상태</label>
-        <select id="new-task-status">${renderOptions(TASK_STATUSES, "QUEUED")}</select>
-      </div>
-      <div>
-        <label for="new-task-order-id">주문 ID</label>
-        <input id="new-task-order-id" type="number" min="1" placeholder="선택">
-      </div>
-      <div>
-        <label for="new-task-robot-id">할당 로봇</label>
-        <select id="new-task-robot-id">${renderRobotOptions(null)}</select>
-      </div>
-      <button class="small-action-button" type="button" data-create-task>작업 추가</button>
-    </div>
     <div class="task-queue-list">
       ${
         !tasks || tasks.length === 0
@@ -2412,35 +2380,6 @@ async function createPickupSlot() {
   openPickupSlotManager();
 }
 
-async function createTask() {
-  const taskType = modalBody.querySelector("#new-task-type")?.value;
-  const status = modalBody.querySelector("#new-task-status")?.value;
-  const orderId = selectNumberOrNull("#new-task-order-id");
-  const assignedRobotId =
-    modalBody.querySelector("#new-task-robot-id")?.value || null;
-
-  const response = await fetch("/api/admin/tasks", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      task_type: taskType,
-      status,
-      order_id: orderId,
-      assigned_robot_id: assignedRobotId,
-    }),
-  });
-
-  if (!response.ok) {
-    const errorBody = await response.json().catch(() => ({}));
-    throw new Error(errorBody.detail || "failed to create task");
-  }
-
-  await loadAdminStatus();
-  openTaskManager();
-}
-
 function appendLlmMessage(role, text) {
   if (!llmMessages) {
     return;
@@ -2546,7 +2485,6 @@ orderList?.addEventListener("click", (event) => {
     renderOrders(latestAdminStatus?.orders || []);
     renderTaskSnapshot(latestAdminStatus?.tasks || []);
     renderOrderWorkDetail();
-    return;
   }
 
   openOrderDetail(Number(button.dataset.orderDetail));
@@ -2808,17 +2746,6 @@ modalBody?.addEventListener("click", (event) => {
     return;
   }
 
-  const createTaskButton = event.target.closest("button[data-create-task]");
-
-  if (createTaskButton) {
-    createTaskButton.disabled = true;
-    createTask().catch((error) => {
-      alert(error.message);
-      createTaskButton.disabled = false;
-    });
-    return;
-  }
-
   const saveOrderButton = event.target.closest("button[data-save-order-state]");
 
   if (saveOrderButton) {
@@ -2832,23 +2759,6 @@ modalBody?.addEventListener("click", (event) => {
     return;
   }
 
-  const deleteOrderButton = event.target.closest("button[data-delete-order]");
-
-  if (deleteOrderButton) {
-    if (!confirm("이 주문과 연결된 작업/예외 기록을 삭제할까요?")) {
-      return;
-    }
-
-    deleteOrderButton.disabled = true;
-    deleteAdminResource(
-      `/api/admin/orders/${deleteOrderButton.dataset.deleteOrder}`,
-    ).catch((error) => {
-      alert(error.message);
-      deleteOrderButton.disabled = false;
-    });
-    return;
-  }
-
   const saveTaskButton = event.target.closest("button[data-save-task-state]");
 
   if (saveTaskButton) {
@@ -2859,23 +2769,6 @@ modalBody?.addEventListener("click", (event) => {
         saveTaskButton.disabled = false;
       },
     );
-    return;
-  }
-
-  const deleteTaskButton = event.target.closest("button[data-delete-task]");
-
-  if (deleteTaskButton) {
-    if (!confirm("이 작업과 연결된 이벤트/예외 기록을 삭제할까요?")) {
-      return;
-    }
-
-    deleteTaskButton.disabled = true;
-    deleteAdminResource(
-      `/api/admin/tasks/${deleteTaskButton.dataset.deleteTask}`,
-    ).catch((error) => {
-      alert(error.message);
-      deleteTaskButton.disabled = false;
-    });
     return;
   }
 
