@@ -9,4 +9,5 @@ web/.env
 .claude/
 AGENTS.md
 STATUS.md
+AMR_PLAN.md
 web/WEB_STATUS.md
