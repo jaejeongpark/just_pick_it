@@ -1,0 +1,72 @@
+<?xml version='1.0' ?>
+
+<launch>
+    <!-- ── Robot ─────────────────────────────────────────────────────── -->
+    <arg name="namespace"     default=""/>
+    <arg name="robot_name"    default="$(var namespace)pinky"/>
+    <arg name="cam_tilt_deg"  default="0"/>
+    <arg name="world_name"    default="box_arena.world"/>
+    <arg name="world"         default="$(find-pkg-share pinky_gz_sim)/worlds/$(var world_name)"/>
+    <arg name="bridge_params" default="$(find-pkg-share pinky_gz_sim)/params/pinky_bridge.yaml"/>
+
+    <!-- ── Overhead camera ───────────────────────────────────────────── -->
+    <!-- Height above arena floor [m] -->
+    <arg name="overhead_height"     default="1.5"/>
+    <!-- Horizontal FOV [deg]  (75 deg @ 1.5 m → ~2.2 m × 1.6 m coverage) -->
+    <arg name="overhead_fov"        default="75.0"/>
+    <!-- Image resolution [px] -->
+    <arg name="overhead_img_width"  default="640"/>
+    <arg name="overhead_img_height" default="480"/>
+    <!-- Tilt from straight-down toward +X [deg], 0 = nadir -->
+    <arg name="overhead_tilt"       default="0.0"/>
+
+    <!-- ── RViz2 ──────────────────────────────────────────────────────── -->
+    <arg name="use_rviz"   default="true"/>
+    <arg name="rviz_config" default="$(find-pkg-share pinky_gz_sim)/params/box_arena_overhead.rviz"/>
+
+    <set_env name="GZ_SIM_RESOURCE_PATH"
+             value="$(find-pkg-share pinky_description)/../:/$(find-pkg-share pinky_gz_sim)/models:/$(env HOME)/.gazebo/models"/>
+
+    <include file="$(find-pkg-share ros_gz_sim)/launch/gz_sim.launch.py">
+        <arg name='gz_args'          value='-r -s -v4, $(var world)'/>
+        <arg name='on_exit_shutdown' value='true'/>
+    </include>
+
+    <include file="$(find-pkg-share ros_gz_sim)/launch/gz_sim.launch.py">
+        <arg name='gz_args' value='-g -v4 '/>
+    </include>
+
+    <include file="$(find-pkg-share pinky_description)/launch/upload_robot.launch.py">
+        <arg name='namespace'    value='$(var namespace)'/>
+        <arg name='use_sim_time' value='True'/>
+        <arg name='is_sim'       value='True'/>
+        <arg name='cam_tilt_deg' value='$(var cam_tilt_deg)'/>
+    </include>
+
+    <!-- Spawn robot at arena center, 10 cm above floor -->
+    <node pkg="ros_gz_sim" exec="create" name='create' output='screen'
+          args="-name $(var robot_name) -topic $(var namespace)/robot_description -x 0.0 -y 0.0 -z 0.1">
+        <param name='use_sim_time' value='True'/>
+    </node>
+
+    <node pkg="ros_gz_bridge" exec="parameter_bridge" name='parameter_bridge' output='screen'
+          args="--ros-args -p config_file:=$(var bridge_params)"/>
+    <node pkg="ros_gz_image" exec="image_bridge" name='image_bridge'       output='screen' args="/camera/image_raw"/>
+    <node pkg="ros_gz_image" exec="image_bridge" name='image_bridge_depth' output='screen' args="/camera"/>
+
+    <!-- Spawn overhead camera + bridge its image topic -->
+    <include file="$(find-pkg-share pinky_gz_sim)/launch/spawn_overhead_camera.launch.py">
+        <arg name='overhead_height'     value='$(var overhead_height)'/>
+        <arg name='overhead_fov'        value='$(var overhead_fov)'/>
+        <arg name='overhead_img_width'  value='$(var overhead_img_width)'/>
+        <arg name='overhead_img_height' value='$(var overhead_img_height)'/>
+        <arg name='overhead_tilt'       value='$(var overhead_tilt)'/>
+    </include>
+
+    <!-- RViz2: overhead image + lidar + robot model -->
+    <!-- <node if="$(var use_rviz)" pkg="rviz2" exec="rviz2" name='rviz2' output='screen'
+          args="-d $(var rviz_config)">
+        <param name='use_sim_time' value='True'/>
+    </node> -->
+
+</launch>
