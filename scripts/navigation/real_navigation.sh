@@ -54,4 +54,4 @@ cat > "$TMP_CONFIG" << EOF
 [plugins]
 EOF
 
-terminator --config "$TMP_CONFIG" --layout real_navigation
+terminator --no-dbus --config "$TMP_CONFIG" --layout real_navigation

@@ -76,4 +76,4 @@ cat > "$TMP_CONFIG" << EOF
 [plugins]
 EOF
 
-terminator --config "$TMP_CONFIG" --layout sim_map_building
+terminator --no-dbus --config "$TMP_CONFIG" --layout sim_map_building
