@@ -8,6 +8,7 @@ from app.models import ExceptionLog, Order, PickupSlot, Robot, Task, TaskEvent
 from app.schemas import (
     FleetExceptionCreate,
     FleetExceptionRead,
+    FleetOrderSummaryRead,
     FleetOrderStateUpdate,
     FleetPickupSlotAssignmentRead,
     FleetPickupSlotRead,
@@ -20,10 +21,15 @@ from app.schemas import (
     FleetTaskRead,
     FleetTaskStateUpdate,
     FleetTaskSummaryRead,
+    OrderStatus,
     PickupSlotStatus,
     TaskStatus,
+    TaskType,
 )
+from app.services.robot_runtime_policy import FINAL_TASK_STATUSES
+from app.services.workflow_service import apply_task_runtime_state, assign_ready_tasks
 from app.services.realtime import broadcast_all_status
+from app.services.status_service import build_task_summary
 
 
 router = APIRouter(prefix="/api/fleet", tags=["robot-runtime"])
@@ -42,19 +48,29 @@ def build_task_event_response(task_event: TaskEvent) -> dict:
     }
 
 
-def build_task_summary_response(db: Session, task: Task) -> dict:
-    order = db.get(Order, task.order_id) if task.order_id is not None else None
+def build_order_summary_response(db: Session, order: Order) -> dict:
+    pickup_slot = db.get(PickupSlot, order.pickup_slot_id) if order.pickup_slot_id else None
+    current_task = (
+        db.query(Task)
+        .filter(
+            Task.order_id == order.order_id,
+            Task.status.notin_(FINAL_TASK_STATUSES),
+        )
+        .order_by(Task.task_id)
+        .first()
+    )
 
     return {
-        "task_id": task.task_id,
-        "order_id": task.order_id,
-        "order_no": order.order_no if order else None,
-        "assigned_robot_id": task.assigned_robot_id,
-        "task_type": task.task_type,
-        "status": task.status,
-        "source_zone_id": task.source_zone_id,
-        "target_zone_id": task.target_zone_id,
-        "result_message": task.result_message,
+        "order_id": order.order_id,
+        "order_no": order.order_no,
+        "status": order.status,
+        "priority": order.priority,
+        "pickup_slot_id": order.pickup_slot_id,
+        "pickup_slot_name": pickup_slot.slot_name if pickup_slot else None,
+        "current_task_id": current_task.task_id if current_task else None,
+        "current_task_type": current_task.task_type if current_task else None,
+        "current_task_status": current_task.status if current_task else None,
+        "assigned_robot_id": current_task.assigned_robot_id if current_task else None,
     }
 
 
@@ -145,6 +161,7 @@ def create_fleet_task(
         assigned_robot_id=task_create.assigned_robot_id,
         task_type=task_create.task_type,
         status=task_create.status,
+        priority=task_create.priority,
         source_zone_id=task_create.source_zone_id,
         target_zone_id=task_create.target_zone_id,
         result_message=task_create.result_message,
@@ -163,6 +180,7 @@ def create_fleet_task(
 def list_fleet_tasks(
     robot_id: str | None = None,
     status: TaskStatus | None = None,
+    task_type: TaskType | None = None,
     order_id: int | None = None,
     db: Session = Depends(get_db),
 ):
@@ -174,11 +192,14 @@ def list_fleet_tasks(
     if status is not None:
         task_query = task_query.filter(Task.status == status)
 
+    if task_type is not None:
+        task_query = task_query.filter(Task.task_type == task_type)
+
     if order_id is not None:
         task_query = task_query.filter(Task.order_id == order_id)
 
     tasks = task_query.order_by(Task.task_id.desc()).all()
-    return [build_task_summary_response(db, task) for task in tasks]
+    return [build_task_summary(db, task) for task in tasks]
 
 
 @router.get("/orders/{order_id}/tasks", response_model=list[FleetTaskSummaryRead])
@@ -195,7 +216,7 @@ def list_order_tasks(
         .order_by(Task.task_id)
         .all()
     )
-    return [build_task_summary_response(db, task) for task in tasks]
+    return [build_task_summary(db, task) for task in tasks]
 
 
 @router.patch("/orders/{order_id}", response_model=FleetStateUpdateRead)
@@ -242,6 +263,8 @@ def update_task_state(
     if not task:
         raise HTTPException(status_code=404, detail="task not found")
 
+    previous_status = task.status
+
     if state_update.status is not None:
         task.status = state_update.status
 
@@ -256,6 +279,20 @@ def update_task_state(
     if state_update.result_message is not None:
         task.result_message = state_update.result_message
 
+    if state_update.status is not None and previous_status != task.status:
+        db.add(
+            TaskEvent(
+                task_id=task.task_id,
+                robot_id=task.assigned_robot_id,
+                from_status=previous_status,
+                to_status=task.status,
+                event_name=f"TASK_{task.status}",
+                reason=task.result_message,
+                created_at=datetime.now(UTC),
+            )
+        )
+
+    apply_task_runtime_state(db, task)
     db.commit()
     background_tasks.add_task(broadcast_all_status)
     return {"status": "ok"}
@@ -291,6 +328,7 @@ def create_task_event(
     if event_create.update_task_status:
         task.status = event_create.to_status
 
+    apply_task_runtime_state(db, task)
     db.commit()
     db.refresh(task_event)
     background_tasks.add_task(broadcast_all_status)
@@ -353,9 +391,43 @@ def update_robot_state(
     if "pos_theta" in state_update.model_fields_set:
         robot.pos_theta = state_update.pos_theta
 
+    assign_ready_tasks(db, preferred_robot_id=robot_id)
     db.commit()
     background_tasks.add_task(broadcast_all_status)
     return {"status": "ok"}
+
+
+@router.post("/assignments/run")
+def run_task_assignment(
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    assigned_count = assign_ready_tasks(db)
+    db.commit()
+    background_tasks.add_task(broadcast_all_status)
+    return {"status": "ok", "assigned_count": assigned_count}
+
+
+@router.get("/orders", response_model=list[FleetOrderSummaryRead])
+def list_fleet_orders(
+    status: OrderStatus | None = None,
+    include_completed: bool = False,
+    db: Session = Depends(get_db),
+):
+    order_query = db.query(Order)
+
+    if status is not None:
+        order_query = order_query.filter(Order.status == status)
+    elif not include_completed:
+        order_query = order_query.filter(Order.status.notin_(("COMPLETED", "ERROR")))
+
+    orders = (
+        order_query
+        .order_by(Order.priority.desc(), Order.order_id)
+        .limit(50)
+        .all()
+    )
+    return [build_order_summary_response(db, order) for order in orders]
 
 
 @router.post("/orders/{order_id}/assign-pickup-slot", response_model=FleetPickupSlotAssignmentRead)

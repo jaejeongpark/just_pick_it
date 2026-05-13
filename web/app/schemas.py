@@ -43,7 +43,7 @@ class AdminLlmMessageRead(BaseModel):
     assigned_robot_id: str | None = None
     target_zone_id: int | None = None
     target_zone_name: str | None = None
-    provider: str = "mock"
+    provider: str = "local"
 
 
 class OrderItemCreate(BaseModel):
@@ -98,13 +98,14 @@ RobotStatus = Literal[
     "WAITING",
     "STANDBY",
     "SORTING",
-    "DELIVERING",
+    "LOADING",
+    "PARKING",
     "INSPECTING",
     "UNLOADING",
     "PATROLLING",
     "CHARGING",
     "RETURNING",
-    "PARKING",
+    "DOCKING",
     "EMERGENCY_STOP",
     "ERROR",
     "OFFLINE",
@@ -121,7 +122,7 @@ TaskType = Literal[
     "STANDBY_LOAD",
     "STANDBY_UNLOAD",
     "SORTING",
-    "DELIVERY",
+    "LOAD",
     "INSPECTION",
     "UNLOAD",
     "PATROL",
@@ -139,17 +140,8 @@ ExceptionType = Literal[
     "INSPECTION_FAIL",
     "HUMAN_DETECTED",
     "SYSTEM_ERROR",
+    "FIRE_DETECTED",
 ]
-
-
-class AdminRobotCreate(BaseModel):
-    robot_id: str = Field(min_length=1, max_length=30)
-    status: RobotStatus = "IDLE"
-    ros_namespace: str | None = None
-    battery_level: int | None = Field(default=None, ge=0, le=100)
-    pos_x: float | None = None
-    pos_y: float | None = None
-    pos_theta: float | None = None
 
 
 class AdminPickupSlotCreate(BaseModel):
@@ -160,6 +152,7 @@ class AdminPickupSlotCreate(BaseModel):
 class AdminTaskCreate(BaseModel):
     task_type: TaskType
     status: TaskStatus = "QUEUED"
+    priority: int = Field(default=1, ge=0)
     order_id: int | None = None
     assigned_robot_id: str | None = None
     source_zone_id: int | None = None
@@ -172,6 +165,7 @@ class FleetTaskCreate(BaseModel):
     order_id: int | None = None
     assigned_robot_id: str | None = None
     status: TaskStatus = "QUEUED"
+    priority: int = Field(default=1, ge=0)
     source_zone_id: int | None = None
     target_zone_id: int | None = None
     result_message: str | None = None
@@ -210,6 +204,13 @@ class FleetTaskRead(BaseModel):
     task_id: int
 
 
+class FleetZonePoseRead(BaseModel):
+    x: float
+    y: float
+    z: float
+    theta: float | None = None
+
+
 class FleetTaskSummaryRead(BaseModel):
     task_id: int
     order_id: int | None = None
@@ -217,9 +218,27 @@ class FleetTaskSummaryRead(BaseModel):
     assigned_robot_id: str | None = None
     task_type: str
     status: str
+    priority: int
     source_zone_id: int | None = None
+    source_zone_name: str | None = None
+    source_zone_pose: FleetZonePoseRead | None = None
     target_zone_id: int | None = None
+    target_zone_name: str | None = None
+    target_zone_pose: FleetZonePoseRead | None = None
     result_message: str | None = None
+
+
+class FleetOrderSummaryRead(BaseModel):
+    order_id: int
+    order_no: str
+    status: str
+    priority: int
+    pickup_slot_id: int | None = None
+    pickup_slot_name: str | None = None
+    current_task_id: int | None = None
+    current_task_type: str | None = None
+    current_task_status: str | None = None
+    assigned_robot_id: str | None = None
 
 
 class FleetPickupSlotRead(BaseModel):

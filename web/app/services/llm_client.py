@@ -1,5 +1,4 @@
 import json
-import re
 from typing import Any
 
 import anthropic
@@ -20,6 +19,8 @@ VALID_ACTIONS = {
     "EXCEPTION_SUMMARY",
     "CHAT",
 }
+
+LOCAL_PATROL_ZONE_NAME = "A_ZONE"
 
 
 # Claude에게 "일반 대화"가 아니라 "명령 해석기" 역할을 맡긴다.
@@ -92,7 +93,8 @@ def build_llm_message(message: str, context: dict[str, Any] | None = None) -> di
     """Return the admin LLM response used by /api/admin/llm/messages.
 
     현재 데모/로컬 개발에서는 Claude API key가 없을 수 있다.
-    그래서 key가 없으면 mock으로 동작하고, key가 있으면 Claude를 직접 호출한다.
+    그래서 key가 없으면 Claude tool-use 형식의 고정 JSON을 반환하고,
+    key가 있으면 Claude를 직접 호출한다.
     """
 
     context = context or {}
@@ -100,8 +102,8 @@ def build_llm_message(message: str, context: dict[str, Any] | None = None) -> di
     if ANTHROPIC_API_KEY:
         return request_claude_message(message)
 
-    response = build_mock_message(message, context)
-    response["provider"] = "mock"
+    response = build_local_message(message, context)
+    response["provider"] = "local"
     return response
 
 
@@ -185,65 +187,22 @@ def extract_text_from_claude_response(response: Any) -> str:
     return text.strip()
 
 
-def build_mock_message(message: str, context: dict[str, Any]) -> dict[str, Any]:
-    """Local fallback used when ANTHROPIC_API_KEY is not set."""
-
-    lower_message = message.lower()
-
-    if "순찰" in lower_message or "patrol" in lower_message:
-        target_zone_id, target_zone_name = parse_zone(message)
-        zone_text = target_zone_name or (f"{target_zone_id}번 구역" if target_zone_id else "지정 구역")
-        return {
-            "result": "ok",
-            "message": f"{zone_text} 순찰 명령으로 해석했습니다. Claude 키 설정 후 실제 명령 해석으로 전환됩니다.",
-            "action": "PATROL",
-            "task_id": None,
-            "assigned_robot_id": None,
-            "target_zone_id": target_zone_id,
-            "target_zone_name": target_zone_name,
-        }
-
-    if "재고" in lower_message or "stock" in lower_message:
-        low_stock_count = context.get("low_stock_count", 0)
-        return {
-            "result": "ok",
-            "message": f"현재 재고 확인이 필요한 상품은 {low_stock_count}개입니다.",
-            "action": "INVENTORY_SUMMARY",
-        }
-
-    if "예외" in lower_message or "exception" in lower_message:
-        unresolved_exception_count = context.get("unresolved_exception_count", 0)
-        return {
-            "result": "ok",
-            "message": f"현재 미처리 예외는 {unresolved_exception_count}건입니다.",
-            "action": "EXCEPTION_SUMMARY",
-        }
+def build_local_message(_message: str, _context: dict[str, Any]) -> dict[str, Any]:
+    """Return a fixed tool-use shaped response when ANTHROPIC_API_KEY is not set."""
 
     return {
         "result": "ok",
-        "message": "Claude API 키가 없어 mock 응답으로 처리했습니다.",
-        "action": "CHAT",
+        "message": "A구역 순찰 명령으로 해석했습니다.",
+        "action": "PATROL",
+        "task_id": None,
+        "assigned_robot_id": None,
+        "target_zone_id": None,
+        "target_zone_name": LOCAL_PATROL_ZONE_NAME,
     }
 
 
-def parse_zone(message: str) -> tuple[int | None, str | None]:
-    """Parse simple zone expressions such as '1번 구역' or 'B 구역'."""
-
-    numeric_match = re.search(r"(\d+)\s*(번|구역|존|zone)", message, re.IGNORECASE)
-
-    if numeric_match:
-        return int(numeric_match.group(1)), None
-
-    name_match = re.search(r"([A-Za-z가-힣]+)\s*(구역|존|zone)", message, re.IGNORECASE)
-
-    if name_match:
-        return None, name_match.group(1).upper()
-
-    return None, None
-
-
 def normalize_llm_response(parsed: dict[str, Any], provider: str) -> dict[str, Any]:
-    """Keep Claude/mock output inside the API response contract."""
+    """Keep Claude/local output inside the API response contract."""
 
     action = parsed.get("action")
 

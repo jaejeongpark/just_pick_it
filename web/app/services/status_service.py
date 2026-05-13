@@ -1,6 +1,7 @@
 from sqlalchemy.orm import Session
 
-from app.models import ExceptionLog, Order, OrderItem, PickupSlot, Product, Robot, Task
+from app.models import ExceptionLog, Order, OrderItem, PickupSlot, Product, Robot, Task, Zone
+from app.services.inventory_status import is_low_stock, stock_level
 
 
 def build_order_summary(db: Session, order: Order):
@@ -50,8 +51,22 @@ def build_exception_summary(exception: ExceptionLog):
     }
 
 
+def build_zone_pose(zone: Zone | None):
+    if not zone:
+        return None
+
+    return {
+        "x": zone.pos_x,
+        "y": zone.pos_y,
+        "z": zone.pos_z,
+        "theta": zone.pos_theta,
+    }
+
+
 def build_task_summary(db: Session, task: Task):
     order = db.get(Order, task.order_id) if task.order_id else None
+    source_zone = db.get(Zone, task.source_zone_id) if task.source_zone_id else None
+    target_zone = db.get(Zone, task.target_zone_id) if task.target_zone_id else None
 
     return {
         "task_id": task.task_id,
@@ -60,6 +75,13 @@ def build_task_summary(db: Session, task: Task):
         "assigned_robot_id": task.assigned_robot_id,
         "task_type": task.task_type,
         "status": task.status,
+        "priority": task.priority,
+        "source_zone_id": task.source_zone_id,
+        "source_zone_name": source_zone.zone_name if source_zone else None,
+        "source_zone_pose": build_zone_pose(source_zone),
+        "target_zone_id": task.target_zone_id,
+        "target_zone_name": target_zone.zone_name if target_zone else None,
+        "target_zone_pose": build_zone_pose(target_zone),
         "result_message": task.result_message,
     }
 
@@ -70,6 +92,7 @@ def build_product_summary(product: Product):
         "name": product.name,
         "image_url": product.image_url,
         "stock_qty": product.stock_qty,
+        "stock_level": stock_level(product.stock_qty),
         "storage_location": product.storage_location,
     }
 
@@ -144,7 +167,7 @@ def build_admin_status(db: Session):
         ],
         "low_stock_count": sum(
             1 for product in products
-            if product.stock_qty <= 1
+            if is_low_stock(product.stock_qty)
         ),
         "pickup_slots": [
             {

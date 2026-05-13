@@ -65,7 +65,14 @@ cd ~/autonomous_sys_ws
 web/scripts/reset_demo_data.sh
 ```
 
-초기화 후 상품은 테스트 상품 6종이 각 5개씩 들어갑니다.
+Fleet runtime API smoke test:
+
+```bash
+cd ~/autonomous_sys_ws
+web/.venv/bin/python web/scripts/smoke_runtime_flow.py --reset-db
+```
+
+초기화 후 상품은 seed 기준 상품 6종이 각 2개씩 들어갑니다.
 
 브라우저:
 
@@ -74,16 +81,6 @@ Customer UI : http://localhost:8000/customer
 Admin UI    : http://localhost:8000/admin
 API Docs    : http://localhost:8000/docs
 DB Health   : http://localhost:8000/api/health/db
-```
-
-자동 데모 실행:
-
-```text
-1. Admin UI 접속
-2. 왼쪽 하단 데모 실행 버튼 클릭
-3. 랜덤 상품 주문 생성
-4. 2초 간격으로 주문 접수 -> task 생성 -> 선별 -> 배송 -> 검수 -> 픽업 준비 상태 전환
-5. Admin/Customer UI는 WebSocket으로 자동 갱신
 ```
 
 DB 구조까지 다시 만들고 싶으면:
@@ -126,7 +123,6 @@ web/scripts/reset_demo_data.sh
 - Vision/Robot 예외 보고 API
 - exception 처리 완료
 - 긴급정지 / 재개
-- 대시보드 데모 실행 버튼으로 주문 생성부터 픽업 준비까지 자동 상태 전환
 ```
 
 웹 쪽에서 아직 실제 외부 시스템과 연결하지 않은 것:
@@ -134,13 +130,14 @@ web/scripts/reset_demo_data.sh
 ```text
 - 실제 Robot Control Node / Control Bridge / ROS2 연결
 - Claude API key 설정 후 실제 LLM 호출 테스트
-- 실제 Vision Server와의 영상 분석 요청/응답 연결
+- Robot Control Node와 Vision Server 사이의 영상 분석 요청/응답 연결
 - task_event를 관리자 UI 타임라인으로 보여주는 화면
 - 재고 임계치 알림을 exception/alert로 자동 생성하는 정책
 ```
 
-즉, 현재 웹은 **로컬 DB와 UI 관제 기준으로는 바로 시연 가능한 상태**이고, 남은 큰 작업은 외부 Robot Control Node/Vision 시스템을 실제로 붙이는 일입니다.  
-LLM은 `ANTHROPIC_API_KEY`를 넣으면 Claude API로 호출하고, 비워두면 mock 응답으로 동작합니다.
+즉, 현재 웹은 **로컬 DB와 UI 관제 기준으로는 바로 시연 가능한 상태**이고, 남은 큰 작업은 외부 Robot Control Node/Vision 시스템을 실제로 붙이는 일입니다.
+Vision Server는 Control Server가 직접 중계하지 않고 Robot Control Node가 직접 호출한 뒤 결과만 `/api/fleet/*`로 보고하는 방향입니다.
+LLM은 `ANTHROPIC_API_KEY`를 넣으면 Claude API로 호출하고, 비워두면 Claude tool-use 응답과 같은 형태의 로컬 고정 JSON으로 동작합니다.
 
 ## Structure
 
@@ -263,31 +260,6 @@ web/scripts/reset_demo_data.sh
   - 시연 전 데이터를 깨끗하게 만들 때 사용
 ```
 
-## 자동 데모 실행
-
-관리자 대시보드 왼쪽 하단의 `데모 실행` 버튼은 실제 로봇 노드 없이 화면 흐름을 빠르게 확인하기 위한 시연용 기능입니다.
-
-```text
-POST /api/admin/demo/run-order
-```
-
-동작:
-
-```text
-- 이전 테스트에서 남은 미완료 주문/task는 데모 진행을 막지 않도록 정리
-- 재고가 남은 상품 중 1~2종 랜덤 선택
-- 새 주문 생성
-- 선택 상품 재고 1개씩 차감
-- STANDBY_LOAD / SORTING / DELIVERY / STANDBY_UNLOAD / INSPECTION / UNLOAD task 생성
-- 주문 1건당 AMR 1대 배정
-- STANDBY_LOAD / DELIVERY / STANDBY_UNLOAD는 같은 AMR 사용
-- INSPECTION / UNLOAD는 COBOT2 사용
-- 2초 간격으로 task/order/robot/pickup_slot 상태 자동 전환
-- PICKUP_READY가 되면 고객 UI에 픽업 가능 상태 표시
-```
-
-실제 로봇 연동에서는 이 버튼 대신 각 Robot Control Node 또는 Control Bridge가 `/api/fleet/*` API로 상태를 보고합니다.
-
 ## Environment
 
 `web/.env.example`은 예시 파일입니다.  
@@ -324,7 +296,7 @@ CLAUDE_MAX_TOKENS=512
 CLAUDE_TIMEOUT_SECONDS=10
 ```
 
-`ANTHROPIC_API_KEY`가 비어 있으면 `/api/admin/llm/messages`는 mock 응답으로 동작합니다.  
+`ANTHROPIC_API_KEY`가 비어 있으면 `/api/admin/llm/messages`는 `A_ZONE` 순찰 명령 JSON을 로컬로 반환합니다.
 키를 넣으면 Anthropic 공식 Python SDK로 Claude Messages API를 호출합니다.
 
 ## Robot Runtime API
@@ -333,12 +305,15 @@ CLAUDE_TIMEOUT_SECONDS=10
 현재 프로젝트 방향에서는 Fleet Manager 전용 API가 아니라 각 Robot Control Node 또는 Control Bridge가 task/robot/order 상태를 보고하는 runtime API로 사용합니다.
 
 각 로봇 담당 노드는 자기 로봇의 task 조회, 상태 보고, 예외 보고를 수행하고, Control Server는 받은 상태를 DB에 반영합니다.
+고객 주문 생성 시 기본 task는 자동 생성되며, 가능한 로봇에는 ready task가 `ASSIGNED` 상태로 자동 배정됩니다.
 
 ```text
 GET   /api/fleet/tasks
 POST  /api/fleet/tasks
+GET   /api/fleet/orders
 GET   /api/fleet/orders/{order_id}/tasks
 PATCH /api/fleet/orders/{order_id}
+POST  /api/fleet/assignments/run
 POST  /api/fleet/orders/{order_id}/assign-pickup-slot
 PATCH /api/fleet/tasks/{task_id}
 POST  /api/fleet/tasks/{task_id}/events
@@ -352,9 +327,16 @@ POST  /api/fleet/exceptions
 조회 예시:
 
 ```bash
-curl "http://localhost:8000/api/fleet/tasks?robot_id=AMR1&status=QUEUED"
+curl "http://localhost:8000/api/fleet/tasks?robot_id=AMR_1&status=ASSIGNED"
+curl "http://localhost:8000/api/fleet/orders?status=ORDER_WAIT"
 curl "http://localhost:8000/api/fleet/orders/7/tasks"
 curl "http://localhost:8000/api/fleet/pickup-slots?status=EMPTY"
+```
+
+배정 재시도 예시:
+
+```bash
+curl -X POST http://localhost:8000/api/fleet/assignments/run
 ```
 
 검수 시작 시점 픽업 슬롯 예약 예시:
@@ -363,14 +345,14 @@ curl "http://localhost:8000/api/fleet/pickup-slots?status=EMPTY"
 curl -X POST http://localhost:8000/api/fleet/orders/7/assign-pickup-slot
 ```
 
-이 API는 가장 낮은 번호의 `EMPTY` 슬롯을 하나 선택해 `RESERVED`로 바꾸고, `orders.pickup_slot_id`에 저장합니다.
+일반 흐름에서는 `INSPECTION` task를 `RUNNING`으로 바꿀 때 자동 예약됩니다. 이 API는 수동 테스트나 예외 복구용입니다.
 
 예시:
 
 ```bash
-curl -X PATCH http://localhost:8000/api/fleet/robots/AMR1 \
+curl -X PATCH http://localhost:8000/api/fleet/robots/AMR_1 \
   -H "Content-Type: application/json" \
-  -d '{"status":"DELIVERING","current_task_id":12,"battery_level":84,"pos_x":1.2,"pos_y":0.4}'
+  -d '{"status":"MOVING","current_task_id":12,"battery_level":84,"pos_x":1.2,"pos_y":0.4}'
 ```
 
 작업 이벤트 기록 예시:
@@ -378,7 +360,7 @@ curl -X PATCH http://localhost:8000/api/fleet/robots/AMR1 \
 ```bash
 curl -X POST http://localhost:8000/api/fleet/tasks/12/events \
   -H "Content-Type: application/json" \
-  -d '{"robot_id":"AMR1","to_status":"RUNNING","event_name":"DELIVERY_STARTED","reason":"AMR started delivery"}'
+  -d '{"robot_id":"AMR_1","to_status":"RUNNING","event_name":"STANDBY_UNLOAD_STARTED","reason":"AMR started moving to unloading standby zone"}'
 ```
 
 예외 보고 예시:
@@ -386,7 +368,7 @@ curl -X POST http://localhost:8000/api/fleet/tasks/12/events \
 ```bash
 curl -X POST http://localhost:8000/api/fleet/exceptions \
   -H "Content-Type: application/json" \
-  -d '{"exception_type":"INSPECTION_FAIL","robot_id":"COBOT2","task_id":13,"order_id":7,"detail":"검수 결과가 주문과 일치하지 않음"}'
+  -d '{"exception_type":"INSPECTION_FAIL","robot_id":"INSPECTION_COBOT","task_id":13,"order_id":7,"detail":"검수 결과가 주문과 일치하지 않음"}'
 ```
 
 ## Troubleshooting

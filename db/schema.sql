@@ -31,13 +31,14 @@ CREATE TYPE robot_status AS ENUM (
     'WAITING',
     'STANDBY',
     'SORTING',
-    'DELIVERING',
+    'LOADING',
+    'PARKING',
     'INSPECTING',
     'UNLOADING',
     'PATROLLING',
     'CHARGING',
     'RETURNING',
-    'PARKING',
+    'DOCKING',
     'EMERGENCY_STOP',
     'ERROR',
     'OFFLINE'
@@ -47,7 +48,7 @@ CREATE TYPE task_type AS ENUM (
     'STANDBY_LOAD',
     'STANDBY_UNLOAD',
     'SORTING',
-    'DELIVERY',
+    'LOAD',
     'INSPECTION',
     'UNLOAD',
     'PATROL',
@@ -74,7 +75,8 @@ CREATE TYPE exception_type AS ENUM (
     'SORTING_FAIL',
     'INSPECTION_FAIL',
     'HUMAN_DETECTED',
-    'SYSTEM_ERROR'
+    'SYSTEM_ERROR',
+    'FIRE_DETECTED'
 );
 
 CREATE TABLE zone (
@@ -104,7 +106,7 @@ CREATE TABLE orders (
     order_id SERIAL PRIMARY KEY,
     order_no VARCHAR(30) UNIQUE,
     status order_status NOT NULL DEFAULT 'ORDER_RECEIVED',
-    priority INT NOT NULL DEFAULT 1,
+    priority INT NOT NULL DEFAULT 2,
     pickup_slot_id INT REFERENCES pickup_slot(slot_id)
 );
 
@@ -133,6 +135,7 @@ CREATE TABLE task (
     assigned_robot_id VARCHAR(30) REFERENCES robot(robot_id),
     task_type task_type NOT NULL,
     status task_status NOT NULL DEFAULT 'QUEUED',
+    priority INT NOT NULL DEFAULT 1,
     source_zone_id INT REFERENCES zone(zone_id),
     target_zone_id INT REFERENCES zone(zone_id),
     result_message TEXT
@@ -184,6 +187,9 @@ ON task(assigned_robot_id);
 
 CREATE INDEX idx_task_status
 ON task(status);
+
+CREATE INDEX idx_task_priority
+ON task(priority);
 
 CREATE INDEX idx_task_event_task_id
 ON task_event(task_id);
