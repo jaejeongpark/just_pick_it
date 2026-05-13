@@ -9,7 +9,6 @@ const robotDonut = document.querySelector("#robot-donut");
 const summaryOrders = document.querySelector("#summary-orders");
 const summaryExceptions = document.querySelector("#summary-exceptions");
 const summaryTasks = document.querySelector("#summary-tasks");
-const summaryLowStock = document.querySelector("#summary-low-stock");
 const robotStatus = document.querySelector("#robot-status");
 const mapRobotLayer = document.querySelector("#map-robot-layer");
 const robotDetailPanel = document.querySelector("#robot-detail-panel");
@@ -25,12 +24,17 @@ const taskList = document.querySelector("#task-list");
 const exceptionList = document.querySelector("#exception-list");
 const emergencyStopButton = document.querySelector("#emergency-stop-button");
 const resumeButton = document.querySelector("#resume-button");
-const demoRunButton = document.querySelector("#demo-run-button");
 const orderHistoryButton = document.querySelector("#order-history-button");
-const exceptionHistoryButton = document.querySelector("#exception-history-button");
+const exceptionHistoryButton = document.querySelector(
+  "#exception-history-button",
+);
 const robotManageButton = document.querySelector("#robot-manage-button");
-const pickupSlotManageButton = document.querySelector("#pickup-slot-manage-button");
-const inventoryManageButton = document.querySelector("#inventory-manage-button");
+const pickupSlotManageButton = document.querySelector(
+  "#pickup-slot-manage-button",
+);
+const inventoryManageButton = document.querySelector(
+  "#inventory-manage-button",
+);
 const taskViewButton = document.querySelector("#task-view-button");
 const modalBackdrop = document.querySelector("#modal-backdrop");
 const modalPanel = document.querySelector(".modal-panel");
@@ -54,9 +58,7 @@ let latestAdminStatus = null;
 let selectedRobotId = null;
 let selectedOrderId = null;
 let selectedTaskId = null;
-const LOW_STOCK_MAX = 1;
-const WARNING_STOCK_QTY = 2;
-const NORMAL_STOCK_MIN = 3;
+const STOCK_LEVELS = new Set(["low", "warning", "normal"]);
 const ORDER_STATUSES = [
   "ORDER_RECEIVED",
   "ORDER_WAIT",
@@ -79,7 +81,7 @@ const TASK_STATUSES = [
 const TASK_TYPES = [
   "STANDBY_LOAD",
   "SORTING",
-  "DELIVERY",
+  "LOAD",
   "STANDBY_UNLOAD",
   "INSPECTION",
   "UNLOAD",
@@ -90,42 +92,55 @@ const TASK_TYPES = [
 const ORDER_TASK_PIPELINE = [
   "STANDBY_LOAD",
   "SORTING",
-  "DELIVERY",
+  "LOAD",
   "STANDBY_UNLOAD",
   "INSPECTION",
   "UNLOAD",
 ];
 const DEFAULT_TASK_ROBOT = {
-  STANDBY_LOAD: "AMR",
-  SORTING: "COBOT1",
-  DELIVERY: "AMR",
-  STANDBY_UNLOAD: "AMR",
-  INSPECTION: "COBOT2",
-  UNLOAD: "AMR",
+  STANDBY_LOAD: "AMR_1",
+  SORTING: "SORTING_COBOT",
+  LOAD: "SORTING_COBOT",
+  STANDBY_UNLOAD: "AMR_1",
+  INSPECTION: "INSPECTION_COBOT",
+  UNLOAD: "INSPECTION_COBOT",
 };
+const ROBOT_DISPLAY_NAMES = {
+  AMR_1: "AMR 1",
+  AMR_2: "AMR 2",
+  SORTING_COBOT: "선별 로봇",
+  INSPECTION_COBOT: "검수 로봇",
+};
+const ROBOT_TYPES = ["AMR", "JetCobot"];
 const ROBOT_STATUSES = [
   "IDLE",
   "MOVING",
   "WAITING",
   "STANDBY",
   "SORTING",
-  "DELIVERING",
+  "LOADING",
+  "PARKING",
   "INSPECTING",
   "UNLOADING",
   "PATROLLING",
   "CHARGING",
   "RETURNING",
-  "PARKING",
+  "DOCKING",
   "EMERGENCY_STOP",
   "ERROR",
   "OFFLINE",
 ];
-const PICKUP_SLOT_STATUSES = [
-  "EMPTY",
-  "RESERVED",
-  "OCCUPIED",
-  "BLOCKED",
-];
+const PICKUP_SLOT_STATUSES = ["EMPTY", "RESERVED", "OCCUPIED", "BLOCKED"];
+const STOCK_LEVEL_LABELS = {
+  low: "부족",
+  warning: "부족 임박",
+  normal: "정상",
+};
+const STOCK_LEVEL_CLASSES = {
+  low: "table-danger",
+  warning: "table-warning",
+  normal: "table-ok",
+};
 
 const statusText = {
   ORDER_RECEIVED: "주문 접수",
@@ -133,7 +148,7 @@ const statusText = {
   STANDBY_LOAD: "상차 대기",
   STANDBY_UNLOAD: "하차 대기",
   SORTING: "선별 중",
-  DELIVERY: "배송",
+  LOAD: "상차",
   INSPECTION: "검수",
   UNLOAD: "하차",
   PATROL: "순찰",
@@ -148,11 +163,13 @@ const statusText = {
   MOVING: "이동",
   WAITING: "대기",
   STANDBY: "상하차 대기",
+  LOADING: "상차 중",
   UNLOADING: "하차",
   PATROLLING: "순찰",
   CHARGING: "충전",
   RETURNING: "복귀",
   PARKING: "파킹 중",
+  DOCKING: "도킹 중",
   EMERGENCY_STOP: "긴급정지",
   OFFLINE: "오프라인",
   EMPTY: "비어 있음",
@@ -202,7 +219,8 @@ function renderOrderItems(items) {
   return `
     <div class="modal-item-list">
       ${items
-        .map((item) => `
+        .map(
+          (item) => `
           <div class="cart-row ${productToneClass(item.product_id)}">
             <div class="cart-item-main">
               <div class="cart-image">${orderImageText(item)}</div>
@@ -213,7 +231,8 @@ function renderOrderItems(items) {
             </div>
             <div class="metric">${item.quantity}개</div>
           </div>
-        `)
+        `,
+        )
         .join("")}
     </div>
   `;
@@ -279,14 +298,19 @@ function closeModal() {
 }
 
 function renderOptions(values, selectedValue, emptyLabel = null) {
-  const emptyOption = emptyLabel === null
-    ? ""
-    : `<option value="" ${selectedValue === null || selectedValue === undefined ? "selected" : ""}>${emptyLabel}</option>`;
+  const isEmptySelected =
+    selectedValue === null || selectedValue === undefined || selectedValue === "";
+  const emptyOption =
+    emptyLabel === null
+      ? ""
+      : `<option value="" ${isEmptySelected ? "selected" : ""}>${emptyLabel}</option>`;
 
   return `${emptyOption}${values
-    .map((value) => `
+    .map(
+      (value) => `
       <option value="${value}" ${value === selectedValue ? "selected" : ""}>${label(value)}</option>
-    `)
+    `,
+    )
     .join("")}`;
 }
 
@@ -296,7 +320,7 @@ function renderRobotOptions(selectedRobotId) {
   return renderOptions(
     robots.map((robot) => robot.robot_id),
     selectedRobotId,
-    "미배정"
+    "미배정",
   );
 }
 
@@ -307,11 +331,13 @@ function renderTaskOptions(selectedTaskId) {
   return `
     <option value="" ${emptySelected ? "selected" : ""}>작업 없음</option>
     ${tasks
-      .map((task) => `
+      .map(
+        (task) => `
         <option value="${task.task_id}" ${task.task_id === selectedTaskId ? "selected" : ""}>
           #${task.task_id} ${label(task.task_type)}
         </option>
-      `)
+      `,
+      )
       .join("")}
   `;
 }
@@ -323,11 +349,13 @@ function renderPickupSlotOptions(selectedSlotId) {
   return `
     <option value="" ${emptySelected ? "selected" : ""}>배정 전</option>
     ${slots
-      .map((slot) => `
+      .map(
+        (slot) => `
         <option value="${slot.slot_id}" ${slot.slot_id === selectedSlotId ? "selected" : ""}>
           ${formatSlotName(slot.slot_name)} · ${label(slot.status)}
         </option>
-      `)
+      `,
+      )
       .join("")}
   `;
 }
@@ -377,7 +405,8 @@ function renderOrderTasks(order) {
       <h3>연결된 작업</h3>
       <div class="task-queue-list">
         ${tasks
-          .map((task) => `
+          .map(
+            (task) => `
             <button class="task-queue-row data-button" type="button" data-task-detail="${task.task_id}">
               <div class="queue-rank">#${task.task_id}</div>
               <div class="task-main">
@@ -391,7 +420,8 @@ function renderOrderTasks(order) {
                 <div class="state-badge ${statusClass(task.status)}">${label(task.status)}</div>
               </div>
             </button>
-          `)
+          `,
+          )
           .join("")}
       </div>
     </div>
@@ -399,13 +429,15 @@ function renderOrderTasks(order) {
 }
 
 function findOrder(orderId) {
-  return (latestAdminStatus?.orders || [])
-    .find((order) => order.order_id === orderId);
+  return (latestAdminStatus?.orders || []).find(
+    (order) => order.order_id === orderId,
+  );
 }
 
 function findTask(taskId) {
-  return (latestAdminStatus?.tasks || [])
-    .find((task) => task.task_id === taskId);
+  return (latestAdminStatus?.tasks || []).find(
+    (task) => task.task_id === taskId,
+  );
 }
 
 function orderTasks(order) {
@@ -414,10 +446,14 @@ function orderTasks(order) {
   }
 
   return (latestAdminStatus?.tasks || [])
-    .filter((task) => task.order_id === order.order_id || task.order_no === order.order_no)
-    .sort((a, b) =>
-      taskTypeOrder(a.task_type) - taskTypeOrder(b.task_type)
-      || a.task_id - b.task_id
+    .filter(
+      (task) =>
+        task.order_id === order.order_id || task.order_no === order.order_no,
+    )
+    .sort(
+      (a, b) =>
+        taskTypeOrder(a.task_type) - taskTypeOrder(b.task_type) ||
+        a.task_id - b.task_id,
     );
 }
 
@@ -430,8 +466,8 @@ function expectedTaskStatus(orderStatus, taskType) {
   const orderStage = {
     ORDER_RECEIVED: -1,
     ORDER_WAIT: -1,
-    SORTING: 1,
-    DELIVERING: 2,
+    SORTING: 2,
+    DELIVERING: 3,
     INSPECTING: 4,
     PICKUP_READY: 6,
     COMPLETED: 6,
@@ -459,7 +495,9 @@ function taskQueueForOrder(order) {
   const actualTasks = orderTasks(order);
 
   return ORDER_TASK_PIPELINE.map((taskType) => {
-    const task = actualTasks.find((candidate) => candidate.task_type === taskType);
+    const task = actualTasks.find(
+      (candidate) => candidate.task_type === taskType,
+    );
 
     if (task) {
       return task;
@@ -499,12 +537,13 @@ function orderProductSummaryMarkup(order) {
   }
 
   const firstItem = order.items[0];
-  const product = (latestAdminStatus?.products || [])
-    .find((candidate) => candidate.product_id === firstItem.product_id) || {
-      product_id: firstItem.product_id,
-      name: firstItem.product_name,
-      image_url: null,
-    };
+  const product = (latestAdminStatus?.products || []).find(
+    (candidate) => candidate.product_id === firstItem.product_id,
+  ) || {
+    product_id: firstItem.product_id,
+    name: firstItem.product_name,
+    image_url: null,
+  };
 
   return `
     <span class="order-product-cell">
@@ -522,11 +561,17 @@ function normalizeOrderWorkSelection(data) {
   const orders = data.orders || [];
   const tasks = data.tasks || [];
 
-  if (selectedTaskId !== null && !tasks.some((task) => task.task_id === selectedTaskId)) {
+  if (
+    selectedTaskId !== null &&
+    !tasks.some((task) => task.task_id === selectedTaskId)
+  ) {
     selectedTaskId = null;
   }
 
-  if (selectedOrderId !== null && !orders.some((order) => order.order_id === selectedOrderId)) {
+  if (
+    selectedOrderId !== null &&
+    !orders.some((order) => order.order_id === selectedOrderId)
+  ) {
     selectedOrderId = null;
   }
 
@@ -536,12 +581,13 @@ function normalizeOrderWorkSelection(data) {
 }
 
 function orderItemCard(item) {
-  const product = (latestAdminStatus?.products || [])
-    .find((candidate) => candidate.product_id === item.product_id) || {
-      product_id: item.product_id,
-      name: item.product_name,
-      image_url: null,
-    };
+  const product = (latestAdminStatus?.products || []).find(
+    (candidate) => candidate.product_id === item.product_id,
+  ) || {
+    product_id: item.product_id,
+    name: item.product_name,
+    image_url: null,
+  };
 
   return `
     <div class="work-detail-item">
@@ -559,18 +605,27 @@ function renderOrderWorkDetail() {
     return;
   }
 
-  const selectedTask = selectedTaskId === null ? null : findTask(selectedTaskId);
-  const order = selectedTask?.order_id ? findOrder(selectedTask.order_id) : findOrder(selectedOrderId);
+  const selectedTask =
+    selectedTaskId === null ? null : findTask(selectedTaskId);
+  const order = selectedTask?.order_id
+    ? findOrder(selectedTask.order_id)
+    : findOrder(selectedOrderId);
 
   if (!order) {
-    orderWorkDetailPanel.innerHTML = '<div class="empty-state">선택된 주문이 없습니다</div>';
+    orderWorkDetailPanel.innerHTML =
+      '<div class="empty-state">선택된 주문이 없습니다</div>';
     return;
   }
 
   const tasks = taskQueueForOrder(order);
-  const activeTask = selectedTask && (selectedTask.order_id === order.order_id || selectedTask.order_no === order.order_no)
-    ? selectedTask
-    : tasks.find((task) => ["RUNNING", "ASSIGNED"].includes(task.status)) || tasks[0] || null;
+  const activeTask =
+    selectedTask &&
+    (selectedTask.order_id === order.order_id ||
+      selectedTask.order_no === order.order_no)
+      ? selectedTask
+      : tasks.find((task) => ["RUNNING", "ASSIGNED"].includes(task.status)) ||
+        tasks[0] ||
+        null;
 
   orderWorkDetailPanel.innerHTML = `
     <div class="work-detail-header">
@@ -601,16 +656,22 @@ function renderOrderWorkDetail() {
       <div class="work-detail-block">
         <h3>작업 큐</h3>
         <div class="work-detail-task-list">
-          ${tasks.length === 0 ? '<span class="muted">연결된 작업 없음</span>' : tasks
-            .map((task) => `
+          ${
+            tasks.length === 0
+              ? '<span class="muted">연결된 작업 없음</span>'
+              : tasks
+                  .map(
+                    (task) => `
               <button class="work-detail-task ${task.task_id && task.task_id === activeTask?.task_id ? "is-selected" : ""} ${task.is_placeholder ? "is-planned" : ""}" type="button" ${task.task_id ? `data-work-task="${task.task_id}"` : "disabled"}>
                 <span>${task.task_id ? `#${task.task_id}` : "예정"}</span>
                 <strong>${label(task.task_type)}</strong>
                 <em>${task.assigned_robot_id || "미배정"}</em>
                 <i class="state-badge ${statusClass(task.status)}">${workTaskStatusLabel(task.status)}</i>
               </button>
-            `)
-            .join("")}
+            `,
+                  )
+                  .join("")
+          }
         </div>
       </div>
       <div class="work-detail-actions">
@@ -632,9 +693,11 @@ function renderEmpty(target, text) {
 function findRobotTask(robot) {
   const tasks = getRobotTasks(robot.robot_id);
 
-  return tasks.find((task) => task.task_id === robot.current_task_id)
-    || tasks.find((task) => task.status === "RUNNING")
-    || null;
+  return (
+    tasks.find((task) => task.task_id === robot.current_task_id) ||
+    tasks.find((task) => task.status === "RUNNING") ||
+    null
+  );
 }
 
 function getRobotTasks(robotId) {
@@ -651,14 +714,17 @@ function getRobotTasks(robotId) {
 
   return tasks
     .filter((task) => task.assigned_robot_id === robotId)
-    .sort((a, b) =>
-      (statusOrder[a.status] || 99) - (statusOrder[b.status] || 99)
-      || a.task_id - b.task_id
+    .sort(
+      (a, b) =>
+        (statusOrder[a.status] || 99) - (statusOrder[b.status] || 99) ||
+        a.task_id - b.task_id,
     );
 }
 
 function statusClass(status) {
-  return `status-${String(status || "").toLowerCase().replaceAll("_", "-")}`;
+  return `status-${String(status || "")
+    .toLowerCase()
+    .replaceAll("_", "-")}`;
 }
 
 function batteryClass(level) {
@@ -682,7 +748,17 @@ function robotCategory(robot) {
     return "error";
   }
 
-  if (["IDLE", "WAITING", "STANDBY", "PARKING", "RETURNING", "CHARGING"].includes(robot.status)) {
+  if (
+    [
+      "IDLE",
+      "WAITING",
+      "STANDBY",
+      "PARKING",
+      "RETURNING",
+      "DOCKING",
+      "CHARGING",
+    ].includes(robot.status)
+  ) {
     return "idle";
   }
 
@@ -698,7 +774,8 @@ function robotLocationText(robot) {
 
   const x = Number(robot.pos_x).toFixed(1);
   const y = Number(robot.pos_y).toFixed(1);
-  const theta = robot.pos_theta === null ? null : Number(robot.pos_theta).toFixed(1);
+  const theta =
+    robot.pos_theta === null ? null : Number(robot.pos_theta).toFixed(1);
 
   return theta === null ? `(${x}, ${y})` : `(${x}, ${y}, ${theta})`;
 }
@@ -726,18 +803,19 @@ function clampNumber(value, min, max) {
 }
 
 function mapRobotPosition(robot) {
-  if (robot.robot_id === "COBOT1") {
+  if (robot.robot_id === "SORTING_COBOT") {
     return { x: 20, y: 53 };
   }
 
-  if (robot.robot_id === "COBOT2") {
+  if (robot.robot_id === "INSPECTION_COBOT") {
     return { x: 76, y: 53 };
   }
 
   if (robot.pos_x !== null && robot.pos_y !== null) {
     const x = 15 + (Number(robot.pos_x) / 1.8) * 70;
     const y = 78 - (Number(robot.pos_y) / 1.0) * 60;
-    const offset = robot.robot_id === "AMR1" ? -1.8 : robot.robot_id === "AMR2" ? 1.8 : 0;
+    const offset =
+      robot.robot_id === "AMR_1" ? -1.8 : robot.robot_id === "AMR_2" ? 1.8 : 0;
 
     return {
       x: clampNumber(x + offset, 10, 90),
@@ -745,11 +823,11 @@ function mapRobotPosition(robot) {
     };
   }
 
-  if (robot.robot_id === "AMR1") {
+  if (robot.robot_id === "AMR_1") {
     return { x: 50, y: 24 };
   }
 
-  if (robot.robot_id === "AMR2") {
+  if (robot.robot_id === "AMR_2") {
     return { x: 50, y: 78 };
   }
 
@@ -774,13 +852,14 @@ function renderMapRobots(robots) {
       const position = mapRobotPosition(robot);
       const isAmr = robotType(robot) === "AMR";
       const markerClass = isAmr ? "map-marker-amr" : "map-marker-cobot";
+      const displayName = robotDisplayName(robot);
 
       return `
         <div class="robot-map-marker ${markerClass} ${robotColorClass(robot.robot_id)}"
           style="--marker-x: ${position.x}%; --marker-y: ${position.y}%; --heading: ${robotHeadingDeg(robot)}deg"
-          title="${robot.robot_id} · ${label(robot.status)}">
+          title="${displayName} · ${robot.robot_id} · ${label(robot.status)}">
           <i class="marker-heading"></i>
-          <span>${robot.robot_id}</span>
+          <span>${displayName}</span>
         </div>
       `;
     })
@@ -831,24 +910,35 @@ function orderProductSummary(order) {
 }
 
 function stockLevel(product) {
-  if (product.stock_qty <= LOW_STOCK_MAX) {
-    return "low";
+  if (STOCK_LEVELS.has(product.stock_level)) {
+    return product.stock_level;
   }
 
-  if (product.stock_qty === WARNING_STOCK_QTY) {
-    return "warning";
-  }
+  return "normal";
+}
 
-  if (product.stock_qty >= NORMAL_STOCK_MIN) {
-    return "normal";
-  }
+function stockLevelLabel(level) {
+  return STOCK_LEVEL_LABELS[level] || STOCK_LEVEL_LABELS.normal;
+}
 
-  return "low";
+function stockLevelClass(level) {
+  return STOCK_LEVEL_CLASSES[level] || STOCK_LEVEL_CLASSES.normal;
+}
+
+function countStockLevels(products) {
+  return products.reduce(
+    (counts, product) => {
+      counts[stockLevel(product)] += 1;
+      return counts;
+    },
+    { low: 0, warning: 0, normal: 0 },
+  );
 }
 
 function sortedExceptions(exceptions) {
-  return [...exceptions]
-    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  return [...exceptions].sort(
+    (a, b) => new Date(b.created_at) - new Date(a.created_at),
+  );
 }
 
 function allExceptionsFromStatus(data) {
@@ -867,31 +957,58 @@ function renderMiniProgress(value, status) {
 }
 
 function robotColorClass(robotId) {
-  if (robotId === "AMR1") {
+  if (robotId === "AMR_1") {
     return "robot-dot-amr1";
   }
 
-  if (robotId === "AMR2") {
+  if (robotId === "AMR_2") {
     return "robot-dot-amr2";
   }
 
-  if (robotId === "COBOT1") {
+  if (robotId === "SORTING_COBOT") {
     return "robot-dot-cobot1";
   }
 
-  if (robotId === "COBOT2") {
+  if (robotId === "INSPECTION_COBOT") {
     return "robot-dot-cobot2";
   }
 
   return "robot-dot-neutral";
 }
 
+function robotDisplayName(robotOrId) {
+  const robotId =
+    typeof robotOrId === "string" ? robotOrId : robotOrId?.robot_id;
+
+  return ROBOT_DISPLAY_NAMES[robotId] || robotId || "-";
+}
+
 function robotType(robot) {
-  return robot.robot_id.startsWith("AMR") ? "AMR" : "Cobot";
+  return robot.robot_id.startsWith("AMR") ? "AMR" : "JetCobot";
 }
 
 function robotImageUrl(robot) {
-  return robotType(robot) === "AMR" ? "/static/img/pinky.png" : "/static/img/jetcobot.png";
+  return robotType(robot) === "AMR"
+    ? "/static/img/pinky.png"
+    : "/static/img/jetcobot.png";
+}
+
+function hydrateRobotFilters() {
+  if (robotStatusFilter) {
+    robotStatusFilter.innerHTML = renderOptions(
+      ROBOT_STATUSES,
+      robotStatusFilter.value,
+      "상태 전체",
+    );
+  }
+
+  if (robotTypeFilter) {
+    robotTypeFilter.innerHTML = renderOptions(
+      ROBOT_TYPES,
+      robotTypeFilter.value,
+      "유형 전체",
+    );
+  }
 }
 
 function robotFilterValue(element) {
@@ -907,6 +1024,7 @@ function filterRobotsForManagement(robots) {
     const task = findRobotTask(robot);
     const searchable = [
       robot.robot_id,
+      robotDisplayName(robot),
       robotType(robot),
       label(robot.status),
       task?.order_no,
@@ -916,9 +1034,11 @@ function filterRobotsForManagement(robots) {
       .join(" ")
       .toLowerCase();
 
-    return (!search || searchable.includes(search))
-      && (!status || robot.status === status)
-      && (!type || robotType(robot) === type);
+    return (
+      (!search || searchable.includes(search)) &&
+      (!status || robot.status === status) &&
+      (!type || robotType(robot) === type)
+    );
   });
 }
 
@@ -928,24 +1048,28 @@ function renderRobotManagementDetail(robot) {
   }
 
   if (!robot) {
-    robotDetailPanel.innerHTML = '<div class="empty-state">선택된 로봇이 없습니다</div>';
+    robotDetailPanel.innerHTML =
+      '<div class="empty-state">선택된 로봇이 없습니다</div>';
     return;
   }
 
   const task = findRobotTask(robot);
   const type = robotType(robot);
   const imageUrl = robotImageUrl(robot);
-  const currentTask = task ? `${task.order_no || `Task #${task.task_id}`} · ${label(task.task_type)}` : "작업 없음";
+  const displayName = robotDisplayName(robot);
+  const currentTask = task
+    ? `${task.order_no || `Task #${task.task_id}`} · ${label(task.task_type)}`
+    : "작업 없음";
 
   robotDetailPanel.innerHTML = `
     <div class="robot-detail-visual">
       <div class="robot-detail-title">
         <span class="${robotColorClass(robot.robot_id)}"></span>
-        <strong>${robot.robot_id}</strong>
+        <strong title="${robot.robot_id}">${displayName}</strong>
         <span class="state-badge ${statusClass(robot.status)}">${label(robot.status)}</span>
       </div>
       <span>${type}</span>
-      <img src="${imageUrl}" alt="${robot.robot_id} ${type}">
+      <img src="${imageUrl}" alt="${displayName} ${type}">
     </div>
     <div class="robot-detail-metrics">
       <div>
@@ -982,11 +1106,18 @@ function renderRobotManagementDetail(robot) {
 function renderRobotManagement(robots) {
   const filteredRobots = filterRobotsForManagement(robots);
 
-  if (!selectedRobotId || !robots.some((robot) => robot.robot_id === selectedRobotId)) {
-    selectedRobotId = filteredRobots[0]?.robot_id || robots[0]?.robot_id || null;
+  if (
+    !selectedRobotId ||
+    !robots.some((robot) => robot.robot_id === selectedRobotId)
+  ) {
+    selectedRobotId =
+      filteredRobots[0]?.robot_id || robots[0]?.robot_id || null;
   }
 
-  const selectedRobot = robots.find((robot) => robot.robot_id === selectedRobotId) || filteredRobots[0] || null;
+  const selectedRobot =
+    robots.find((robot) => robot.robot_id === selectedRobotId) ||
+    filteredRobots[0] ||
+    null;
 
   if (selectedRobot) {
     selectedRobotId = selectedRobot.robot_id;
@@ -1012,10 +1143,11 @@ function renderRobotManagement(robots) {
         .map((robot) => {
           const task = findRobotTask(robot);
           const isSelected = robot.robot_id === selectedRobotId;
+          const displayName = robotDisplayName(robot);
 
           return `
             <div class="admin-table-row robot-management-row ${isSelected ? "selected" : ""}" data-robot-select="${robot.robot_id}">
-              <span class="robot-name-cell"><i class="${robotColorClass(robot.robot_id)}"></i><strong>${robot.robot_id}</strong></span>
+              <span class="robot-name-cell" title="${robot.robot_id}"><i class="${robotColorClass(robot.robot_id)}"></i><strong>${displayName}</strong></span>
               <span>${robotType(robot)}</span>
               <span><span class="state-badge ${statusClass(robot.status)}">${label(robot.status)}</span></span>
               <span>${renderBatteryMeter(robot.battery_level)}</span>
@@ -1059,10 +1191,11 @@ function renderRobots(robots) {
         .map((robot) => {
           const task = findRobotTask(robot);
           const robotTypeClass = robotColorClass(robot.robot_id);
+          const displayName = robotDisplayName(robot);
 
           return `
             <button class="admin-table-row robot-table-row" type="button" data-robot-detail="${robot.robot_id}">
-              <span class="robot-name-cell"><i class="${robotTypeClass}"></i>${robot.robot_id}</span>
+              <span class="robot-name-cell" title="${robot.robot_id}"><i class="${robotTypeClass}"></i>${displayName}</span>
               <span><span class="state-badge ${statusClass(robot.status)}">${label(robot.status)}</span></span>
               <span class="task-cell">${task ? `${task.order_no || `Task #${task.task_id}`} · ${label(task.task_type)}` : "-"}</span>
               <span>${renderBatteryMeter(robot.battery_level)}</span>
@@ -1096,9 +1229,12 @@ function renderOrders(orders) {
       </div>
       ${orders
         .map((order) => {
-          const linkedTaskSelected = selectedTaskId !== null && orderTasks(order)
-            .some((task) => task.task_id === selectedTaskId);
-          const isSelected = adminPage === "orders" && (order.order_id === selectedOrderId || linkedTaskSelected);
+          const linkedTaskSelected =
+            selectedTaskId !== null &&
+            orderTasks(order).some((task) => task.task_id === selectedTaskId);
+          const isSelected =
+            adminPage === "orders" &&
+            (order.order_id === selectedOrderId || linkedTaskSelected);
 
           return `
             <button class="admin-table-row order-table-row ${isSelected ? "is-selected" : ""}" type="button" data-order-detail="${order.order_id}">
@@ -1117,16 +1253,19 @@ function renderOrders(orders) {
 
 function renderPickupSlots(slots) {
   if (pickupSummaryList) {
-    pickupSummaryList.innerHTML = slots.length === 0
-      ? "-"
-      : slots
-          .map((slot) => `
+    pickupSummaryList.innerHTML =
+      slots.length === 0
+        ? "-"
+        : slots
+            .map(
+              (slot) => `
             <button class="pickup-summary-item slot-${slot.status.toLowerCase()}" type="button" data-pickup-slot-detail="${slot.slot_id}">
               <strong>${formatSlotName(slot.slot_name)}</strong>
               <span>${label(slot.status)}</span>
             </button>
-          `)
-          .join("");
+          `,
+            )
+            .join("");
   }
 
   if (!pickupSlotList) {
@@ -1139,7 +1278,8 @@ function renderPickupSlots(slots) {
   }
 
   pickupSlotList.innerHTML = slots
-    .map((slot) => `
+    .map(
+      (slot) => `
       <button class="data-row data-button slot-row slot-${slot.status.toLowerCase()}" type="button" data-pickup-slot-detail="${slot.slot_id}">
         <div>
           <strong>${formatSlotName(slot.slot_name)}</strong>
@@ -1150,7 +1290,8 @@ function renderPickupSlots(slots) {
           <span>${label(slot.status)}</span>
         </div>
       </button>
-    `)
+    `,
+    )
     .join("");
 }
 
@@ -1164,16 +1305,16 @@ function renderInventory(products) {
     return;
   }
 
-  const sortedProducts = [...products]
-    .sort((a, b) => a.stock_qty - b.stock_qty || a.product_id - b.product_id);
+  const sortedProducts = [...products].sort(
+    (a, b) => a.stock_qty - b.stock_qty || a.product_id - b.product_id,
+  );
 
   if (adminPage === "dashboard") {
-    const lowProducts = products.filter((product) => stockLevel(product) === "low");
-    const warningProducts = products.filter((product) => stockLevel(product) === "warning");
-    const normalProducts = products.filter((product) => stockLevel(product) === "normal");
+    const stockCounts = countStockLevels(products);
     const totalProducts = products.length || 1;
-    const normalEnd = (normalProducts.length / totalProducts) * 100;
-    const warningEnd = normalEnd + (warningProducts.length / totalProducts) * 100;
+    const normalEnd = (stockCounts.normal / totalProducts) * 100;
+    const warningEnd =
+      normalEnd + (stockCounts.warning / totalProducts) * 100;
 
     inventoryList.innerHTML = `
       <div class="inventory-donut-summary">
@@ -1184,16 +1325,17 @@ function renderInventory(products) {
           </div>
         </div>
         <div class="inventory-legend">
-          <span><i class="legend-teal"></i>정상 ${normalProducts.length}</span>
-          <span><i class="legend-yellow"></i>부족 임박 ${warningProducts.length}</span>
-          <span><i class="legend-red"></i>부족 ${lowProducts.length}</span>
+          <span><i class="legend-teal"></i>정상 ${stockCounts.normal}</span>
+          <span><i class="legend-yellow"></i>부족 임박 ${stockCounts.warning}</span>
+          <span><i class="legend-red"></i>부족 ${stockCounts.low}</span>
         </div>
       </div>
     `;
     return;
   }
 
-  const productsToRender = adminPage === "inventory" ? sortedProducts : sortedProducts.slice(0, 5);
+  const productsToRender =
+    adminPage === "inventory" ? sortedProducts : sortedProducts.slice(0, 5);
 
   inventoryList.innerHTML = `
     <div class="admin-table inventory-table">
@@ -1204,19 +1346,21 @@ function renderInventory(products) {
         <span>위치</span>
       </div>
       ${productsToRender
-        .map((product) => `
-          <button class="admin-table-row inventory-table-row ${stockLevel(product) !== "normal" ? "warning-row" : ""}" type="button" data-product-detail="${product.product_id}">
+        .map((product) => {
+          const level = stockLevel(product);
+
+          return `
+          <button class="admin-table-row inventory-table-row ${level !== "normal" ? "warning-row" : ""}" type="button" data-product-detail="${product.product_id}">
             <span class="inventory-product-cell">
               ${productImageMarkup(product)}
               <strong>${product.name.replace("Test ", "")}</strong>
             </span>
             <span>${product.stock_qty}</span>
-            <span class="${stockLevel(product) === "low" ? "table-danger" : stockLevel(product) === "warning" ? "table-warning" : "table-ok"}">${
-              stockLevel(product) === "low" ? "부족" : stockLevel(product) === "warning" ? "부족 임박" : "정상"
-            }</span>
+            <span class="${stockLevelClass(level)}">${stockLevelLabel(level)}</span>
             <span>${product.storage_location}</span>
           </button>
-        `)
+        `;
+        })
         .join("")}
     </div>
   `;
@@ -1237,11 +1381,15 @@ function renderTaskSnapshot(tasks) {
     return;
   }
 
-  const visibleTasks = tasks
-    .filter((task) => !["SUCCESS", "FAILED", "CANCELLED"].includes(task.status));
-  const tasksToRender = adminPage === "dashboard"
-    ? (visibleTasks.length > 0 ? visibleTasks : tasks).slice(0, 5)
-    : (visibleTasks.length > 0 ? visibleTasks : tasks);
+  const visibleTasks = tasks.filter(
+    (task) => !["SUCCESS", "FAILED", "CANCELLED"].includes(task.status),
+  );
+  const tasksToRender =
+    adminPage === "dashboard"
+      ? (visibleTasks.length > 0 ? visibleTasks : tasks).slice(0, 5)
+      : visibleTasks.length > 0
+        ? visibleTasks
+        : tasks;
 
   taskList.innerHTML = `
     <div class="admin-table task-table">
@@ -1253,7 +1401,8 @@ function renderTaskSnapshot(tasks) {
         <span>상태</span>
       </div>
       ${tasksToRender
-        .map((task) => `
+        .map(
+          (task) => `
           <button class="admin-table-row task-table-row ${adminPage === "orders" && task.task_id === selectedTaskId ? "is-selected" : ""}" type="button" data-task-detail="${task.task_id}">
             <span>#${task.task_id}</span>
             <span>${label(task.task_type)}</span>
@@ -1261,7 +1410,8 @@ function renderTaskSnapshot(tasks) {
             <span>${task.assigned_robot_id || "미배정"}</span>
             <span><span class="state-badge ${statusClass(task.status)}">${label(task.status)}</span></span>
           </button>
-        `)
+        `,
+        )
         .join("")}
     </div>
   `;
@@ -1290,14 +1440,16 @@ function renderOrderSnapshot(orders) {
         <span>진행률</span>
       </div>
       ${activeOrders
-        .map((order) => `
+        .map(
+          (order) => `
           <button class="admin-table-row dashboard-order-row" type="button" data-order-detail="${order.order_id}">
             <span><strong>${order.order_no}</strong></span>
             <span>${orderProductSummaryMarkup(order)}</span>
             <span><span class="state-badge ${statusClass(order.status)}">${label(order.status)}</span></span>
             <span>${renderMiniProgress(orderProgress(order.status), order.status)}</span>
           </button>
-        `)
+        `,
+        )
         .join("")}
     </div>
   `;
@@ -1322,7 +1474,8 @@ function renderExceptions(exceptions) {
         <span>상태</span>
       </div>
       ${exceptions
-        .map((exception) => `
+        .map(
+          (exception) => `
           <div class="admin-table-row exception-table-row ${exception.is_resolved ? "" : "danger-row"}">
             <span>${formatDateTime(exception.created_at)}</span>
             <span>${exception.robot_id || "-"}</span>
@@ -1333,7 +1486,8 @@ function renderExceptions(exceptions) {
                 : `<button class="small-action-button" type="button" data-resolve-exception="${exception.exception_id}">미조치</button>`
             }</span>
           </div>
-        `)
+        `,
+        )
         .join("")}
     </div>
   `;
@@ -1367,7 +1521,9 @@ function renderExceptionHistoryList(exceptions, query = "") {
     return;
   }
 
-  const filteredExceptions = exceptions.filter((exception) => exceptionMatches(exception, query));
+  const filteredExceptions = exceptions.filter((exception) =>
+    exceptionMatches(exception, query),
+  );
 
   if (filteredExceptions.length === 0) {
     target.innerHTML = '<div class="empty-state">검색 결과가 없습니다</div>';
@@ -1375,7 +1531,8 @@ function renderExceptionHistoryList(exceptions, query = "") {
   }
 
   target.innerHTML = filteredExceptions
-    .map((exception) => `
+    .map(
+      (exception) => `
       <div class="history-row ${exception.is_resolved ? "" : "danger-row"}">
         <div>
           <strong>${exception.exception_type}</strong>
@@ -1384,7 +1541,8 @@ function renderExceptionHistoryList(exceptions, query = "") {
         </div>
         <div class="metric">${exception.is_resolved ? "처리" : "미처리"}</div>
       </div>
-    `)
+    `,
+    )
     .join("");
 }
 
@@ -1414,7 +1572,8 @@ function renderInventoryManager(products) {
         !products || products.length === 0
           ? '<div class="empty-state">등록된 상품이 없습니다</div>'
           : products
-              .map((product) => `
+              .map(
+                (product) => `
           <div class="inventory-editor-row ${productToneClass(product.product_id)}">
             <div class="cart-item-main">
               <div class="cart-image">${productImageText(product)}</div>
@@ -1429,10 +1588,10 @@ function renderInventoryManager(products) {
               <input type="text" value="${product.storage_location}" data-product-location-input="${product.product_id}" aria-label="${product.name} location">
               <input type="text" value="${product.image_url || ""}" data-product-image-input="${product.product_id}" aria-label="${product.name} image url" placeholder="이미지 URL">
               <button class="small-action-button" type="button" data-save-product="${product.product_id}">저장</button>
-              <button class="ghost-button danger-text-button" type="button" data-delete-product="${product.product_id}">삭제</button>
             </div>
           </div>
-        `)
+        `,
+              )
               .join("")
       }
     </div>
@@ -1444,10 +1603,15 @@ function openInventoryManager() {
     return;
   }
 
-  openModal("Inventory Management", renderInventoryManager(latestAdminStatus.products || []));
+  openModal(
+    "Inventory Management",
+    renderInventoryManager(latestAdminStatus.products || []),
+  );
 }
 
 function renderProductDetail(product) {
+  const level = stockLevel(product);
+
   return `
     <div class="product-detail-editor">
       <div class="product-detail-preview">
@@ -1455,9 +1619,7 @@ function renderProductDetail(product) {
         <div>
           <strong>${product.name}</strong>
           <span>상품 #${product.product_id}</span>
-          <span class="${stockLevel(product) === "low" ? "table-danger" : stockLevel(product) === "warning" ? "table-warning" : "table-ok"}">${
-            stockLevel(product) === "low" ? "부족" : stockLevel(product) === "warning" ? "부족 임박" : "정상"
-          }</span>
+          <span class="${stockLevelClass(level)}">${stockLevelLabel(level)}</span>
         </div>
       </div>
       <div class="state-editor-form">
@@ -1488,8 +1650,9 @@ function openProductDetail(productId) {
     return;
   }
 
-  const product = (latestAdminStatus.products || [])
-    .find((item) => item.product_id === productId);
+  const product = (latestAdminStatus.products || []).find(
+    (item) => item.product_id === productId,
+  );
 
   if (!product) {
     return;
@@ -1500,30 +1663,15 @@ function openProductDetail(productId) {
 
 function renderRobotManager(robots) {
   return `
-    <div class="state-editor-form">
-      <div>
-        <label for="new-robot-id">로봇 ID</label>
-        <input id="new-robot-id" type="text" placeholder="예: AMR3">
-      </div>
-      <div>
-        <label for="new-robot-status">상태</label>
-        <select id="new-robot-status">${renderOptions(ROBOT_STATUSES, "IDLE")}</select>
-      </div>
-      <div>
-        <label for="new-robot-namespace">ROS namespace</label>
-        <input id="new-robot-namespace" type="text" placeholder="예: /amr3">
-      </div>
-      <div>
-        <label for="new-robot-battery">배터리</label>
-        <input id="new-robot-battery" type="number" min="0" max="100" placeholder="전원">
-      </div>
-      <button class="small-action-button" type="button" data-create-robot>로봇 추가</button>
-    </div>
     <div class="task-queue-list">
-      ${robots.length === 0 ? '<div class="empty-state">등록된 로봇이 없습니다</div>' : robots
-        .map((robot) => `
+      ${
+        robots.length === 0
+          ? '<div class="empty-state">등록된 로봇이 없습니다</div>'
+          : robots
+              .map(
+                (robot) => `
           <button class="task-queue-row data-button" type="button" data-robot-detail="${robot.robot_id}">
-            <div class="queue-rank">${robot.robot_id}</div>
+            <div class="queue-rank" title="${robot.robot_id}">${robotDisplayName(robot)}</div>
             <div class="task-main">
               <div class="task-title-line">
                 <strong>${label(robot.status)}</strong>
@@ -1532,8 +1680,10 @@ function renderRobotManager(robots) {
               <span>${robot.battery_level === null ? "전원 연결" : `${robot.battery_level}%`}</span>
             </div>
           </button>
-        `)
-        .join("")}
+        `,
+              )
+              .join("")
+      }
     </div>
   `;
 }
@@ -1543,7 +1693,10 @@ function openRobotManager() {
     return;
   }
 
-  openModal("Robot Management", renderRobotManager(latestAdminStatus.robots || []));
+  openModal(
+    "Robot Management",
+    renderRobotManager(latestAdminStatus.robots || []),
+  );
 }
 
 function renderPickupSlotManager(slots) {
@@ -1560,8 +1713,12 @@ function renderPickupSlotManager(slots) {
       <button class="small-action-button" type="button" data-create-pickup-slot>픽업 칸 추가</button>
     </div>
     <div class="task-queue-list">
-      ${slots.length === 0 ? '<div class="empty-state">등록된 픽업 칸이 없습니다</div>' : slots
-        .map((slot) => `
+      ${
+        slots.length === 0
+          ? '<div class="empty-state">등록된 픽업 칸이 없습니다</div>'
+          : slots
+              .map(
+                (slot) => `
           <button class="task-queue-row data-button" type="button" data-pickup-slot-detail="${slot.slot_id}">
             <div class="queue-rank">${formatSlotName(slot.slot_name)}</div>
             <div class="task-main">
@@ -1571,8 +1728,10 @@ function renderPickupSlotManager(slots) {
               </div>
             </div>
           </button>
-        `)
-        .join("")}
+        `,
+              )
+              .join("")
+      }
     </div>
   `;
 }
@@ -1582,7 +1741,10 @@ function openPickupSlotManager() {
     return;
   }
 
-  openModal("Pickup Slot Management", renderPickupSlotManager(latestAdminStatus.pickup_slots || []));
+  openModal(
+    "Pickup Slot Management",
+    renderPickupSlotManager(latestAdminStatus.pickup_slots || []),
+  );
 }
 
 function renderTaskDetail(task) {
@@ -1652,8 +1814,12 @@ function renderTaskManager(tasks) {
       <button class="small-action-button" type="button" data-create-task>작업 추가</button>
     </div>
     <div class="task-queue-list">
-      ${!tasks || tasks.length === 0 ? '<div class="empty-state">작업이 없습니다</div>' : tasks
-        .map((task) => `
+      ${
+        !tasks || tasks.length === 0
+          ? '<div class="empty-state">작업이 없습니다</div>'
+          : tasks
+              .map(
+                (task) => `
           <button class="task-queue-row data-button" type="button" data-task-detail="${task.task_id}">
             <div class="queue-rank">#${task.task_id}</div>
             <div class="task-main">
@@ -1667,8 +1833,10 @@ function renderTaskManager(tasks) {
               <div class="state-badge ${statusClass(task.status)}">${label(task.status)}</div>
             </div>
           </button>
-        `)
-        .join("")}
+        `,
+              )
+              .join("")
+      }
     </div>
   `;
 }
@@ -1678,7 +1846,10 @@ function openTaskManager() {
     return;
   }
 
-  openModal("Task Management", renderTaskManager(latestAdminStatus.tasks || []));
+  openModal(
+    "Task Management",
+    renderTaskManager(latestAdminStatus.tasks || []),
+  );
 }
 
 function openTaskDetail(taskId) {
@@ -1686,8 +1857,9 @@ function openTaskDetail(taskId) {
     return;
   }
 
-  const task = (latestAdminStatus.tasks || [])
-    .find((item) => item.task_id === taskId);
+  const task = (latestAdminStatus.tasks || []).find(
+    (item) => item.task_id === taskId,
+  );
 
   if (!task) {
     return;
@@ -1705,9 +1877,12 @@ function renderAdminStatus(data) {
       counts[robotCategory(robot)] += 1;
       return counts;
     },
-    { total: 0, idle: 0, working: 0, error: 0 }
+    { total: 0, idle: 0, working: 0, error: 0 },
   );
-  const activeRobots = robotCounts.total - robotCounts.error - data.robots.filter((robot) => robot.status === "OFFLINE").length;
+  const activeRobots =
+    robotCounts.total -
+    robotCounts.error -
+    data.robots.filter((robot) => robot.status === "OFFLINE").length;
 
   if (summaryRobots) {
     summaryRobots.textContent = String(robotCounts.total);
@@ -1734,7 +1909,8 @@ function renderAdminStatus(data) {
   }
 
   if (robotDonut) {
-    const statusTotal = robotCounts.idle + robotCounts.working + robotCounts.error || 1;
+    const statusTotal =
+      robotCounts.idle + robotCounts.working + robotCounts.error || 1;
     const idleEnd = (robotCounts.idle / statusTotal) * 100;
     const workingEnd = idleEnd + (robotCounts.working / statusTotal) * 100;
     const errorEnd = workingEnd + (robotCounts.error / statusTotal) * 100;
@@ -1747,19 +1923,15 @@ function renderAdminStatus(data) {
 
   if (summaryExceptions) {
     summaryExceptions.textContent = String(
-      data.unresolved_exception_count ?? data.exceptions.length
+      data.unresolved_exception_count ?? data.exceptions.length,
     );
   }
 
   if (summaryTasks) {
     summaryTasks.textContent = String(
-      data.orders.filter((order) => !["COMPLETED", "ERROR"].includes(order.status)).length
-    );
-  }
-
-  if (summaryLowStock) {
-    summaryLowStock.textContent = String(
-      (data.products || []).filter((product) => stockLevel(product) === "low").length
+      data.orders.filter(
+        (order) => !["COMPLETED", "ERROR"].includes(order.status),
+      ).length,
     );
   }
 
@@ -1773,7 +1945,7 @@ function renderAdminStatus(data) {
   renderExceptions(
     adminPage === "dashboard"
       ? allExceptionsFromStatus(data).slice(0, 5)
-      : data.exceptions
+      : data.exceptions,
   );
 }
 
@@ -1792,10 +1964,14 @@ function renderRobotTaskQueue(robot) {
       </div>
       <button class="small-action-button" type="button" data-save-robot-state="${robot.robot_id}">상태 저장</button>
     </div>
-    ${tasks.length === 0 ? '<div class="empty-state">할당된 작업이 없습니다</div>' : `
+    ${
+      tasks.length === 0
+        ? '<div class="empty-state">할당된 작업이 없습니다</div>'
+        : `
     <div class="task-queue-list">
       ${tasks
-        .map((task, index) => `
+        .map(
+          (task, index) => `
           <button class="task-queue-row data-button" type="button" data-task-detail="${task.task_id}">
             <div class="queue-rank">${index + 1}</div>
             <div class="task-main">
@@ -1809,10 +1985,12 @@ function renderRobotTaskQueue(robot) {
               <div class="state-badge ${statusClass(task.status)}">${label(task.status)}</div>
             </div>
           </button>
-        `)
+        `,
+        )
         .join("")}
     </div>
-    `}
+    `
+    }
   `;
 }
 
@@ -1833,13 +2011,15 @@ function openRobotDetail(robotId) {
     return;
   }
 
-  const robot = latestAdminStatus.robots.find((item) => item.robot_id === robotId);
+  const robot = latestAdminStatus.robots.find(
+    (item) => item.robot_id === robotId,
+  );
 
   if (!robot) {
     return;
   }
 
-  openModal(`${robot.robot_id} Task Queue`, renderRobotTaskQueue(robot));
+  openModal(`${robotDisplayName(robot)} Task Queue`, renderRobotTaskQueue(robot));
 }
 
 function openPickupSlotDetail(slotId) {
@@ -1847,13 +2027,19 @@ function openPickupSlotDetail(slotId) {
     return;
   }
 
-  const slot = latestAdminStatus.pickup_slots.find((item) => item.slot_id === slotId);
+  const slot = latestAdminStatus.pickup_slots.find(
+    (item) => item.slot_id === slotId,
+  );
 
   if (!slot) {
     return;
   }
 
-  openModal(`${formatSlotName(slot.slot_name)} 픽업 슬롯`, renderPickupSlotDetail(slot), { size: "compact" });
+  openModal(
+    `${formatSlotName(slot.slot_name)} 픽업 슬롯`,
+    renderPickupSlotDetail(slot),
+    { size: "compact" },
+  );
 }
 
 function openOrderDetail(orderId) {
@@ -1861,8 +2047,10 @@ function openOrderDetail(orderId) {
     return;
   }
 
-  const order = [...latestAdminStatus.orders, ...latestAdminStatus.order_history]
-    .find((item) => item.order_id === orderId);
+  const order = [
+    ...latestAdminStatus.orders,
+    ...latestAdminStatus.order_history,
+  ].find((item) => item.order_id === orderId);
 
   if (!order) {
     return;
@@ -1878,12 +2066,14 @@ function openOrderHistory() {
 
   const orders = latestAdminStatus.order_history;
 
-  const body = orders.length === 0
-    ? '<div class="empty-state">완료된 주문이 없습니다</div>'
-    : `
+  const body =
+    orders.length === 0
+      ? '<div class="empty-state">완료된 주문이 없습니다</div>'
+      : `
       <div class="history-list">
         ${orders
-          .map((order) => `
+          .map(
+            (order) => `
             <button class="history-row" type="button" data-order-detail="${order.order_id}">
               <div>
                 <strong>${order.order_no}</strong>
@@ -1891,7 +2081,8 @@ function openOrderHistory() {
               </div>
               <div class="history-status-large">${label(order.status)}</div>
             </button>
-          `)
+          `,
+          )
           .join("")}
       </div>
     `;
@@ -1906,9 +2097,10 @@ function openExceptionHistory() {
 
   const exceptions = allExceptionsFromStatus(latestAdminStatus);
 
-  const body = exceptions.length === 0
-    ? '<div class="empty-state">예외/알람이 없습니다</div>'
-    : `
+  const body =
+    exceptions.length === 0
+      ? '<div class="empty-state">예외/알람이 없습니다</div>'
+      : `
       <div class="history-search">
         <input id="exception-history-search" type="search" placeholder="예외 타입, 상세, 로봇, 처리 상태, 시간(예: 17:31, 05.07) 검색">
       </div>
@@ -1952,7 +2144,9 @@ function stopFallbackPolling() {
 
 function connectAdminSocket() {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  adminSocket = new WebSocket(`${protocol}://${window.location.host}/api/admin/ws/status`);
+  adminSocket = new WebSocket(
+    `${protocol}://${window.location.host}/api/admin/ws/status`,
+  );
 
   adminSocket.addEventListener("open", () => {
     setSocketState("online");
@@ -1975,6 +2169,7 @@ function connectAdminSocket() {
   });
 }
 
+hydrateRobotFilters();
 loadAdminStatus();
 connectAdminSocket();
 
@@ -2037,7 +2232,8 @@ async function updateOrderState(orderId) {
 }
 
 async function updateTaskState(taskId) {
-  const assignedRobotId = modalBody.querySelector("#task-robot-select")?.value || null;
+  const assignedRobotId =
+    modalBody.querySelector("#task-robot-select")?.value || null;
 
   await patchJson(`/api/fleet/tasks/${taskId}`, {
     status: modalBody.querySelector("#task-status-select")?.value,
@@ -2047,7 +2243,8 @@ async function updateTaskState(taskId) {
 }
 
 async function updateRobotState(robotId) {
-  await patchJson(`/api/fleet/robots/${robotId}`, {
+  const encodedRobotId = encodeURIComponent(robotId);
+  await patchJson(`/api/fleet/robots/${encodedRobotId}`, {
     status: modalBody.querySelector("#robot-status-select")?.value,
     current_task_id: selectNumberOrNull("#robot-current-task-select"),
   });
@@ -2062,27 +2259,17 @@ async function updatePickupSlotState(slotId) {
 }
 
 async function updateRobotPanelState(robotId) {
-  await patchJson(`/api/fleet/robots/${robotId}`, {
+  const encodedRobotId = encodeURIComponent(robotId);
+  await patchJson(`/api/fleet/robots/${encodedRobotId}`, {
     status: document.querySelector("#robot-panel-status-select")?.value,
     current_task_id: (() => {
-      const value = document.querySelector("#robot-panel-current-task-select")?.value;
+      const value = document.querySelector(
+        "#robot-panel-current-task-select",
+      )?.value;
       return value ? Number(value) : null;
     })(),
   });
   selectedRobotId = robotId;
-}
-
-async function runDemoOrder() {
-  const response = await fetch("/api/admin/demo/run-order", {
-    method: "POST",
-  });
-
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({}));
-    throw new Error(payload.detail || "failed to run demo");
-  }
-
-  return response.json();
 }
 
 async function updateProductStock(productId, stockQty) {
@@ -2103,12 +2290,25 @@ async function updateProductStock(productId, stockQty) {
 }
 
 async function updateProduct(productId, reopenMode = "manager") {
-  const name = modalBody.querySelector(`input[data-product-name-input="${productId}"]`)?.value.trim();
-  const stockQty = Number(modalBody.querySelector(`input[data-stock-input="${productId}"]`)?.value);
-  const storageLocation = modalBody.querySelector(`input[data-product-location-input="${productId}"]`)?.value.trim();
-  const imageUrl = modalBody.querySelector(`input[data-product-image-input="${productId}"]`)?.value.trim();
+  const name = modalBody
+    .querySelector(`input[data-product-name-input="${productId}"]`)
+    ?.value.trim();
+  const stockQty = Number(
+    modalBody.querySelector(`input[data-stock-input="${productId}"]`)?.value,
+  );
+  const storageLocation = modalBody
+    .querySelector(`input[data-product-location-input="${productId}"]`)
+    ?.value.trim();
+  const imageUrl = modalBody
+    .querySelector(`input[data-product-image-input="${productId}"]`)
+    ?.value.trim();
 
-  if (!name || !storageLocation || !Number.isInteger(stockQty) || stockQty < 0) {
+  if (
+    !name ||
+    !storageLocation ||
+    !Number.isInteger(stockQty) ||
+    stockQty < 0
+  ) {
     alert("상품명, 수량, 보관 위치를 확인해주세요.");
     return;
   }
@@ -2151,7 +2351,12 @@ async function createProduct() {
   const storageLocation = locationInput?.value.trim();
   const imageUrl = imageInput?.value.trim();
 
-  if (!name || !storageLocation || !Number.isInteger(stockQty) || stockQty < 0) {
+  if (
+    !name ||
+    !storageLocation ||
+    !Number.isInteger(stockQty) ||
+    stockQty < 0
+  ) {
     alert("상품명, 수량, 보관 위치를 확인해주세요.");
     return;
   }
@@ -2177,41 +2382,10 @@ async function createProduct() {
   openInventoryManager();
 }
 
-async function createRobot() {
-  const robotId = modalBody.querySelector("#new-robot-id")?.value.trim();
-  const status = modalBody.querySelector("#new-robot-status")?.value;
-  const rosNamespace = modalBody.querySelector("#new-robot-namespace")?.value.trim();
-  const batteryLevel = inputNumberOrNull("#new-robot-battery");
-
-  if (!robotId) {
-    alert("로봇 ID를 입력해주세요.");
-    return;
-  }
-
-  const response = await fetch("/api/admin/robots", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      robot_id: robotId,
-      status,
-      ros_namespace: rosNamespace || null,
-      battery_level: batteryLevel,
-    }),
-  });
-
-  if (!response.ok) {
-    const errorBody = await response.json().catch(() => ({}));
-    throw new Error(errorBody.detail || "failed to create robot");
-  }
-
-  await loadAdminStatus();
-  openRobotManager();
-}
-
 async function createPickupSlot() {
-  const slotName = modalBody.querySelector("#new-pickup-slot-name")?.value.trim();
+  const slotName = modalBody
+    .querySelector("#new-pickup-slot-name")
+    ?.value.trim();
   const status = modalBody.querySelector("#new-pickup-slot-status")?.value;
 
   if (!slotName) {
@@ -2242,7 +2416,8 @@ async function createTask() {
   const taskType = modalBody.querySelector("#new-task-type")?.value;
   const status = modalBody.querySelector("#new-task-status")?.value;
   const orderId = selectNumberOrNull("#new-task-order-id");
-  const assignedRobotId = modalBody.querySelector("#new-task-robot-id")?.value || null;
+  const assignedRobotId =
+    modalBody.querySelector("#new-task-robot-id")?.value || null;
 
   const response = await fetch("/api/admin/tasks", {
     method: "POST",
@@ -2266,20 +2441,6 @@ async function createTask() {
   openTaskManager();
 }
 
-async function deleteProduct(productId) {
-  const response = await fetch(`/api/admin/products/${productId}`, {
-    method: "DELETE",
-  });
-
-  if (!response.ok) {
-    const errorBody = await response.json().catch(() => ({}));
-    throw new Error(errorBody.detail || "failed to delete product");
-  }
-
-  await loadAdminStatus();
-  openInventoryManager();
-}
-
 function appendLlmMessage(role, text) {
   if (!llmMessages) {
     return;
@@ -2292,11 +2453,11 @@ function appendLlmMessage(role, text) {
   llmMessages.scrollTop = llmMessages.scrollHeight;
 }
 
-function buildMockLlmReply(command) {
+function buildLlmFailureReply(command) {
   const lowerCommand = command.toLowerCase();
 
   if (lowerCommand.includes("순찰") || lowerCommand.includes("patrol")) {
-    return "순찰 task 생성은 아직 mock입니다. 다음 단계에서 PATROL task와 Fleet State API를 연결하면 됩니다.";
+    return "순찰 명령을 처리하지 못했습니다. AI 메시지 API와 서버 상태를 확인해주세요.";
   }
 
   if (lowerCommand.includes("재고") || lowerCommand.includes("stock")) {
@@ -2307,7 +2468,7 @@ function buildMockLlmReply(command) {
     return `미처리 예외는 ${latestAdminStatus?.unresolved_exception_count ?? 0}건입니다. Exceptions 영역에서 처리할 수 있습니다.`;
   }
 
-  return "아직 mock 응답입니다. 이후 LLM 서버가 연결되면 이 입력을 patrol/task 명령으로 변환합니다.";
+  return "AI 메시지 API 호출에 실패했습니다. 서버 상태를 확인해주세요.";
 }
 
 async function sendLlmMessage(message) {
@@ -2352,27 +2513,6 @@ resumeButton?.addEventListener("click", async () => {
     await postAdminAction("/api/admin/resume");
   } finally {
     resumeButton.disabled = false;
-  }
-});
-
-demoRunButton?.addEventListener("click", async () => {
-  const originalText = demoRunButton.textContent;
-
-  demoRunButton.disabled = true;
-  demoRunButton.textContent = "데모 실행 중";
-
-  try {
-    const result = await runDemoOrder();
-    const releaseDelay = Number(result.estimated_duration_seconds || 12) * 1000;
-
-    window.setTimeout(() => {
-      demoRunButton.disabled = false;
-      demoRunButton.textContent = originalText;
-    }, releaseDelay);
-  } catch (error) {
-    alert(error.message);
-    demoRunButton.disabled = false;
-    demoRunButton.textContent = originalText;
   }
 });
 
@@ -2521,7 +2661,9 @@ taskList?.addEventListener("click", (event) => {
     const task = findTask(taskId);
     const order = task?.order_id
       ? findOrder(task.order_id)
-      : (latestAdminStatus?.orders || []).find((item) => item.order_no === task?.order_no);
+      : (latestAdminStatus?.orders || []).find(
+          (item) => item.order_no === task?.order_no,
+        );
     selectedTaskId = taskId;
     selectedOrderId = order?.order_id || selectedOrderId;
     renderOrders(latestAdminStatus?.orders || []);
@@ -2541,7 +2683,9 @@ orderWorkDetailPanel?.addEventListener("click", (event) => {
     const task = findTask(taskId);
     const order = task?.order_id
       ? findOrder(task.order_id)
-      : (latestAdminStatus?.orders || []).find((item) => item.order_no === task?.order_no);
+      : (latestAdminStatus?.orders || []).find(
+          (item) => item.order_no === task?.order_no,
+        );
     selectedTaskId = taskId;
     selectedOrderId = order?.order_id || selectedOrderId;
     renderOrders(latestAdminStatus?.orders || []);
@@ -2550,7 +2694,9 @@ orderWorkDetailPanel?.addEventListener("click", (event) => {
     return;
   }
 
-  const orderModalButton = event.target.closest("button[data-open-order-modal]");
+  const orderModalButton = event.target.closest(
+    "button[data-open-order-modal]",
+  );
 
   if (orderModalButton) {
     openOrderDetail(Number(orderModalButton.dataset.openOrderModal));
@@ -2597,7 +2743,7 @@ llmForm?.addEventListener("submit", async (event) => {
     const response = await sendLlmMessage(command);
     appendLlmMessage("bot", response.message);
   } catch (error) {
-    appendLlmMessage("bot", buildMockLlmReply(command));
+    appendLlmMessage("bot", buildLlmFailureReply(command));
   }
 });
 dashboardLlmForm?.addEventListener("submit", async (event) => {
@@ -2614,13 +2760,25 @@ dashboardLlmForm?.addEventListener("submit", async (event) => {
     submitButton.disabled = true;
   }
   dashboardLlmInput.value = "";
-  setDashboardLlmFeedback("running", "명령 전송 중", `"${command}" 명령을 AI 메시지 API로 보내는 중입니다.`);
+  setDashboardLlmFeedback(
+    "running",
+    "명령 전송 중",
+    `"${command}" 명령을 AI 메시지 API로 보내는 중입니다.`,
+  );
 
   try {
     const response = await sendLlmMessage(command);
-    setDashboardLlmFeedback("success", "응답 완료", response.message || "AI 응답이 도착했습니다.");
+    setDashboardLlmFeedback(
+      "success",
+      "응답 완료",
+      response.message || "AI 응답이 도착했습니다.",
+    );
   } catch (error) {
-    setDashboardLlmFeedback("error", "응답 실패", "AI 메시지 API 호출에 실패했습니다. 서버 상태를 확인해주세요.");
+    setDashboardLlmFeedback(
+      "error",
+      "응답 실패",
+      "AI 메시지 API 호출에 실패했습니다. 서버 상태를 확인해주세요.",
+    );
   } finally {
     if (submitButton) {
       submitButton.disabled = false;
@@ -2637,18 +2795,9 @@ document.addEventListener("keydown", (event) => {
 });
 
 modalBody?.addEventListener("click", (event) => {
-  const createRobotButton = event.target.closest("button[data-create-robot]");
-
-  if (createRobotButton) {
-    createRobotButton.disabled = true;
-    createRobot().catch((error) => {
-      alert(error.message);
-      createRobotButton.disabled = false;
-    });
-    return;
-  }
-
-  const createPickupSlotButton = event.target.closest("button[data-create-pickup-slot]");
+  const createPickupSlotButton = event.target.closest(
+    "button[data-create-pickup-slot]",
+  );
 
   if (createPickupSlotButton) {
     createPickupSlotButton.disabled = true;
@@ -2674,10 +2823,12 @@ modalBody?.addEventListener("click", (event) => {
 
   if (saveOrderButton) {
     saveOrderButton.disabled = true;
-    updateOrderState(Number(saveOrderButton.dataset.saveOrderState)).catch((error) => {
-      alert(error.message);
-      saveOrderButton.disabled = false;
-    });
+    updateOrderState(Number(saveOrderButton.dataset.saveOrderState)).catch(
+      (error) => {
+        alert(error.message);
+        saveOrderButton.disabled = false;
+      },
+    );
     return;
   }
 
@@ -2689,7 +2840,9 @@ modalBody?.addEventListener("click", (event) => {
     }
 
     deleteOrderButton.disabled = true;
-    deleteAdminResource(`/api/admin/orders/${deleteOrderButton.dataset.deleteOrder}`).catch((error) => {
+    deleteAdminResource(
+      `/api/admin/orders/${deleteOrderButton.dataset.deleteOrder}`,
+    ).catch((error) => {
       alert(error.message);
       deleteOrderButton.disabled = false;
     });
@@ -2700,10 +2853,12 @@ modalBody?.addEventListener("click", (event) => {
 
   if (saveTaskButton) {
     saveTaskButton.disabled = true;
-    updateTaskState(Number(saveTaskButton.dataset.saveTaskState)).catch((error) => {
-      alert(error.message);
-      saveTaskButton.disabled = false;
-    });
+    updateTaskState(Number(saveTaskButton.dataset.saveTaskState)).catch(
+      (error) => {
+        alert(error.message);
+        saveTaskButton.disabled = false;
+      },
+    );
     return;
   }
 
@@ -2715,7 +2870,9 @@ modalBody?.addEventListener("click", (event) => {
     }
 
     deleteTaskButton.disabled = true;
-    deleteAdminResource(`/api/admin/tasks/${deleteTaskButton.dataset.deleteTask}`).catch((error) => {
+    deleteAdminResource(
+      `/api/admin/tasks/${deleteTaskButton.dataset.deleteTask}`,
+    ).catch((error) => {
       alert(error.message);
       deleteTaskButton.disabled = false;
     });
@@ -2733,11 +2890,15 @@ modalBody?.addEventListener("click", (event) => {
     return;
   }
 
-  const savePickupSlotButton = event.target.closest("button[data-save-pickup-slot-state]");
+  const savePickupSlotButton = event.target.closest(
+    "button[data-save-pickup-slot-state]",
+  );
 
   if (savePickupSlotButton) {
     savePickupSlotButton.disabled = true;
-    updatePickupSlotState(Number(savePickupSlotButton.dataset.savePickupSlotState)).catch((error) => {
+    updatePickupSlotState(
+      Number(savePickupSlotButton.dataset.savePickupSlotState),
+    ).catch((error) => {
       alert(error.message);
       savePickupSlotButton.disabled = false;
     });
@@ -2748,25 +2909,34 @@ modalBody?.addEventListener("click", (event) => {
 
   if (saveProductButton) {
     saveProductButton.disabled = true;
-    updateProduct(Number(saveProductButton.dataset.saveProduct)).catch((error) => {
-      alert(error.message);
-      saveProductButton.disabled = false;
-    });
+    updateProduct(Number(saveProductButton.dataset.saveProduct)).catch(
+      (error) => {
+        alert(error.message);
+        saveProductButton.disabled = false;
+      },
+    );
     return;
   }
 
-  const saveProductDetailButton = event.target.closest("button[data-save-product-detail]");
+  const saveProductDetailButton = event.target.closest(
+    "button[data-save-product-detail]",
+  );
 
   if (saveProductDetailButton) {
     saveProductDetailButton.disabled = true;
-    updateProduct(Number(saveProductDetailButton.dataset.saveProductDetail), "detail").catch((error) => {
+    updateProduct(
+      Number(saveProductDetailButton.dataset.saveProductDetail),
+      "detail",
+    ).catch((error) => {
       alert(error.message);
       saveProductDetailButton.disabled = false;
     });
     return;
   }
 
-  const createProductButton = event.target.closest("button[data-create-product]");
+  const createProductButton = event.target.closest(
+    "button[data-create-product]",
+  );
 
   if (createProductButton) {
     createProductButton.disabled = true;
@@ -2777,28 +2947,13 @@ modalBody?.addEventListener("click", (event) => {
     return;
   }
 
-  const deleteProductButton = event.target.closest("button[data-delete-product]");
-
-  if (deleteProductButton) {
-    const productId = Number(deleteProductButton.dataset.deleteProduct);
-
-    if (!confirm("이 상품을 삭제할까요? 기존 주문에 포함된 상품은 삭제할 수 없습니다.")) {
-      return;
-    }
-
-    deleteProductButton.disabled = true;
-    deleteProduct(productId).catch((error) => {
-      alert(error.message);
-      deleteProductButton.disabled = false;
-    });
-    return;
-  }
-
   const stockButton = event.target.closest("button[data-save-stock]");
 
   if (stockButton) {
     const productId = Number(stockButton.dataset.saveStock);
-    const stockInput = modalBody.querySelector(`input[data-stock-input="${productId}"]`);
+    const stockInput = modalBody.querySelector(
+      `input[data-stock-input="${productId}"]`,
+    );
     const stockQty = Number(stockInput?.value);
 
     if (!Number.isInteger(stockQty) || stockQty < 0) {
@@ -2833,6 +2988,6 @@ modalBody?.addEventListener("input", (event) => {
 
   renderExceptionHistoryList(
     allExceptionsFromStatus(latestAdminStatus),
-    event.target.value.trim()
+    event.target.value.trim(),
   );
 });

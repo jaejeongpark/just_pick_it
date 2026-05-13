@@ -44,13 +44,14 @@ robot_status_enum = ENUM(
     "WAITING",
     "STANDBY",
     "SORTING",
-    "DELIVERING",
+    "LOADING",
+    "PARKING",
     "INSPECTING",
     "UNLOADING",
     "PATROLLING",
     "CHARGING",
     "RETURNING",
-    "PARKING",
+    "DOCKING",
     "EMERGENCY_STOP",
     "ERROR",
     "OFFLINE",
@@ -62,7 +63,7 @@ task_type_enum = ENUM(
     "STANDBY_LOAD",
     "STANDBY_UNLOAD",
     "SORTING",
-    "DELIVERY",
+    "LOAD",
     "INSPECTION",
     "UNLOAD",
     "PATROL",
@@ -94,6 +95,7 @@ exception_type_enum = ENUM(
     "INSPECTION_FAIL",
     "HUMAN_DETECTED",
     "SYSTEM_ERROR",
+    "FIRE_DETECTED",
     name="exception_type",
     create_type=False,
 )
@@ -107,6 +109,17 @@ class Product(Base):
     image_url = Column(Text)
     stock_qty = Column(Integer, nullable=False, default=0)
     storage_location = Column(String(50), nullable=False)
+
+
+class Zone(Base):
+    __tablename__ = "zone"
+
+    zone_id = Column(Integer, primary_key=True)
+    zone_name = Column(String(50), nullable=False)
+    pos_x = Column(Float, nullable=False)
+    pos_y = Column(Float, nullable=False)
+    pos_z = Column(Float, nullable=False)
+    pos_theta = Column(Float)
 
 
 class PickupSlot(Base):
@@ -123,7 +136,7 @@ class Order(Base):
     order_id = Column(Integer, primary_key=True)
     order_no = Column(String(30), unique=True)
     status = Column(order_status_enum, nullable=False, default="ORDER_RECEIVED")
-    priority = Column(Integer, nullable=False, default=1)
+    priority = Column(Integer, nullable=False, default=2)
     pickup_slot_id = Column(Integer, ForeignKey("pickup_slot.slot_id"))
 
 
@@ -158,8 +171,9 @@ class Task(Base):
     assigned_robot_id = Column(String(30), ForeignKey("robot.robot_id"))
     task_type = Column(task_type_enum, nullable=False)
     status = Column(task_status_enum, nullable=False, default="QUEUED")
-    source_zone_id = Column(Integer)
-    target_zone_id = Column(Integer)
+    priority = Column(Integer, nullable=False, default=1)
+    source_zone_id = Column(Integer, ForeignKey("zone.zone_id"))
+    target_zone_id = Column(Integer, ForeignKey("zone.zone_id"))
     result_message = Column(Text)
 
 

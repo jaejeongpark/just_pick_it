@@ -4,8 +4,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Order, OrderItem, PickupSlot, Product
 from app.schemas import OrderCreate, OrderRead
-from app.services.fleet_client import request_order_processing
-from app.services.demo_workflow import complete_order_workflow, create_order_workflow
+from app.services.workflow_service import ORDER_PRIORITY, complete_order_workflow, create_order_workflow
 from app.services.realtime import broadcast_all_status
 
 
@@ -77,7 +76,7 @@ def create_order(
         if product.stock_qty < quantity:
             raise HTTPException(status_code=400, detail="not enough stock")
 
-    order = Order(status="ORDER_RECEIVED", priority=1)
+    order = Order(status="ORDER_RECEIVED", priority=ORDER_PRIORITY)
     db.add(order)
     db.flush()
 
@@ -98,7 +97,6 @@ def create_order(
     create_order_workflow(db, order)
     db.commit()
     db.refresh(order)
-    request_order_processing(order.order_id, order.order_no)
     background_tasks.add_task(broadcast_all_status)
 
     return build_order_response(db, order)

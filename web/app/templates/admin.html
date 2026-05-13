@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Just Pick It Admin</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260510-demo-run">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260512-refactor">
   </head>
   <body class="admin-console" data-admin-page="{{ page }}">
     <div class="admin-app-shell">
@@ -24,9 +24,6 @@
           <a class="{{ 'active' if page == 'inventory' else '' }}" href="/admin/inventory">재고 관리</a>
         </nav>
         <div class="sidebar-footer">
-          {% if page == 'dashboard' %}
-          <button id="demo-run-button" class="demo-run-button" type="button">데모 실행</button>
-          {% endif %}
           <span id="socket-state" class="system-chip danger">offline</span>
           <a class="nav-link" href="/customer">Admin</a>
         </div>
@@ -95,10 +92,10 @@
             </div>
             <div class="facility-map warehouse-map" aria-label="Robot position overview">
               <div class="map-robot-legend" aria-label="Robot color legend">
-                <span><i class="robot-dot-amr1"></i>AMR1</span>
-                <span><i class="robot-dot-amr2"></i>AMR2</span>
-                <span><i class="robot-dot-cobot1"></i>COBOT1</span>
-                <span><i class="robot-dot-cobot2"></i>COBOT2</span>
+                <span><i class="robot-dot-amr1"></i>AMR 1</span>
+                <span><i class="robot-dot-amr2"></i>AMR 2</span>
+                <span><i class="robot-dot-cobot1"></i>선별 로봇</span>
+                <span><i class="robot-dot-cobot2"></i>검수 로봇</span>
               </div>
               <div id="map-robot-layer" class="map-robot-layer" aria-hidden="true"></div>
               <div class="template-dashboard-map" aria-hidden="true">
@@ -117,8 +114,8 @@
                 <div class="template-pin pin-green"></div>
                 <div class="template-pin pin-purple"></div>
                 <div class="template-robot map-amr">AMR</div>
-                <div class="template-robot map-cobot-one">COBOT1</div>
-                <div class="template-robot map-cobot-two">COBOT2</div>
+                <div class="template-robot map-cobot-one">선별 로봇</div>
+                <div class="template-robot map-cobot-two">검수 로봇</div>
                 <span class="map-entrance">입구</span>
                 <span class="map-shelf shelf-a">선반 A</span>
                 <span class="map-shelf shelf-b">선반 B</span>
@@ -177,7 +174,7 @@
                 <use href="#map-cube" x="130" y="338"/><use href="#map-cube" x="170" y="338"/><use href="#map-cube" x="210" y="338"/>
                 <use href="#map-arm" x="82" y="214"/>
                 <text x="122" y="348" text-anchor="middle" font-size="13" font-weight="900" fill="#111827">Sorting</text>
-                <text x="122" y="364" text-anchor="middle" font-size="13" font-weight="900" fill="#111827">Cobot</text>
+                <text x="122" y="364" text-anchor="middle" font-size="13" font-weight="900" fill="#111827">JetCobot</text>
                 <rect x="170" y="230" width="116" height="84" rx="16" fill="#fed7c3"/>
                 <text x="228" y="252" text-anchor="middle" font-size="13" font-weight="900" fill="#111827">Loading zone</text>
                 <text x="228" y="270" text-anchor="middle" font-size="14" font-weight="900" fill="#dc2626">Sorting</text>
@@ -201,7 +198,7 @@
                 <use href="#map-amr" x="682" y="280"/>
                 <use href="#map-arm" x="748" y="214"/>
                 <text x="796" y="348" text-anchor="middle" font-size="13" font-weight="900" fill="#111827">Inspection</text>
-                <text x="796" y="364" text-anchor="middle" font-size="13" font-weight="900" fill="#111827">Cobot</text>
+                <text x="796" y="364" text-anchor="middle" font-size="13" font-weight="900" fill="#111827">JetCobot</text>
                 <use href="#map-box" x="786" y="94" transform="scale(.78)"/>
                 <use href="#map-box" x="786" y="276" transform="scale(.78)"/>
                 <text x="820" y="182" text-anchor="middle" font-size="13" fill="#111827">Pickup</text>
@@ -231,7 +228,7 @@
                 <div class="shelf-bank shelf-bottom">
                   <i></i><i></i><i></i><i></i>
                 </div>
-                <div class="cobot-unit sorting-cobot"><span>Sorting<br>Cobot</span></div>
+                <div class="cobot-unit sorting-cobot"><span>Sorting<br>JetCobot</span></div>
                 <div class="work-zone loading-zone">
                   <strong>Loading zone</strong>
                   <span>Sorting</span>
@@ -276,7 +273,7 @@
                   <span>Inspection</span>
                   <div class="mini-amr">AMR</div>
                 </div>
-                <div class="cobot-unit inspection-cobot"><span>Inspection<br>Cobot</span></div>
+                <div class="cobot-unit inspection-cobot"><span>Inspection<br>JetCobot</span></div>
               </section>
             </div>
           </section>
@@ -356,7 +353,7 @@
                 <div class="shelf-bank shelf-bottom">
                   <i></i><i></i><i></i><i></i>
                 </div>
-                <div class="cobot-unit sorting-cobot"><span>Sorting<br>Cobot</span></div>
+                <div class="cobot-unit sorting-cobot"><span>Sorting<br>JetCobot</span></div>
                 <div class="work-zone loading-zone">
                   <strong>Loading zone</strong>
                   <span>Sorting</span>
@@ -401,7 +398,7 @@
                   <span>Inspection</span>
                   <div class="mini-amr">AMR</div>
                 </div>
-                <div class="cobot-unit inspection-cobot"><span>Inspection<br>Cobot</span></div>
+                <div class="cobot-unit inspection-cobot"><span>Inspection<br>JetCobot</span></div>
               </section>
             </div>
           </section>
@@ -421,29 +418,8 @@
             </div>
             <div class="robot-management-toolbar" aria-label="Robot filters">
               <input id="robot-search-input" type="search" placeholder="로봇 검색...">
-              <select id="robot-status-filter" aria-label="Robot status filter">
-                <option value="">상태 전체</option>
-                <option value="IDLE">대기</option>
-                <option value="MOVING">이동</option>
-                <option value="WAITING">작업 대기</option>
-                <option value="STANDBY">상하차 대기</option>
-                <option value="SORTING">선별</option>
-                <option value="DELIVERING">운반</option>
-                <option value="INSPECTING">검수</option>
-                <option value="UNLOADING">하차</option>
-                <option value="PATROLLING">순찰</option>
-                <option value="CHARGING">충전</option>
-                <option value="RETURNING">복귀</option>
-                <option value="PARKING">파킹 중</option>
-                <option value="EMERGENCY_STOP">긴급정지</option>
-                <option value="ERROR">예외</option>
-                <option value="OFFLINE">오프라인</option>
-              </select>
-              <select id="robot-type-filter" aria-label="Robot type filter">
-                <option value="">유형 전체</option>
-                <option value="AMR">AMR</option>
-                <option value="Cobot">Cobot</option>
-              </select>
+              <select id="robot-status-filter" aria-label="Robot status filter"></select>
+              <select id="robot-type-filter" aria-label="Robot type filter"></select>
             </div>
             <div id="robot-status" class="table-placeholder">Waiting for WebSocket data</div>
             <div id="robot-detail-panel" class="robot-detail-panel"></div>
@@ -504,12 +480,12 @@
       <div class="llm-header">
         <div>
           <strong>LLM Command</strong>
-          <span>Patrol mock</span>
+          <span>Patrol command</span>
         </div>
         <button id="llm-close-button" class="ghost-button" type="button">Close</button>
       </div>
       <div id="llm-messages" class="llm-messages">
-        <div class="llm-message bot">순찰 명령이나 관제 질문을 입력하면 데모 응답을 보여줍니다.</div>
+        <div class="llm-message bot">순찰 명령이나 관제 질문을 입력하면 Control Server가 처리합니다.</div>
       </div>
       <form id="llm-form" class="llm-form">
         <input id="llm-input" type="text" autocomplete="off" placeholder="예: 1번 구역 순찰해줘">
@@ -527,6 +503,6 @@
       </section>
     </div>
 
-    <script src="/static/js/admin.js?v=20260510-demo-run"></script>
+    <script src="/static/js/admin.js?v=20260512-refactor"></script>
   </body>
 </html>

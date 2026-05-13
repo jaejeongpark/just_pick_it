@@ -1477,32 +1477,6 @@ body {
   background: rgba(20, 184, 166, 0.08);
 }
 
-.demo-run-button {
-  min-height: 42px;
-  border: 1px solid rgba(245, 158, 11, 0.56);
-  border-radius: 8px;
-  background:
-    linear-gradient(135deg, rgba(245, 158, 11, 0.22), rgba(15, 23, 42, 0.88));
-  color: #fde68a;
-  font: inherit;
-  font-weight: 900;
-  cursor: pointer;
-  transition: border-color 0.2s ease, background 0.2s ease, transform 0.2s ease;
-}
-
-.demo-run-button:hover {
-  border-color: rgba(251, 191, 36, 0.88);
-  background:
-    linear-gradient(135deg, rgba(245, 158, 11, 0.34), rgba(15, 23, 42, 0.9));
-  transform: translateY(-1px);
-}
-
-.demo-run-button:disabled {
-  cursor: wait;
-  opacity: 0.68;
-  transform: none;
-}
-
 .admin-console .summary-strip {
   width: 100%;
   margin: 0 0 16px;
@@ -2779,9 +2753,9 @@ body {
   align-items: center;
   align-content: center;
   gap: 10px;
-  width: 116px;
+  width: 148px;
   margin-left: auto;
-  padding: 12px;
+  padding: 10px 8px;
   border: 1px solid rgba(50, 65, 87, 0.9);
   border-radius: 8px;
   background: rgba(15, 23, 42, 0.76);
@@ -2792,8 +2766,9 @@ body {
   align-items: center;
   gap: 5px;
   color: #aebdd0;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 900;
+  white-space: nowrap;
 }
 
 .map-robot-layer {
@@ -2809,7 +2784,7 @@ body {
   top: var(--marker-y);
   display: grid;
   justify-items: center;
-  gap: 5px;
+  gap: 8px;
   color: #94a3b8;
   background: transparent;
   transform: translate(-50%, -50%);
@@ -4728,9 +4703,9 @@ body {
 .dashboard-grid .warehouse-map .map-robot-legend {
   position: absolute;
   top: 50%;
-  right: clamp(8px, 1.4vw, 24px);
+  right: clamp(8px, 1.2vw, 18px);
   transform: translateY(-50%);
-  width: 112px;
+  width: 148px;
   margin: 0;
 }
 
