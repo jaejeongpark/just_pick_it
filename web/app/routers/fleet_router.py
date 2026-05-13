@@ -13,6 +13,8 @@ from app.schemas import (
     FleetPickupSlotAssignmentRead,
     FleetPickupSlotRead,
     FleetPickupSlotStateUpdate,
+    FleetRobotRuntimeRead,
+    FleetRobotRunningTaskRead,
     FleetRobotStateUpdate,
     FleetStateUpdateRead,
     FleetTaskEventCreate,
@@ -25,7 +27,11 @@ from app.schemas import (
     TaskType,
 )
 from app.services.robot_runtime_policy import FINAL_TASK_STATUSES
-from app.services.workflow_service import apply_task_runtime_state, assign_ready_tasks
+from app.services.workflow_service import (
+    ACTIVE_RUNTIME_TASK_STATUSES,
+    apply_task_runtime_state,
+    assign_ready_tasks,
+)
 from app.services.realtime import broadcast_all_status
 from app.services.status_service import build_task_summary
 
@@ -69,6 +75,67 @@ def build_order_summary_response(db: Session, order: Order) -> dict:
         "current_task_type": current_task.task_type if current_task else None,
         "current_task_status": current_task.status if current_task else None,
         "assigned_robot_id": current_task.assigned_robot_id if current_task else None,
+    }
+
+
+def find_robot_runtime_task(db: Session, robot: Robot) -> Task | None:
+    if robot.current_task_id is not None:
+        current_task = db.get(Task, robot.current_task_id)
+
+        if current_task and current_task.status in ACTIVE_RUNTIME_TASK_STATUSES:
+            return current_task
+
+    return (
+        db.query(Task)
+        .filter(
+            Task.assigned_robot_id == robot.robot_id,
+            Task.status.in_(ACTIVE_RUNTIME_TASK_STATUSES),
+        )
+        .order_by(Task.task_id.desc())
+        .first()
+    )
+
+
+def build_robot_runtime_response(db: Session, robot: Robot) -> dict:
+    current_task = find_robot_runtime_task(db, robot)
+
+    return {
+        "robot_id": robot.robot_id,
+        "status": robot.status,
+        "battery_level": robot.battery_level,
+        "current_task_id": robot.current_task_id,
+        "current_task_type": current_task.task_type if current_task else None,
+        "current_task_status": current_task.status if current_task else None,
+        "current_task": build_task_summary(db, current_task) if current_task else None,
+        "pos_x": robot.pos_x,
+        "pos_y": robot.pos_y,
+        "pos_theta": robot.pos_theta,
+    }
+
+
+def find_robot_running_task(db: Session, robot: Robot) -> Task | None:
+    if robot.current_task_id is not None:
+        current_task = db.get(Task, robot.current_task_id)
+
+        if current_task and current_task.status == "RUNNING":
+            return current_task
+
+    return (
+        db.query(Task)
+        .filter(
+            Task.assigned_robot_id == robot.robot_id,
+            Task.status == "RUNNING",
+        )
+        .order_by(Task.task_id.desc())
+        .first()
+    )
+
+
+def build_robot_running_task_response(db: Session, robot: Robot) -> dict:
+    running_task = find_robot_running_task(db, robot)
+
+    return {
+        "task_type": running_task.task_type if running_task else None,
     }
 
 
@@ -362,6 +429,32 @@ def list_task_events(
         build_task_event_response(task_event)
         for task_event in task_events
     ]
+
+
+@router.get("/robots/{robot_id}", response_model=FleetRobotRuntimeRead)
+def get_robot_runtime(
+    robot_id: str,
+    db: Session = Depends(get_db),
+):
+    robot = db.get(Robot, robot_id)
+
+    if not robot:
+        raise HTTPException(status_code=404, detail="robot not found")
+
+    return build_robot_runtime_response(db, robot)
+
+
+@router.get("/robots/{robot_id}/running-task", response_model=FleetRobotRunningTaskRead)
+def get_robot_running_task(
+    robot_id: str,
+    db: Session = Depends(get_db),
+):
+    robot = db.get(Robot, robot_id)
+
+    if not robot:
+        raise HTTPException(status_code=404, detail="robot not found")
+
+    return build_robot_running_task_response(db, robot)
 
 
 @router.patch("/robots/{robot_id}", response_model=FleetStateUpdateRead)
