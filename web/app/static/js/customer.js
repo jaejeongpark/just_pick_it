@@ -287,11 +287,17 @@ function renderCart() {
       const product = productsById.get(productId);
       const toneClass = `product-tone-${((product.product_id - 1) % 6) + 1}`;
       const imageText = product.name.replace("Test ", "").slice(0, 2).toUpperCase();
+      const cartImage = product.image_url
+        ? `<img src="${product.image_url}" alt="${product.name}" onerror="this.remove(); this.parentElement.dataset.fallback='true';">`
+        : "";
       const remainingQuantity = product.stock_qty - quantity;
       return `
         <div class="cart-row ${toneClass}">
           <div class="cart-item-main">
-            <div class="cart-image">${imageText}</div>
+            <div class="cart-image" data-fallback="${product.image_url ? "false" : "true"}">
+              ${cartImage}
+              <b>${imageText}</b>
+            </div>
             <div>
               <strong>${product.name}</strong>
               <span>남은 수량 ${remainingQuantity}개</span>
@@ -342,9 +348,16 @@ function renderProducts(products) {
       const selectedQuantity = cart.get(product.product_id) || 0;
       const remainingQuantity = product.stock_qty - selectedQuantity;
       const isSoldOut = remainingQuantity <= 0;
+      const fallbackText = product.name.replace("Test ", "").slice(0, 2).toUpperCase();
+      const productImage = product.image_url
+        ? `<img src="${product.image_url}" alt="${product.name}" onerror="this.remove(); this.parentElement.dataset.fallback='true';">`
+        : "";
       return `
         <article class="product-card product-tone-${((product.product_id - 1) % 6) + 1}">
-          <div class="product-image">${product.name.replace("Test ", "").slice(0, 2).toUpperCase()}</div>
+          <div class="product-image" data-fallback="${product.image_url ? "false" : "true"}">
+            ${productImage}
+            <b>${fallbackText}</b>
+          </div>
           <div class="product-main">
             <h3>${product.name}</h3>
           </div>

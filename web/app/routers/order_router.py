@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Order, OrderItem, PickupSlot, Product
 from app.schemas import OrderCreate, OrderRead
+from app.services.product_images import resolve_product_image_url
 from app.services.workflow_service import ORDER_PRIORITY, complete_order_workflow, create_order_workflow
 from app.services.realtime import broadcast_all_status
 
@@ -37,6 +38,7 @@ def build_order_response(db: Session, order: Order) -> OrderRead:
             {
                 "product_id": item.product_id,
                 "product_name": product.name,
+                "image_url": resolve_product_image_url(product),
                 "quantity": item.quantity,
                 "status": item.status,
             }

@@ -58,6 +58,7 @@ class OrderCreate(BaseModel):
 class OrderItemRead(BaseModel):
     product_id: int
     product_name: str
+    image_url: str | None = None
     quantity: int
     status: str
 
@@ -202,6 +203,23 @@ class FleetTaskSummaryRead(BaseModel):
     target_zone_name: str | None = None
     target_zone_pose: FleetZonePoseRead | None = None
     result_message: str | None = None
+
+
+class FleetRobotRuntimeRead(BaseModel):
+    robot_id: str
+    status: str
+    battery_level: int | None = None
+    current_task_id: int | None = None
+    current_task_type: str | None = None
+    current_task_status: str | None = None
+    current_task: FleetTaskSummaryRead | None = None
+    pos_x: float | None = None
+    pos_y: float | None = None
+    pos_theta: float | None = None
+
+
+class FleetRobotRunningTaskRead(BaseModel):
+    task_type: str | None = None
 
 
 class FleetOrderSummaryRead(BaseModel):

@@ -208,11 +208,17 @@ function renderOrderItems(items) {
   return `
     <div class="modal-item-list">
       ${items
-        .map(
-          (item) => `
+        .map((item) => {
+          const product = {
+            product_id: item.product_id,
+            name: item.product_name,
+            image_url: item.image_url,
+          };
+
+          return `
           <div class="cart-row ${productToneClass(item.product_id)}">
             <div class="cart-item-main">
-              <div class="cart-image">${orderImageText(item)}</div>
+              ${productImageMarkup(product, "cart-image")}
               <div>
                 <strong>${item.product_name}</strong>
                 <span>${label(item.status)}</span>
@@ -220,8 +226,8 @@ function renderOrderItems(items) {
             </div>
             <div class="metric">${item.quantity}개</div>
           </div>
-        `,
-        )
+        `;
+        })
         .join("")}
     </div>
   `;
@@ -229,14 +235,6 @@ function renderOrderItems(items) {
 
 function productToneClass(productId) {
   return `product-tone-${((productId - 1) % 6) + 1}`;
-}
-
-function orderImageText(item) {
-  if (!item) {
-    return "-";
-  }
-
-  return item.product_name.replace("Test ", "").slice(0, 2).toUpperCase();
 }
 
 function productImageText(product) {
@@ -530,7 +528,7 @@ function orderProductSummaryMarkup(order) {
   ) || {
     product_id: firstItem.product_id,
     name: firstItem.product_name,
-    image_url: null,
+    image_url: firstItem.image_url,
   };
 
   return `
@@ -574,7 +572,7 @@ function orderItemCard(item) {
   ) || {
     product_id: item.product_id,
     name: item.product_name,
-    image_url: null,
+    image_url: item.image_url,
   };
 
   return `
@@ -1564,7 +1562,7 @@ function renderInventoryManager(products) {
                 (product) => `
           <div class="inventory-editor-row ${productToneClass(product.product_id)}">
             <div class="cart-item-main">
-              <div class="cart-image">${productImageText(product)}</div>
+              ${productImageMarkup(product, "cart-image")}
               <div>
                 <strong>${product.name}</strong>
                 <span>상품 #${product.product_id}</span>
@@ -1603,7 +1601,7 @@ function renderProductDetail(product) {
   return `
     <div class="product-detail-editor">
       <div class="product-detail-preview">
-        <div class="cart-image">${productImageText(product)}</div>
+        ${productImageMarkup(product, "cart-image")}
         <div>
           <strong>${product.name}</strong>
           <span>상품 #${product.product_id}</span>
