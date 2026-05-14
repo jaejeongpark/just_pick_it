@@ -14,11 +14,22 @@ from app.schemas import (
 )
 from app.services.llm_client import build_llm_message
 from app.services.patrol_service import create_patrol_task_from_llm
+from app.services.product_images import resolve_product_image_url
 from app.services.realtime import admin_websockets, broadcast_all_status, get_admin_snapshot
 from app.services.status_service import build_admin_status
 
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+
+def build_product_response(product: Product) -> dict:
+    return {
+        "product_id": product.product_id,
+        "name": product.name,
+        "image_url": resolve_product_image_url(product),
+        "stock_qty": product.stock_qty,
+        "storage_location": product.storage_location,
+    }
 
 
 @router.get("/status")
@@ -85,7 +96,7 @@ def create_product(
     db.commit()
     db.refresh(product)
     background_tasks.add_task(broadcast_all_status)
-    return product
+    return build_product_response(product)
 
 
 @router.patch("/products/{product_id}/stock", response_model=ProductRead)
@@ -104,7 +115,7 @@ def update_product_stock(
     db.commit()
     db.refresh(product)
     background_tasks.add_task(broadcast_all_status)
-    return product
+    return build_product_response(product)
 
 
 @router.patch("/products/{product_id}", response_model=ProductRead)
@@ -126,7 +137,7 @@ def update_product(
     db.commit()
     db.refresh(product)
     background_tasks.add_task(broadcast_all_status)
-    return product
+    return build_product_response(product)
 
 
 @router.post("/pickup-slots")

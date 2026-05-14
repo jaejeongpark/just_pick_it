@@ -58,6 +58,7 @@ class OrderCreate(BaseModel):
 class OrderItemRead(BaseModel):
     product_id: int
     product_name: str
+    image_url: str | None = None
     quantity: int
     status: str
 

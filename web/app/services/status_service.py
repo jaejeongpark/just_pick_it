@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 
 from app.models import ExceptionLog, Order, OrderItem, PickupSlot, Product, Robot, Task, Zone
 from app.services.inventory_status import is_low_stock, stock_level
+from app.services.product_images import resolve_product_image_url
 
 
 def build_order_summary(db: Session, order: Order):
@@ -30,6 +31,7 @@ def build_order_summary(db: Session, order: Order):
             {
                 "product_id": item.product_id,
                 "product_name": product.name,
+                "image_url": resolve_product_image_url(product),
                 "quantity": item.quantity,
                 "status": item.status,
             }
@@ -90,7 +92,7 @@ def build_product_summary(product: Product):
     return {
         "product_id": product.product_id,
         "name": product.name,
-        "image_url": product.image_url,
+        "image_url": resolve_product_image_url(product),
         "stock_qty": product.stock_qty,
         "stock_level": stock_level(product.stock_qty),
         "storage_location": product.storage_location,
