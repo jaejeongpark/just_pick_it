@@ -55,13 +55,13 @@
     <node pkg="ros_gz_image" exec="image_bridge" name='image_bridge_depth' output='screen' args="/camera"/>
 
     <!-- Spawn overhead camera + bridge its image topic -->
-    <include file="$(find-pkg-share pinky_gz_sim)/launch/spawn_overhead_camera.launch.py">
+    <!-- <include file="$(find-pkg-share pinky_gz_sim)/launch/spawn_overhead_camera.launch.py">
         <arg name='overhead_height'     value='$(var overhead_height)'/>
         <arg name='overhead_fov'        value='$(var overhead_fov)'/>
         <arg name='overhead_img_width'  value='$(var overhead_img_width)'/>
         <arg name='overhead_img_height' value='$(var overhead_img_height)'/>
         <arg name='overhead_tilt'       value='$(var overhead_tilt)'/>
-    </include>
+    </include> -->
 
     <!-- RViz2: overhead image + lidar + robot model -->
     <!-- <node if="$(var use_rviz)" pkg="rviz2" exec="rviz2" name='rviz2' output='screen'
