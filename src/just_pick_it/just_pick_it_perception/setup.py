@@ -24,6 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'capture_aruco_image = just_pick_it_perception.capture_aruco_image:main',
+            'camera_calibrator = just_pick_it_perception.camera_calibrator:main',
         ],
     },
 )
