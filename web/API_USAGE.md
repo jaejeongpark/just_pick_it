@@ -50,7 +50,7 @@ Robot Control Node
 웹 서버 실행:
 
 ```bash
-cd ~/autonomous_sys_ws
+cd ~/just_pick_it
 web/scripts/run.sh
 ```
 

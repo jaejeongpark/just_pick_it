@@ -7,7 +7,7 @@ set -euo pipefail
 # - web/scripts/setup.sh로 세팅을 끝낸 뒤 FastAPI 서버를 켤 때
 #
 # 사용법:
-#   cd ~/autonomous_sys_ws
+#   cd ~/just_pick_it
 #   web/scripts/run.sh
 #
 # 실행 후 접속:

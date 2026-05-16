@@ -9,7 +9,7 @@ set -euo pipefail
 # - PostgreSQL DB/user/schema/seed를 한 번에 준비하고 싶을 때
 #
 # 사용법:
-#   cd ~/autonomous_sys_ws
+#   cd ~/just_pick_it
 #   web/scripts/setup.sh
 #
 # 데모 DB를 초기화하고 다시 만들고 싶을 때:
@@ -21,7 +21,7 @@ set -euo pipefail
 # - PostgreSQL 설치, DB/user 생성, 서비스 시작에는 sudo 비밀번호가 필요할 수 있다.
 
 # WEB_DIR: web/ 폴더 절대 경로
-# ROOT_DIR: autonomous_sys_ws 루트 절대 경로
+# ROOT_DIR: just_pick_it 루트 절대 경로
 WEB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT_DIR="$(cd "$WEB_DIR/.." && pwd)"
 

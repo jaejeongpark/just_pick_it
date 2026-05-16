@@ -63,7 +63,7 @@ psql "postgresql://just_pick_it_user:just_pick_it_pw@localhost:5432/just_pick_it
 웹 실행 환경까지 한 번에 준비할 때는 루트에서 아래 스크립트를 사용합니다.
 
 ```bash
-cd ~/autonomous_sys_ws
+cd ~/just_pick_it
 web/scripts/setup.sh
 ```
 
