@@ -24,17 +24,24 @@ import rclpy
 import yaml
 from rclpy.node import Node
 
+# colcon build --symlink-install 환경에서 __file__은 src 경로를 가리키므로
+# 패키지 소스 내 result/ 디렉터리를 기본 출력 위치로 사용한다.
+_DEFAULT_RESULT_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'result'))
+
 
 class CameraCalibrator(Node):
 
     def __init__(self):
         super().__init__('camera_calibrator')
 
-        self.declare_parameter('image_dir', os.path.expanduser('~/aruco_captures'))
+        self.declare_parameter('image_dir', os.path.expanduser('~/img_captures'))
         self.declare_parameter('board_width', 8)
         self.declare_parameter('board_height', 6)
         self.declare_parameter('square_size', 0.025)
-        self.declare_parameter('output_file', os.path.expanduser('~/camera_calibration.yaml'))
+        self.declare_parameter(
+            'output_file',
+            os.path.join(_DEFAULT_RESULT_DIR, 'camera_calibration.yaml'))
 
         image_dir = os.path.expanduser(
             self.get_parameter('image_dir').get_parameter_value().string_value)
@@ -85,6 +92,7 @@ class CameraCalibrator(Node):
             found, corners = cv2.findChessboardCorners(gray, pattern_size, None)
 
             if found:
+                print("Corner Found")
                 corners_refined = cv2.cornerSubPix(
                     gray, corners, (11, 11), (-1, -1), refine_criteria)
                 obj_points.append(objp)
