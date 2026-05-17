@@ -28,6 +28,8 @@ setup(
     entry_points={
         "console_scripts": [
             "odom_logger = pinky_amr_2.odom_logger:main",
+            "scan_logger = pinky_amr_2.scan_logger:main",
+            "obstacle_stop = pinky_amr_2.obstacle_stop:main",
         ],
     },
 )
