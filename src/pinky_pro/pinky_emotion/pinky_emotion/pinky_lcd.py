@@ -143,6 +143,7 @@ class LCD():
         self.bl.ChangeDutyCycle(value)
 
     def close(self):
+        self.clear()
         self.spi.close()
         self.bl.stop()
         GPIO.cleanup([RST_PIN, DC_PIN, BL_PIN])

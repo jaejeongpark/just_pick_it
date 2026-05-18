@@ -10,7 +10,7 @@
     </include>
 
     <include file="$(find-pkg-share sllidar_ros2)/launch/sllidar_c1_launch.py">
-        <arg name="serial_port" value="/dev/ttyAMA0"/>
+        <arg name="serial_port" value="/dev/ttyS0"/>
         <arg name="frame_id" value="rplidar_link"/>
         <arg name="inverted" value="false"/>
         <arg name="angle_compensate" value="true"/>

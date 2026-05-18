@@ -1,11 +1,11 @@
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32
-from pinkylib import Battery 
+from .pinky_battery import Battery
 
 class BatteryPublisher(Node):
     def __init__(self):
-        super().__init__('battery_publihser')
+        super().__init__('battery_publisher')
         
         self.battery = Battery()
 

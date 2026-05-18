@@ -1,7 +1,7 @@
 import rclpy
 from rclpy.node import Node
 
-from pinkylib import LED 
+from .pinkyled import LED 
 
 from pinky_interfaces.srv import SetLed, SetBrightness
 

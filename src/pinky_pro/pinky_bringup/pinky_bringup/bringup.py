@@ -20,7 +20,7 @@ JOINT_PUB_TOPIC_NAME = "joint_states"
 ODOM_FRAME_ID = "odom"
 ODOM_CHILD_FRAME_ID = "base_footprint"
 
-SERIAL_PORT_NAME = "/dev/ttyAMA4"
+SERIAL_PORT_NAME = "/dev/ttyAMA5"
 BAUDRATE = 1000000
 DYNAMIXEL_IDS = [1, 2] # [왼쪽 바퀴 ID, 오른쪽 바퀴 ID]
 
