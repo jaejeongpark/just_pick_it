@@ -3,8 +3,8 @@
 Ctrl+C로 종료할 때까지 interval 초 간격으로 image_N.png 형식으로 저장한다.
 
 사용법:
-    ros2 run just_pick_it_perception capture_aruco_image
-    ros2 run just_pick_it_perception capture_aruco_image --ros-args \
+    ros2 run just_pick_it_perception capture_image
+    ros2 run just_pick_it_perception capture_image --ros-args \
         -p output_dir:=/tmp/calib_imgs \
         -p interval:=2.0 \
         -p topic:=/image_raw
@@ -21,13 +21,13 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image
 
 
-class ArucoImageCapture(Node):
+class ImageCapture(Node):
 
     def __init__(self):
-        super().__init__('aruco_image_capture')
+        super().__init__('image_capture')
 
         self.declare_parameter('topic', '/camera/image_raw')
-        self.declare_parameter('output_dir', os.path.expanduser('~/aruco_captures'))
+        self.declare_parameter('output_dir', os.path.expanduser('~/img_captures'))
         self.declare_parameter('interval', 1.0)
 
         topic = self.get_parameter('topic').get_parameter_value().string_value
@@ -68,7 +68,7 @@ class ArucoImageCapture(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = ArucoImageCapture()
+    node = ImageCapture()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
