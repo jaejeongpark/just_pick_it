@@ -13,6 +13,7 @@ def generate_launch_description():
                 output="screen",
                 parameters=[
                     {
+                        "front_angle_center_rad": 3.14159,
                         "front_angle_limit_rad": 0.35,
                         "stop_distance_m": 0.35,
                     }

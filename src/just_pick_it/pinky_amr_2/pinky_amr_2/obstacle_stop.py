@@ -46,9 +46,15 @@ class Amr2ObstacleStop(Node):
         #   LiDAR 스펙값이 아니라 우리 safety 정책값이다.
         # stop_distance_m:
         #   이 거리 안에 장애물이 있으면 최종 속도를 0으로 만든다.
+        self.declare_parameter("front_angle_center_rad", math.pi)
         self.declare_parameter("front_angle_limit_rad", 0.35)
         self.declare_parameter("stop_distance_m", 0.35)
 
+        self.front_angle_center_rad = (
+            self.get_parameter("front_angle_center_rad")
+            .get_parameter_value()
+            .double_value
+        )
         self.front_angle_limit_rad = (
             self.get_parameter("front_angle_limit_rad")
             .get_parameter_value()
@@ -87,6 +93,7 @@ class Amr2ObstacleStop(Node):
 
         self.get_logger().info(
             "obstacle stop started. "
+            f"front_angle_center_rad={self.front_angle_center_rad:.3f}, "
             f"front_angle_limit_rad={self.front_angle_limit_rad:.3f}, "
             f"stop_distance_m={self.stop_distance_m:.3f}"
         )
@@ -150,14 +157,32 @@ class Amr2ObstacleStop(Node):
                 continue
 
             angle = msg.angle_min + index * msg.angle_increment
+            angle_error = self.get_shortest_angle_error(
+                angle,
+                self.front_angle_center_rad,
+            )
 
-            if -self.front_angle_limit_rad <= angle <= self.front_angle_limit_rad:
+            if abs(angle_error) <= self.front_angle_limit_rad:
                 front_ranges.append(distance)
 
         if not front_ranges:
             return float("inf")
 
         return min(front_ranges)
+
+    def get_shortest_angle_error(self, angle, target_angle):
+        """
+        두 각도의 가장 짧은 차이를 -pi ~ pi 범위로 반환한다.
+
+        LaserScan에서 실제 전방이 pi 또는 -pi 근처에 있을 수 있다.
+        단순히 target-limit <= angle <= target+limit 형태로 비교하면
+        pi 경계에서 범위가 끊기므로, 각도 차이를 원형으로 계산한다.
+        """
+
+        return math.atan2(
+            math.sin(angle - target_angle),
+            math.cos(angle - target_angle),
+        )
 
     def publish_stop(self):
         """
