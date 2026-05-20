@@ -21,10 +21,21 @@ class AprilTagDetector(Node):
         self.declare_parameter('calibration_file', _DEFAULT_CALIB)
         self.declare_parameter('image_topic', '/camera/image_raw')
         self.declare_parameter('annotated_topic', '/apriltag/image_annotated')
+        self.declare_parameter('tag_size_m', 0.15)
 
         calib_path = self.get_parameter('calibration_file').get_parameter_value().string_value
         self.image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
         annotated_topic = self.get_parameter('annotated_topic').get_parameter_value().string_value
+        tag_half = self.get_parameter('tag_size_m').get_parameter_value().double_value / 2.0
+
+        # solvePnP용 태그 모서리 3D 좌표 (태그 로컬 프레임, z=0 평면)
+        # 순서: TL, TR, BR, BL  (cv2.aruco.detectMarkers 코너 순서와 동일)
+        self._obj_pts = np.array([
+            [-tag_half,  tag_half, 0.0],
+            [ tag_half,  tag_half, 0.0],
+            [ tag_half, -tag_half, 0.0],
+            [-tag_half, -tag_half, 0.0],
+        ], dtype=np.float64)
 
         self.K, self.D = self._load_calibration(calib_path)
         self.get_logger().info(
@@ -107,10 +118,37 @@ class AprilTagDetector(Node):
             self.get_logger().info(
                 f'detected tag ids: {ids.flatten().tolist()}, count={len(ids)}'
             )
+            self._estimate_poses(corners, ids)
 
         out = self.bridge.cv2_to_imgmsg(annotated, 'bgr8')
         out.header = msg.header
         self.annotated_pub.publish(out)
+
+
+    def _estimate_poses(self, corners, ids):
+        # undistort 후 이미지 기준이므로 D=zeros, K=new_K 사용
+        K = self._new_K
+        D = np.zeros(5, dtype=np.float64)
+
+        for i, tag_id in enumerate(ids.flatten()):
+            img_pts = corners[i].reshape(4, 2)
+            ok, rvec, tvec = cv2.solvePnP(
+                self._obj_pts, img_pts, K, D,
+                flags=cv2.SOLVEPNP_IPPE_SQUARE,
+            )
+            if not ok:
+                self.get_logger().warn(f'[tag {tag_id}] solvePnP 실패')
+                continue
+
+            R, _ = cv2.Rodrigues(rvec)
+            T_tag_in_cam = np.eye(4, dtype=np.float64)
+            T_tag_in_cam[:3, :3] = R
+            T_tag_in_cam[:3, 3] = tvec.flatten()
+
+            self.get_logger().info(
+                f'[tag {tag_id}] T_tag_in_cam (카메라 광학 프레임 기준):\n'
+                f'{np.round(T_tag_in_cam, 4)}'
+            )
 
 
 def main(args=None):
