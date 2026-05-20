@@ -33,6 +33,7 @@ setup(
             'capture_image = just_pick_it_perception.capture_image:main',
             'camera_calibrator = just_pick_it_perception.camera_calibrator:main',
             'apriltag_pose_estimator = just_pick_it_perception.apriltag_pose_estimator:main',
+            'apriltag_detector = just_pick_it_perception.apriltag_detector:main',
         ],
     },
 )

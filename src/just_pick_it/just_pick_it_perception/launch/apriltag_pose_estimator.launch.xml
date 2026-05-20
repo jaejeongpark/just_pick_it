@@ -1,44 +1,21 @@
 <?xml version='1.0' ?>
 
 <launch>
-    <arg name="calibration_file"   default="$(env HOME)/camera_calibration.yaml"/>
-    <arg name="tag_db_file"        default=""/>
-    <arg name="use_camera_info"    default="true"/>
-    <arg name="image_topic"        default="/camera/image_raw"/>
-    <arg name="camera_info_topic"  default="/camera/camera_info"/>
-    <arg name="world_frame"        default="map"/>
-    <arg name="base_frame"         default="base_footprint"/>
-    <arg name="pose_topic"         default="/robot_pose"/>
-    <arg name="multi_tag_strategy" default="closest"/>
-    <arg name="publish_debug_image" default="false"/>
-    <arg name="april_odom_topic"   default="/april_odom"/>
-    <arg name="april_odom_frame"   default="april_odom"/>
-    <arg name="publish_tf"         default="true"/>
-    <arg name="bridge_map_to_odom" default="true"/>
-    <arg name="odom_frame"         default="odom"/>
-    <arg name="line_marker_topic"  default="/april_odom_line"/>
-    <arg name="line_width"         default="0.01"/>
-    <arg name="use_sim_time"       default="true"/>
+    <arg name="calibration_file"  default="$(env HOME)/just_pick_it/src/just_pick_it/just_pick_it_perception/result/camera_calibration.yaml"/>
+    <arg name="tag_db_file"       default=""/>
+    <arg name="use_camera_info"   default="false"/>
+    <arg name="image_topic"       default="/camera/image_raw"/>
+    <arg name="camera_info_topic" default="/camera/camera_info"/>
+    <arg name="world_frame"       default="map"/>
+    <arg name="base_frame"        default="base_footprint"/>
+    <arg name="pose_topic"        default="/robot_pose"/>
+    <arg name="target_group"      default=""/>
+    <arg name="use_sim_time"      default="true"/>
 
-    <node pkg="just_pick_it_perception" exec="apriltag_pose_estimator"
-          name="apriltag_pose_estimator" output="screen">
-        <param name="calibration_file"    value="$(var calibration_file)"/>
-        <param name="tag_db_file"         value="$(var tag_db_file)"/>
-        <param name="use_camera_info"     value="$(var use_camera_info)"/>
-        <param name="image_topic"         value="$(var image_topic)"/>
-        <param name="camera_info_topic"   value="$(var camera_info_topic)"/>
-        <param name="world_frame"         value="$(var world_frame)"/>
-        <param name="base_frame"          value="$(var base_frame)"/>
-        <param name="pose_topic"          value="$(var pose_topic)"/>
-        <param name="multi_tag_strategy"  value="$(var multi_tag_strategy)"/>
-        <param name="publish_debug_image" value="$(var publish_debug_image)"/>
-        <param name="april_odom_topic"    value="$(var april_odom_topic)"/>
-        <param name="april_odom_frame"    value="$(var april_odom_frame)"/>
-        <param name="publish_tf"          value="$(var publish_tf)"/>
-        <param name="bridge_map_to_odom"  value="$(var bridge_map_to_odom)"/>
-        <param name="odom_frame"          value="$(var odom_frame)"/>
-        <param name="line_marker_topic"   value="$(var line_marker_topic)"/>
-        <param name="line_width"          value="$(var line_width)"/>
-        <param name="use_sim_time"        value="$(var use_sim_time)"/>
+    <node pkg="just_pick_it_perception" exec="apriltag_detector"
+          name="apriltag_detector" output="screen">
+        <param name="calibration_file"  value="$(var calibration_file)"/>
+        <param name="image_topic"       value="$(var image_topic)"/>
+        <param name="annotated_topic"    value="/apriltag/image_annotated"/>
     </node>
 </launch>
