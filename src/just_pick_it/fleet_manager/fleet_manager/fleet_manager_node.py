@@ -21,9 +21,12 @@ class FleetManagerNode(Node):
         super().__init__('fleet_manager')
 
         self.declare_parameter('robot_ids', ['AMR_001', 'AMR_002'])
-        robot_ids: list[str] = self.get_parameter('robot_ids').value
+        self.declare_parameter('server_base_url', 'http://192.168.4.1:8000')
 
-        self.traffic_manager = TrafficManager(self, robot_ids)
+        robot_ids: list[str] = self.get_parameter('robot_ids').value
+        server_url: str = self.get_parameter('server_base_url').value
+
+        self.traffic_manager = TrafficManager(self, robot_ids, server_url)
 
         # TaskManager 는 다른 팀 구현체를 여기에 추가한다.
         # self.task_manager = TaskManager(self, self.traffic_manager)

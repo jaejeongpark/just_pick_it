@@ -4,7 +4,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import ExceptionLog, Order, PickupSlot, Robot, Task, TaskEvent
+from app.models import ExceptionLog, Order, PickupSlot, Robot, Task, TaskEvent, Zone
 from app.schemas import (
     FleetExceptionCreate,
     FleetExceptionRead,
@@ -623,6 +623,21 @@ def update_pickup_slot_state(
     db.commit()
     background_tasks.add_task(broadcast_all_status)
     return {"status": "ok"}
+
+
+@router.get("/zones")
+def list_zones(db: Session = Depends(get_db)):
+    zones = db.query(Zone).all()
+    return [
+        {
+            "zone_id": z.zone_id,
+            "zone_name": z.zone_name,
+            "zone_type": z.zone_type,
+            "pos_x": z.pos_x,
+            "pos_y": z.pos_y,
+        }
+        for z in zones
+    ]
 
 
 @router.post("/exceptions", response_model=FleetExceptionRead, status_code=201)

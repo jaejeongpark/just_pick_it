@@ -13,9 +13,9 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='ane',
-    maintainer_email='jjeongpark@gmail.com',
-    description='TODO: Package description',
+    maintainer='suwoo3131',
+    maintainer_email='suwoo3131@gmail.com',
+    description='AMR State Manager for just_pick_it system',
     license='Apache-2.0',
     extras_require={
         'test': [
@@ -24,6 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'state_manager = pinky_amr_1.state_manager:main',
         ],
     },
 )
