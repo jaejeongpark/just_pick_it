@@ -1,58 +1,6 @@
 # Just Pick It API 사용 가이드
 
-이 문서는 웹/DB를 잘 모르는 팀원이 Swagger를 열지 않아도 각 Robot Control Node, Vision, LLM 연동 경계를 바로 이해할 수 있게 정리한 기준입니다.
-
-## 기본 원칙
-
-```text
-로봇 담당 노드/Control Bridge/LLM Service는 DB에 직접 접근하지 않는다.
-상태 변경은 Control Server API를 호출한다.
-Vision Server는 Robot Control Node가 직접 호출하고, Control Server는 이미지/영상 데이터를 중계하지 않는다.
-Control Server는 DB에 저장한 뒤 Admin/Customer UI로 WebSocket 갱신을 보낸다.
-```
-
-전체 흐름:
-
-```text
-Customer UI
-  -> Control Server
-      -> DB 저장
-      -> Admin/Customer UI 갱신
-
-Robot Control Node / Control Bridge / LLM Service
-  -> Control Server API 호출
-      -> DB 저장
-      -> Admin/Customer UI 갱신
-
-Robot Control Node
-  -> Vision Server 직접 호출
-      -> 결과 수신
-          -> Control Server API로 상태/예외 보고
-```
-
-`/api/fleet/*` 경로명은 기존 구현 호환을 위해 유지합니다.  
-현재 프로젝트 방향에서는 Fleet Manager 전용 API가 아니라 **각 로봇 담당 노드가 task/robot/order 상태를 보고하는 runtime API**로 사용합니다.
-
-## Control Server가 담당하는 기능
-
-| 기능 | 설명 |
-|---|---|
-| DB 접근 | 주문, 상품, task, robot, pickup slot, exception을 PostgreSQL에 저장 |
-| 주문 task 생성/배정 | 고객 주문 생성 시 기본 task를 만들고, Control Server가 로봇 상태를 기준으로 배정 처리 |
-| 상태 변경 API | Robot Control Node/Control Bridge/Admin UI가 보낸 상태를 검증하고 DB에 반영 |
-| 픽업 슬롯 배정 | 검수 시작 시점에 `EMPTY` 슬롯 하나를 `RESERVED`로 예약 |
-| 실시간 갱신 | DB 변경 후 Admin/Customer UI에 WebSocket broadcast |
-| 예외 기록 | Robot Control Node 또는 Vision 연동 노드가 보낸 예외를 `exception_log`에 저장 |
-| LLM 연결 | 관리자 자연어 명령을 Claude 또는 로컬 고정 JSON으로 처리 |
-
-## 서버 주소와 호출 방식
-
-웹 서버 실행:
-
-```bash
-cd ~/just_pick_it
-web/scripts/run.sh
-```
+이 문서는 Customer UI, Admin UI, Fleet Manager, LLM 담당 모듈이 Control Server와 어떤 API로 통신하는지 정리한 문서이다.
 
 기본 주소:
 
@@ -60,73 +8,84 @@ web/scripts/run.sh
 http://localhost:8000
 ```
 
-API 호출 방식:
+API 문서:
 
 ```text
-GET    조회
-POST   새 데이터 생성 또는 명령 요청
-PATCH  일부 상태 변경
+http://localhost:8000/docs
 ```
 
-자주 보는 URL:
+---
+
+## 1. 기본 원칙
 
 ```text
-Admin UI    : http://localhost:8000/admin
-Customer UI : http://localhost:8000/customer
-DB Health   : http://localhost:8000/api/health/db
+Customer UI / Admin UI
+  -> Control Server HTTP/WebSocket API 사용
+
+Fleet Manager
+  -> Control Server snapshot/event 수신
+  -> Control Server /api/fleet/* API로 task/robot/order/exception 상태 저장
+
+PICKY / COBOT
+  -> Control Server와 직접 통신하지 않음
+  -> Fleet Manager를 통해 명령 수신 및 상태 보고
+
+LLM 담당 모듈
+  -> /api/admin/llm/messages 구현부 또는 별도 모듈에서 자연어 파싱
+  -> 입고 명령이면 Fleet Manager에 STOCKING_COMMAND 전달
+
+Vision
+  -> Control Server가 이미지/영상 중계하지 않음
+  -> Fleet Manager 또는 로봇 쪽 모듈이 직접 호출하고 결과만 Control Server에 보고
 ```
 
-## 누가 무엇을 호출하나
+`/api/fleet/*` 이름은 유지하지만, 의미는 “Fleet Manager가 Control Server에 상태를 저장하거나 조회하는 API”이다.
 
-| 호출자 | 목적 | 주로 쓰는 API |
+---
+
+## 2. 호출 주체별 API
+
+| 호출자 | 목적 | 주요 API |
 |---|---|---|
-| Customer UI | 상품 조회, 주문 생성, 픽업 완료 | `GET /api/products`, `POST /api/orders`, `POST /api/orders/{order_id}/complete` |
-| Admin UI | 관제 화면 조회, 수동 상태 변경 | `/api/admin/*`, `/api/fleet/*` |
-| SORTING_COBOT 담당 노드 | 배정된 선별 task 조회, 시작/완료 보고 | `GET /api/fleet/tasks?robot_id=SORTING_COBOT&status=ASSIGNED`, `PATCH /api/fleet/tasks/{task_id}` |
-| AMR 담당 노드 | 대기/배터리/위치 상태 보고, 배정된 이동 task 조회/상태 보고 | `PATCH /api/fleet/robots/{robot_id}`, `GET /api/fleet/tasks?robot_id=AMR_1&status=ASSIGNED`, `PATCH /api/fleet/tasks/{task_id}` |
-| INSPECTION_COBOT 담당 노드 | 배정된 검수 task 조회, 결과 보고 | `GET /api/fleet/tasks?robot_id=INSPECTION_COBOT&status=ASSIGNED`, `PATCH /api/fleet/tasks/{task_id}` |
-| Vision Server | Robot Control Node가 직접 호출하는 인식/검수/안전 감지 서버 | Control Server API 직접 호출 없음 |
-| Vision 연동 노드 | Vision 결과 기반 예외/상태 보고 | `POST /api/fleet/exceptions`, `PATCH /api/fleet/tasks/{task_id}` |
-| LLM 기능 | 자연어 명령 파싱, PATROL task 생성 | `POST /api/admin/llm/messages` |
+| Customer UI | 상품 조회, 주문 생성, 주문 조회, 수령 완료 | `/api/products`, `/api/orders`, `/api/customer/status` |
+| Admin UI | 통합 관제, 재고 관리, 예외 처리, LLM 명령 | `/api/admin/*` |
+| Fleet Manager | snapshot 수신, task 생성/조회/상태 보고, robot 상태 보고 | `/api/fleet/*` |
+| LLM 담당 모듈 | 자연어 입고 명령 파싱 | `/api/admin/llm/messages` |
+| 외부 Vision/로봇 모듈 | Control Server 직접 호출 없음 | Fleet Manager 경유 |
 
-## 정상 주문 흐름
+---
 
-픽업 슬롯은 **검수 시작 시점**에 예약합니다. 주문 접수 시점에는 예약하지 않습니다.
+## 3. Customer UI API
 
-| 단계 | 호출 시점 | 호출자 | API | 요청 모델 | 결과 |
-|---|---|---|---|---|---|
-| 1 | 고객 주문 | Customer UI | `POST /api/orders` | `{items:[{product_id, quantity}]}` | `orders/order_item/task` 생성, 재고 차감, 주문 상태 `ORDER_WAIT` |
-| 2 | AMR 대기 상태 보고 | AMR Robot Control Node | `PATCH /api/fleet/robots/{robot_id}` | `{status:"STANDBY", battery_level, pos_x, pos_y, pos_theta}` | 배터리 조건이 맞으면 Control Server가 priority 숫자가 작은 AMR task 배정 |
-| 3 | 배정 task 조회 | 각 Robot Control Node | `GET /api/fleet/tasks?robot_id={robot_id}&status=ASSIGNED` | - | 자기 로봇의 다음 task 확인 |
-| 4 | task 시작 | 각 Robot Control Node | `PATCH /api/fleet/tasks/{task_id}` | `{current_status:"ASSIGNED", status:"RUNNING"}` | task 진행 중, robot/current_task/order 상태 자동 갱신 |
-| 5 | task 완료 | 각 Robot Control Node | `PATCH /api/fleet/tasks/{task_id}` | `{current_status:"RUNNING", status:"SUCCESS"}` | task 성공 후 robot/current_task 정리, 다음 ready task 자동 배정 |
-| 6 | 검수 task 시작 | INSPECTION_COBOT | `PATCH /api/fleet/tasks/{inspection_task_id}` | `{current_status:"ASSIGNED", status:"RUNNING"}` | 빈 픽업 슬롯이 `RESERVED` |
-| 7 | 검수 완료 | INSPECTION_COBOT | `PATCH /api/fleet/tasks/{inspection_task_id}` | `{current_status:"RUNNING", status:"SUCCESS"}` | 픽업 슬롯 `OCCUPIED`, 주문 `PICKUP_READY` |
-| 8 | 고객 수령 | Customer UI | `POST /api/orders/{order_id}/complete` | body 없음 | 주문 완료, 픽업 슬롯 `EMPTY` |
+### 3-1. 상품 목록 조회
 
-## 핵심 API 상세
+```http
+GET /api/products
+```
 
-### DB 상태 확인
+응답:
 
-| API | 사용 시점 | 실제 응답 모델 | 결과 |
-|---|---|---|---|
-| `GET /api/health/db` | 서버 실행 후 DB 연결 확인 | `{status:"ok"}` | PostgreSQL 연결 정상 여부 확인 |
+```json
+[
+  {
+    "product_id": 1,
+    "name": "우유",
+    "image_url": "/static/img/milk.png",
+    "stock_qty": 2,
+    "storage_zone_id": 11,
+    "storage_zone_name": "PRODUCT_SLOT_1",
+    "storage_location": "PRODUCT_SLOT_1"
+  }
+]
+```
 
-### 상품 조회
+### 3-2. 주문 생성
 
-| API | 사용 시점 | 실제 응답 모델 | 결과 |
-|---|---|---|---|
-| `GET /api/products` | 고객 UI 상품 목록 표시 | `[{product_id, name, image_url, stock_qty, storage_location}]` | 고객 상품 카드 표시 |
+```http
+POST /api/orders
+```
 
-고객 UI에서는 `storage_location`을 화면에 보여주지 않습니다.
-
-### 주문 생성
-
-| API | 사용 시점 | 실제 요청 모델 | 실제 응답 모델 | 결과 |
-|---|---|---|---|---|
-| `POST /api/orders` | 고객이 주문하기 클릭 | `OrderCreate` | `OrderRead` | 주문 생성, 재고 차감 |
-
-예시:
+요청:
 
 ```json
 {
@@ -137,195 +96,709 @@ DB Health   : http://localhost:8000/api/health/db
 }
 ```
 
-### task 생성
+응답:
 
-| API | 사용 시점 | 실제 요청 모델 | 실제 응답 모델 | 결과 |
-|---|---|---|---|---|
-| `POST /api/orders` | 고객 주문 접수 | `OrderCreate` | `OrderRead` | 기본 주문 task 자동 생성 |
-| `POST /api/admin/llm/messages` | 관리자 순찰 명령 | `AdminLlmMessageCreate` | `AdminLlmMessageRead` | PATROL task 자동 생성 |
-
-한 주문의 기본 task 예시:
-
-```text
-STANDBY_LOAD   -> QUEUED, AMR 상태 보고 시 배정
-LOAD           -> QUEUED, STANDBY_LOAD와 같은 AMR로 예약
-SORTING        -> QUEUED, SORTING_COBOT 고정
-STANDBY_UNLOAD -> QUEUED, STANDBY_LOAD와 같은 AMR로 예약
-UNLOAD         -> QUEUED, STANDBY_LOAD와 같은 AMR로 예약
-INSPECTION     -> QUEUED, INSPECTION_COBOT 고정
-```
-
-주문 생성 직후 모든 task가 바로 실행되는 것은 아닙니다.
-Control Server는 task 순서와 로봇 상태를 보고 실행 가능한 task만 `ASSIGNED`로 변경합니다.
-
-### task 조회
-
-| API | 사용 시점 | 실제 응답 모델 | 결과 |
-|---|---|---|---|
-| `GET /api/fleet/tasks` | 전체 task 조회 | `list[FleetTaskSummaryRead]` | 전체 task 확인 |
-| `GET /api/fleet/tasks?robot_id=AMR_1` | 특정 로봇 작업 큐 확인 | 동일 | AMR_1에 배정된 task만 확인 |
-| `GET /api/fleet/tasks?robot_id=AMR_1&status=ASSIGNED` | 특정 로봇의 다음 실행 task 확인 | 동일 | AMR_1이 지금 시작할 수 있는 task 확인 |
-| `GET /api/fleet/tasks?status=QUEUED` | 아직 배정되지 않은 task 확인 | 동일 | 앞 단계/로봇 대기 중인 task 확인 |
-| `GET /api/fleet/tasks?status=QUEUED&task_type=STANDBY_LOAD` | 특정 종류의 대기 task 확인 | 동일 | 디버깅/관리자 확인용 |
-| `GET /api/fleet/orders/{order_id}/tasks` | 주문 하나의 task 흐름 확인 | 동일 | 주문 상세/작업 큐 확인 |
-
-`FleetTaskSummaryRead`는 Robot Control Node가 AMR/Cobot에 넘길 실행 명령 payload의 기준입니다.
-
-```text
-FleetTaskSummaryRead = {
-  task_id: int,
-  order_id: int | null,
-  order_no: string | null,
-  assigned_robot_id: string | null,
-  task_type: string,
-  status: string,
-  priority: int,
-  source_zone_id: int | null,
-  source_zone_name: string | null,
-  source_zone_pose: {x: float, y: float, z: float, theta: float | null} | null,
-  target_zone_id: int | null,
-  target_zone_name: string | null,
-  target_zone_pose: {x: float, y: float, z: float, theta: float | null} | null,
-  result_message: string | null
+```json
+{
+  "order_id": 1,
+  "order_no": "ORD-0001",
+  "status": "ORDER_WAIT",
+  "priority": 2,
+  "pickup_slot_id": null,
+  "pickup_slot_name": null,
+  "assigned_unit_id": null,
+  "items": [
+    {
+      "item_id": 1,
+      "product_id": 1,
+      "product_name": "우유",
+      "image_url": "/static/img/milk.png",
+      "quantity": 1,
+      "status": "WAITING"
+    }
+  ]
 }
 ```
 
-### 주문 목록 조회
+처리:
 
-| API | 사용 시점 | 실제 응답 모델 | 결과 |
-|---|---|---|---|
-| `GET /api/fleet/orders` | Robot Runtime 기준 미완료 주문 확인 | `[{order_id, order_no, status, current_task_type, current_task_status, assigned_robot_id}]` | 남은 주문/현재 단계 확인 |
-| `GET /api/fleet/orders?status=ORDER_WAIT` | 작업 대기 주문 확인 | 동일 | 아직 작업 중이 아닌 주문 확인 |
-| `GET /api/fleet/orders?include_completed=true` | 완료 주문까지 포함해서 확인 | 동일 | 디버깅용 전체 주문 확인 |
-
-AMR Robot Control Node는 작업을 직접 가져가지 않고, 상차 대기존 복귀/대기 상태와 배터리를 `/api/fleet/robots/{robot_id}`로 보고합니다.
-Control Server는 그 시점에 priority 숫자가 작은 task부터 배정합니다.
-
-### task 자동 배정
-
-| 트리거 | 처리 |
+| 항목 | 설명 |
 |---|---|
-| 주문 생성 | task 6개 생성, Cobot task 고정 배정 |
-| AMR 상태 보고 | AMR이 `IDLE`/`STANDBY`이고 배터리 20 이상이면 순찰 task(priority 1) 우선 배정, 없으면 주문 단위 AMR task(priority 2) 배정 |
-| task SUCCESS | 다음 순서 task가 고정 로봇이거나 같은 주문의 AMR 연속 task이면 자동 `ASSIGNED` |
+| 재고 | 주문 수량만큼 즉시 차감 |
+| orders | `ORDER_WAIT`, `priority=2` |
+| order_item | 주문 상품 목록 생성 |
+| task | Control Server가 만들지 않음. Fleet Manager가 이벤트를 받고 생성 |
+| 이벤트 | `ORDER_CREATED`를 Fleet Manager WebSocket으로 broadcast |
 
-### task 상태 변경
+### 3-3. 주문 목록 조회
 
-| API | 사용 시점 | 요청 | 결과 |
-|---|---|---|---|
-| `PATCH /api/fleet/tasks/{task_id}` | task 시작/완료/실패 | `{current_status, status, assigned_robot_id, result_message}` | `current_status`가 DB 현재 상태와 다르면 409, 맞으면 task 상태 저장/UI 갱신 |
+```http
+GET /api/orders
+```
 
-예시:
+응답:
+
+```json
+[
+  {
+    "order_id": 1,
+    "order_no": "ORD-0001",
+    "status": "SORTING",
+    "priority": 2,
+    "pickup_slot_id": null,
+    "pickup_slot_name": null,
+    "assigned_unit_id": 1,
+    "items": []
+  }
+]
+```
+
+`COMPLETED` 주문은 제외된다.
+
+### 3-4. 주문 상세 조회
+
+```http
+GET /api/orders/{order_id}
+```
+
+### 3-5. 수령 완료
+
+```http
+POST /api/orders/{order_id}/complete
+```
+
+조건:
+
+| 조건 | 설명 |
+|---|---|
+| 가능 상태 | `PICKUP_READY` |
+| 처리 | 주문 `COMPLETED`, 픽업 슬롯 `EMPTY` |
+
+### 3-6. 고객 화면 전체 상태
+
+```http
+GET /api/customer/status
+WS /api/customer/ws/status
+```
+
+응답:
+
+```json
+{
+  "products": [],
+  "orders": []
+}
+```
+
+---
+
+## 4. Admin UI API
+
+### 4-1. 관리자 통합 상태 조회
+
+```http
+GET /api/admin/status
+WS /api/admin/ws/status
+```
+
+응답 주요 필드:
+
+| 필드 | 의미 |
+|---|---|
+| `orders` | 완료되지 않은 주문 |
+| `order_history` | 완료 주문 |
+| `robots` | PICKY/COBOT 상태 |
+| `tasks` | task 목록 |
+| `products` | 상품/재고 목록 |
+| `pickup_slots` | 픽업 슬롯 목록 |
+| `exceptions` | 미처리 예외 |
+| `exception_history` | 처리 완료 예외 |
+| `low_stock_count` | 재고 부족 상품 수 |
+| `unresolved_exception_count` | 미처리 예외 수 |
+
+`robots` 예:
+
+```json
+[
+  {
+    "robot_id": 1,
+    "robot_name": "PICKY1",
+    "unit_id": 1,
+    "robot_type": "PICKY",
+    "robot_status": "BUSY",
+    "status": "BUSY",
+    "picky_state": "MOVING_TO_PRODUCT",
+    "cobot_state": null,
+    "battery_level": 100,
+    "current_task_id": 3,
+    "current_task_type": "MOVE_TO_PRODUCT",
+    "current_task_status": "RUNNING",
+    "pos_x": 0.9,
+    "pos_y": 0.82,
+    "pos_theta": 0.0
+  }
+]
+```
+
+`tasks` 예:
+
+```json
+[
+  {
+    "task_id": 3,
+    "order_id": 1,
+    "order_no": "ORD-0001",
+    "order_item_id": 2,
+    "product_id": 2,
+    "product_name": "시리얼",
+    "product_quantity": 1,
+    "sequence_no": 3,
+    "assigned_robot_id": 1,
+    "assigned_robot_name": "PICKY1",
+    "task_type": "MOVE_TO_PRODUCT",
+    "status": "RUNNING",
+    "priority": 2,
+    "source_zone_name": "PRODUCT_ZONE_1",
+    "target_zone_name": "PRODUCT_ZONE_2",
+    "result_message": "시리얼 보관 위치로 이동 중"
+  }
+]
+```
+
+### 4-2. 긴급 정지 / 재개
+
+```http
+POST /api/admin/emergency-stop
+POST /api/admin/resume
+```
+
+응답:
+
+```json
+{"status": "ok"}
+```
+
+### 4-3. 상품 등록
+
+```http
+POST /api/admin/products
+```
+
+요청:
+
+```json
+{
+  "name": "우유",
+  "stock_qty": 10,
+  "storage_zone_id": 11,
+  "image_url": "/static/img/milk.png"
+}
+```
+
+`storage_zone_id` 대신 `storage_location`에 zone 이름을 넣을 수도 있다.
+
+### 4-4. 상품 수정
+
+```http
+PATCH /api/admin/products/{product_id}
+```
+
+요청:
+
+```json
+{
+  "name": "우유",
+  "stock_qty": 10,
+  "storage_zone_id": 11,
+  "image_url": "/static/img/milk.png"
+}
+```
+
+### 4-5. 재고 수량만 수정
+
+```http
+PATCH /api/admin/products/{product_id}/stock
+```
+
+요청:
+
+```json
+{
+  "stock_qty": 5
+}
+```
+
+### 4-6. 픽업 슬롯 생성
+
+```http
+POST /api/admin/pickup-slots
+```
+
+요청:
+
+```json
+{
+  "slot_name": "Pickup_slot_5",
+  "status": "EMPTY"
+}
+```
+
+### 4-7. 예외 처리 완료
+
+```http
+POST /api/admin/exceptions/{exception_id}/resolve
+```
+
+응답:
+
+```json
+{"status": "ok"}
+```
+
+### 4-8. LLM 명령 입력
+
+```http
+POST /api/admin/llm/messages
+```
+
+요청:
+
+```json
+{
+  "message": "우유 5개 입고해줘"
+}
+```
+
+현재 응답:
+
+```json
+{
+  "result": "ok",
+  "message": "LLM 명령 파싱은 아직 연결 대기 상태입니다. 담당 모듈에서 구현해주세요.",
+  "action": "CHAT",
+  "task_id": null,
+  "assigned_robot_id": null,
+  "assigned_robot_name": null,
+  "target_zone_id": null,
+  "target_zone_name": null,
+  "product_id": null,
+  "product_name": null,
+  "requested_quantity": null,
+  "stocking_policy": null,
+  "stocking_item_id": null,
+  "provider": "stub"
+}
+```
+
+향후 LLM 담당자가 구현해야 할 입고 응답:
+
+```json
+{
+  "result": "ok",
+  "message": "우유 5개 입고 명령을 인식했습니다.",
+  "action": "STOCKING",
+  "product_id": 1,
+  "product_name": "우유",
+  "requested_quantity": 5,
+  "stocking_policy": "REQUESTED_QUANTITY",
+  "stocking_item_id": 1,
+  "provider": "llm"
+}
+```
+
+`action="STOCKING"`이면 Control Server는 `stocking_item`을 만들고 Fleet Manager 이벤트 WebSocket으로 `STOCKING_COMMAND`를 보낸다.
+
+---
+
+## 5. Fleet Manager API
+
+Fleet Manager는 Control Server DB를 직접 만지지 않고 아래 API만 사용한다.
+
+### 5-1. 이벤트 수신
+
+```http
+WS /api/fleet/ws/events
+```
+
+이벤트 예:
+
+```json
+{"event": "ORDER_CREATED", "order_id": 1, "order_no": "ORD-0001"}
+{"event": "TASKS_CREATED", "task_ids": [1, 2, 3]}
+{"event": "TASK_STATUS_CHANGED", "task_id": 3, "status": "SUCCESS"}
+{"event": "ROBOT_STATE_CHANGED", "robot_id": 1, "robot_name": "PICKY1"}
+{"event": "EXCEPTION_CREATED", "exception_id": 1}
+{"event": "STOCKING_COMMAND", "message": "우유 5개 입고해줘", "command": {}}
+```
+
+### 5-2. 전체 snapshot 조회
+
+```http
+GET /api/fleet/snapshot
+```
+
+응답은 `GET /api/admin/status`와 같은 형태이다. Fleet Manager 재시작 시 현재 주문, task, robot, pickup slot 상태를 한 번에 복구하는 용도이다.
+
+### 5-2-1. zone 조회
+
+```http
+GET /api/fleet/zones
+GET /api/fleet/zones?zone_type=PRODUCT
+```
+
+응답:
+
+```json
+[
+  {
+    "zone_id": 5,
+    "zone_name": "PRODUCT_ZONE_1",
+    "zone_type": "PRODUCT",
+    "pose": {"x": 0.2, "y": 0.8, "z": 0.0, "theta": 0.0}
+  }
+]
+```
+
+`*_ZONE_*`은 PICKY가 이동/주차할 위치이고, `*_SLOT_*`은 COBOT이 상품을 집거나 내려놓는 물리 위치이다.
+
+### 5-3. 입고 item 생성/조회/수정
+
+```http
+POST /api/fleet/stocking-items
+GET /api/fleet/stocking-items
+PATCH /api/fleet/stocking-items/{stocking_item_id}
+```
+
+생성 요청:
+
+```json
+{
+  "product_id": 1,
+  "requested_quantity": 5,
+  "detected_quantity": null,
+  "stock_delta": null,
+  "stocking_policy": "REQUESTED_QUANTITY",
+  "status": "REQUESTED",
+  "assigned_unit_id": 1
+}
+```
+
+응답:
+
+```json
+{
+  "stocking_item_id": 1,
+  "product_id": 1,
+  "product_name": "우유",
+  "requested_quantity": 5,
+  "detected_quantity": null,
+  "stock_delta": null,
+  "stocking_policy": "REQUESTED_QUANTITY",
+  "status": "REQUESTED",
+  "assigned_unit_id": 1
+}
+```
+
+수량이 없는 입고 명령이면 `requested_quantity`는 `null`, `stocking_policy`는 `ALL_DETECTED`로 둔다.
+
+### 5-4. task bulk 생성
+
+```http
+POST /api/fleet/tasks/bulk
+```
+
+요청:
+
+```json
+{
+  "tasks": [
+    {
+      "order_id": 1,
+      "order_item_id": 2,
+      "stocking_item_id": null,
+      "sequence_no": 1,
+      "assigned_robot_name": "PICKY1",
+      "task_type": "MOVE_TO_PRODUCT",
+      "status": "ASSIGNED",
+      "priority": 2,
+      "source_zone_id": 1,
+      "target_zone_id": 5,
+      "result_message": null
+    }
+  ]
+}
+```
+
+응답:
+
+```json
+{
+  "status": "ok",
+  "task_ids": [1],
+  "created_count": 1
+}
+```
+
+주의:
+
+| 필드 | 설명 |
+|---|---|
+| `sequence_no` | Fleet Manager가 경로 계산 후 정한 실행 순서 |
+| `assigned_robot_id` | 숫자 ID 또는 로봇 이름 문자열 가능 |
+| `assigned_robot_name` | 로봇 이름으로 배정할 때 사용 |
+| `order_item_id` | 상품별 이동/선별 task에 연결 |
+| `stocking_item_id` | 입고 task를 `stocking_item`과 연결할 때 사용 |
+
+### 5-5. task 조회
+
+```http
+GET /api/fleet/tasks
+```
+
+쿼리:
+
+| 쿼리 | 예 |
+|---|---|
+| `robot_id` | `/api/fleet/tasks?robot_id=1` |
+| `robot_name` | `/api/fleet/tasks?robot_name=PICKY1` |
+| `status` | `/api/fleet/tasks?status=RUNNING` |
+| `task_type` | `/api/fleet/tasks?task_type=MOVE_TO_PRODUCT` |
+| `order_id` | `/api/fleet/tasks?order_id=1` |
+
+응답:
+
+```json
+[
+  {
+    "task_id": 3,
+    "order_id": 1,
+    "order_no": "ORD-0001",
+    "order_item_id": 2,
+    "stocking_item_id": null,
+    "product_id": 2,
+    "product_name": "시리얼",
+    "product_quantity": 1,
+    "requested_quantity": null,
+    "detected_quantity": null,
+    "stock_delta": null,
+    "stocking_policy": null,
+    "stocking_status": null,
+    "sequence_no": 3,
+    "assigned_robot_id": 1,
+    "assigned_robot_name": "PICKY1",
+    "task_type": "MOVE_TO_PRODUCT",
+    "status": "RUNNING",
+    "priority": 2,
+    "source_zone_id": 4,
+    "source_zone_name": "PRODUCT_ZONE_1",
+    "source_zone_pose": {"x": 0.2, "y": 0.8, "z": 0.1, "theta": 0.0},
+    "target_zone_id": 5,
+    "target_zone_name": "PRODUCT_ZONE_2",
+    "target_zone_pose": {"x": 0.32, "y": 0.8, "z": 0.1, "theta": 0.0},
+    "result_message": "시리얼 보관 위치로 이동 중"
+  }
+]
+```
+
+### 5-6. 주문별 task 조회
+
+```http
+GET /api/fleet/orders/{order_id}/tasks
+```
+
+### 5-7. task 상태 변경
+
+```http
+PATCH /api/fleet/tasks/{task_id}
+```
+
+요청:
 
 ```json
 {
   "current_status": "ASSIGNED",
   "status": "RUNNING",
-  "assigned_robot_id": "AMR_1"
+  "assigned_robot_name": "PICKY1",
+  "result_message": "상품 보관 위치로 이동 중"
 }
 ```
 
+응답:
+
 ```json
 {
-  "current_status": "RUNNING",
-  "status": "SUCCESS"
+  "status": "ok",
+  "previous_status": "ASSIGNED",
+  "current_status": "RUNNING"
 }
 ```
 
-### robot 상태 변경
+충돌 방지:
 
-| API | 사용 시점 | 요청 | 결과 |
-|---|---|---|---|
-| `PATCH /api/fleet/robots/{robot_id}` | 로봇 상태/배터리/위치 보고 | `{status, current_task_id, battery_level, pos_x, pos_y, pos_theta}` | 로봇 상태 저장, 미니맵/UI 갱신 |
+| 경우 | 결과 |
+|---|---|
+| `current_status`가 DB 현재 상태와 같음 | 변경 성공 |
+| `current_status`가 DB 현재 상태와 다름 | `409 task status conflict` |
 
-예시:
+자동 후처리:
+
+| task 상태 | 후처리 |
+|---|---|
+| `RUNNING` | robot `current_task_id`, `robot_status`, 세부 state 갱신 |
+| `SUCCESS` | robot 작업 해제, item/order/pickup slot 후처리 |
+| `FAILED` | order `ERROR`, robot 작업 해제 |
+| `CANCELLED` | robot 작업 해제 |
+
+### 5-8. task event 생성/조회
+
+```http
+POST /api/fleet/tasks/{task_id}/events
+GET /api/fleet/tasks/{task_id}/events
+```
+
+요청:
 
 ```json
 {
-  "status": "MOVING",
-  "current_task_id": 12,
-  "battery_level": 84,
-  "pos_x": 0.9,
+  "robot_name": "PICKY1",
+  "from_status": "RUNNING",
+  "to_status": "SUCCESS",
+  "event_name": "ARRIVED_PRODUCT_ZONE",
+  "reason": "상품 구역 도착",
+  "update_task_status": true
+}
+```
+
+응답:
+
+```json
+{
+  "event_id": 1,
+  "task_id": 3,
+  "robot_id": 1,
+  "robot_name": "PICKY1",
+  "from_status": "RUNNING",
+  "to_status": "SUCCESS",
+  "event_name": "ARRIVED_PRODUCT_ZONE",
+  "reason": "상품 구역 도착",
+  "created_at": "2026-05-20T10:00:00+00:00"
+}
+```
+
+### 5-9. robot 상태 조회/보고
+
+조회:
+
+```http
+GET /api/fleet/robots/PICKY1
+GET /api/fleet/robots/1
+GET /api/fleet/robots/PICKY1/running-task
+```
+
+보고:
+
+```http
+PATCH /api/fleet/robots/PICKY1
+```
+
+PICKY 요청:
+
+```json
+{
+  "robot_status": "BUSY",
+  "picky_state": "MOVING_TO_PRODUCT",
+  "current_task_id": 3,
+  "battery_level": 88,
+  "pos_x": 0.32,
   "pos_y": 0.8,
   "pos_theta": 0.0
 }
 ```
 
-### 주문 상태 변경
-
-| API | 사용 시점 | 요청 | 결과 |
-|---|---|---|---|
-| `PATCH /api/fleet/orders/{order_id}` | 주문 단계 전환 | `{status, pickup_slot_id}` | 고객/관리자 주문 상태 갱신 |
-
-예시:
+COBOT 요청:
 
 ```json
 {
-  "status": "INSPECTING"
+  "robot_status": "BUSY",
+  "cobot_state": "SORTING",
+  "current_task_id": 4
 }
 ```
+
+응답:
+
+```json
+{"status": "ok"}
+```
+
+주의:
+
+| 규칙 | 설명 |
+|---|---|
+| PICKY | `picky_state`만 보고한다. `cobot_state`는 넣지 않는다. |
+| COBOT | `cobot_state`만 보고한다. `picky_state`는 넣지 않는다. |
+| `status` | UI 호환 필드. 새 코드에서는 `robot_status`를 권장한다. |
+
+### 5-10. 주문 상태 변경
+
+```http
+PATCH /api/fleet/orders/{order_id}
+```
+
+요청:
 
 ```json
 {
-  "status": "PICKUP_READY"
+  "status": "INSPECTING",
+  "pickup_slot_id": 2,
+  "assigned_unit_id": 1
 }
 ```
 
-검수 실패 후 픽업 슬롯 예약을 해제해야 하는 경우:
+응답:
 
 ```json
-{
-  "status": "ERROR",
-  "pickup_slot_id": null
-}
+{"status": "ok"}
 ```
 
-### 픽업 슬롯 조회
+### 5-11. 주문 큐 조회
 
-| API | 사용 시점 | 응답 | 결과 |
-|---|---|---|---|
-| `GET /api/fleet/pickup-slots` | 픽업 슬롯 전체 확인 | `[{slot_id, slot_name, status, order_id, order_no}]` | 슬롯 상태 확인 |
-| `GET /api/fleet/pickup-slots?status=EMPTY` | 빈 슬롯 확인 | 동일 | 배정 가능 슬롯 확인 |
-
-### 픽업 슬롯 자동 배정
-
-| API | 사용 시점 | 실제 요청 모델 | 실제 응답 모델 | 결과 |
-|---|---|---|---|---|
-| `POST /api/fleet/orders/{order_id}/assign-pickup-slot` | 검수 시작 시점 | body 없음 | `FleetPickupSlotAssignmentRead` | 빈 슬롯 1개 예약, 주문에 slot 저장 |
-
-일반 검수 흐름에서는 `INSPECTION` task를 `RUNNING`으로 바꾸면 Control Server가 자동으로 예약합니다.
-이 API는 수동 테스트나 예외 복구 때 사용할 수 있습니다.
-
-응답 모델:
-
-```text
-FleetPickupSlotAssignmentRead = {
-  status: string,
-  order_id: int,
-  order_no: string,
-  pickup_slot_id: int,
-  slot_name: string,
-  slot_status: string
-}
+```http
+GET /api/fleet/orders
+GET /api/fleet/orders?status=ORDER_WAIT
+GET /api/fleet/orders?include_completed=true
 ```
 
-이 API를 쓰는 이유:
+응답:
 
-```text
-GET으로 빈 슬롯을 읽고 PATCH로 따로 예약하면, 동시에 두 로봇이 같은 슬롯을 잡을 수 있다.
-assign-pickup-slot은 Control Server가 한 번에 예약해서 충돌 가능성을 줄인다.
+```json
+[
+  {
+    "order_id": 1,
+    "order_no": "ORD-0001",
+    "status": "SORTING",
+    "priority": 2,
+    "pickup_slot_id": null,
+    "pickup_slot_name": null,
+    "assigned_unit_id": 1,
+    "current_task_id": 3,
+    "current_task_type": "MOVE_TO_PRODUCT",
+    "current_task_status": "RUNNING",
+    "assigned_robot_id": 1,
+    "assigned_robot_name": "PICKY1"
+  }
+]
 ```
 
-### 픽업 슬롯 상태 변경
+### 5-12. 픽업 슬롯 예약/조회/변경
 
-| API | 사용 시점 | 요청 | 결과 |
-|---|---|---|---|
-| `PATCH /api/fleet/pickup-slots/{slot_id}` | 검수 완료 후 수동 복구 또는 슬롯 사용 불가 처리 | `{status}` | 슬롯 상태 저장, UI 갱신 |
+```http
+POST /api/fleet/orders/{order_id}/assign-pickup-slot
+GET /api/fleet/pickup-slots
+PATCH /api/fleet/pickup-slots/{slot_id}
+```
 
-일반 검수 흐름에서는 `INSPECTION` task를 `SUCCESS`로 바꾸면 Control Server가 자동으로 `OCCUPIED` 처리합니다.
-이 API는 관리자가 슬롯을 `BLOCKED` 처리하거나 수동 복구할 때 사용합니다.
-
-예시:
+픽업 슬롯 변경 요청:
 
 ```json
 {
@@ -333,218 +806,276 @@ assign-pickup-slot은 Control Server가 한 번에 예약해서 충돌 가능성
 }
 ```
 
-### task event 기록
+### 5-13. 예외 보고
 
-| API | 사용 시점 | 요청 | 결과 |
-|---|---|---|---|
-| `POST /api/fleet/tasks/{task_id}/events` | 작업 시작/완료/실패 이력 저장 | `{robot_id, from_status, to_status, event_name, reason, update_task_status}` | task_event 기록 |
-| `GET /api/fleet/tasks/{task_id}/events` | 작업 이력 조회 | - | task 이벤트 타임라인 조회 |
+```http
+POST /api/fleet/exceptions
+```
 
-예시:
+요청:
 
 ```json
 {
-  "robot_id": "AMR_1",
-  "from_status": "ASSIGNED",
-  "to_status": "RUNNING",
-  "event_name": "STANDBY_UNLOAD_STARTED",
-  "reason": "AMR started moving to unloading standby zone",
-  "update_task_status": true
+  "exception_type": "OBSTACLE_DETECTED",
+  "robot_name": "PICKY2",
+  "task_id": 12,
+  "order_id": 2,
+  "detail": "픽업존 이동 경로에 장애물 감지"
 }
 ```
 
-### 예외 보고
-
-| API | 사용 시점 | 요청 | 결과 |
-|---|---|---|---|
-| `POST /api/fleet/exceptions` | Robot Control Node 또는 Vision 연동 노드에서 예외 감지 | `{exception_type, robot_id, task_id, order_id, detail}` | Admin UI 예외/알람 표시 |
-
-예시:
+응답:
 
 ```json
 {
-  "exception_type": "INSPECTION_FAIL",
-  "robot_id": "INSPECTION_COBOT",
-  "task_id": 103,
-  "order_id": 7,
-  "detail": "검수 결과 주문 상품과 실제 상품이 일치하지 않음"
+  "status": "ok",
+  "exception_id": 1
 }
 ```
 
-### LLM 자연어 명령
+### 5-14. 입고 완료 보고
 
-| API | 사용 시점 | 실제 요청 모델 | 실제 응답 모델 | 결과 |
-|---|---|---|---|---|
-| `POST /api/admin/llm/messages` | 관리자 자연어 명령 입력 | `AdminLlmMessageCreate` | `AdminLlmMessageRead` | 순찰 명령이면 zone을 확인한 뒤 `PATROL` task를 `QUEUED`로 생성 |
+```http
+POST /api/fleet/stocking/complete
+```
 
-요청 모델:
+요청:
 
-```text
-AdminLlmMessageCreate = {
-  message: string
+```json
+{
+  "task_id": 31,
+  "detected_quantity": 5,
+  "stock_delta": 5,
+  "result_message": "우유 5개 입고 완료"
 }
 ```
 
-응답 모델:
+응답:
 
-```text
-AdminLlmMessageRead = {
-  result: string,
-  message: string,
-  action: string | null,
-  task_id: int | null,
-  assigned_robot_id: string | null,
-  target_zone_id: int | null,
-  target_zone_name: string | null,
-  provider: string
+```json
+{
+  "status": "ok",
+  "task_id": 31,
+  "stocking_item_id": 1,
+  "product_id": 1,
+  "stock_delta": 5,
+  "stock_qty": 7
 }
 ```
 
-순찰 처리 흐름:
+`stock_delta`가 없으면 `stocking_item.requested_quantity`, `stocking_item.detected_quantity` 순서로 재고 증가량을 계산한다.
 
-```text
-Admin UI
--> POST /api/admin/llm/messages {message}
--> Control Server가 LLM/local fixed JSON으로 action, target_zone_id/target_zone_name 수신
--> Control Server가 DB zone으로 target_zone_id 확정
--> Control Server가 PATROL task QUEUED 생성
--> AMR Robot Control Node가 대기 상태/배터리를 PATCH /api/fleet/robots/{robot_id}로 보고
--> Control Server가 대기 중인 AMR에 PATROL task ASSIGNED
--> Robot Control Node가 FleetTaskSummaryRead의 target_zone_id/target_zone_pose로 AMR 이동 실행
--> Robot Control Node가 PATCH /api/fleet/tasks/{task_id}, PATCH /api/fleet/robots/{robot_id}, POST /api/fleet/exceptions로 결과 보고
+### 5-15. 배정 실행 API
+
+```http
+POST /api/fleet/assignments/run
 ```
 
-LLM 응답은 명령 해석/task 생성 결과이고, AMR 실행 명령의 실제 payload는 배정 이후의 `FleetTaskSummaryRead`입니다.
-`B 구역`처럼 `zone` 테이블에 없는 이름은 task를 만들지 않고 error 응답으로 돌려줍니다.
+현재 응답:
 
-## 상태값 기준
-
-### order.status
-
-| 값 | 의미 |
-|---|---|
-| `ORDER_RECEIVED` | 주문 접수 |
-| `ORDER_WAIT` | 작업 대기 |
-| `SORTING` | 선별 중 |
-| `DELIVERING` | 배송/운반 중 |
-| `INSPECTING` | 검수 중 |
-| `PICKUP_READY` | 픽업 가능 |
-| `COMPLETED` | 고객 수령 완료 |
-| `ERROR` | 주문 오류 |
-
-### task.status
-
-| 값 | 의미 |
-|---|---|
-| `QUEUED` | 큐 대기 |
-| `ASSIGNED` | 로봇 할당됨 |
-| `RUNNING` | 실행 중 |
-| `PAUSED` | 일시정지 |
-| `SUCCESS` | 성공 |
-| `FAILED` | 실패 |
-| `CANCELLED` | 취소 |
-
-### task.task_type
-
-| 값 | 의미 |
-|---|---|
-| `STANDBY_LOAD` | AMR 상차 대기존 이동/대기 |
-| `STANDBY_UNLOAD` | AMR 하차 대기존 이동/대기 |
-| `SORTING` | 상품 선별 |
-| `LOAD` | AMR 상차 구역 진입/주차 |
-| `INSPECTION` | 상품 검수 |
-| `UNLOAD` | AMR 하차 구역 진입/주차 |
-| `PATROL` | 순찰 |
-| `CHARGE` | 충전 |
-| `RETURN_HOME` | 복귀 |
-
-### robot.status
-
-| 값 | 의미 |
-|---|---|
-| `IDLE` | 유휴 |
-| `MOVING` | 이동 중 |
-| `WAITING` | 작업 대기 |
-| `STANDBY` | AMR 상하차 대기존 대기 |
-| `SORTING` | 선별 중 |
-| `LOADING` | AMR 상차 구역 작업 중 |
-| `PARKING` | 주차 중 |
-| `INSPECTING` | 검수 중 |
-| `UNLOADING` | AMR 하차 구역 작업 중 |
-| `PATROLLING` | 순찰 중 |
-| `CHARGING` | 충전 중 |
-| `RETURNING` | 복귀 중 |
-| `DOCKING` | 도킹 중 |
-| `EMERGENCY_STOP` | 긴급정지 |
-| `ERROR` | 오류 |
-| `OFFLINE` | 연결 끊김 |
-
-### pickup_slot.status
-
-| 값 | 의미 |
-|---|---|
-| `EMPTY` | 비어 있음 |
-| `RESERVED` | 주문에 예약됨 |
-| `OCCUPIED` | 상품 있음, 고객 픽업 대기 |
-| `BLOCKED` | 사용 불가 |
-
-## 구현 담당별 추천 사용 흐름
-
-### SORTING_COBOT 담당
-
-```text
-1. GET /api/fleet/tasks?robot_id=SORTING_COBOT&status=ASSIGNED
-2. 배정된 SORTING task 선택
-3. PATCH /api/fleet/tasks/{task_id} {"current_status":"ASSIGNED", "status":"RUNNING"}
-4. 실제 선별 수행
-5. 성공 시 PATCH /api/fleet/tasks/{task_id} {"current_status":"RUNNING", "status":"SUCCESS"}
-6. SORTING 성공이면 Control Server가 order_item을 SORTED 처리
-7. 실패 시 POST /api/fleet/exceptions
+```json
+{
+  "status": "ok",
+  "assigned_count": 0,
+  "message": "task assignment is handled by Fleet Manager"
+}
 ```
 
-### AMR 담당
+이 API는 예전 호출 호환용이다. 실제 task 배정은 Fleet Manager가 한다.
+
+---
+
+## 6. 주요 ENUM
+
+### order_status
 
 ```text
-1. 상차 대기존 복귀 또는 대기 상태에서 PATCH /api/fleet/robots/AMR_1로 상태/위치/배터리 보고
-2. GET /api/fleet/tasks?robot_id=AMR_1&status=ASSIGNED
-3. 배정된 STANDBY_LOAD / LOAD / STANDBY_UNLOAD / UNLOAD / PATROL task 선택
-4. PATCH /api/fleet/tasks/{task_id} {"current_status":"ASSIGNED", "status":"RUNNING"}
-5. 주행 중 주기적으로 PATCH /api/fleet/robots/AMR_1로 위치/배터리 보고
-6. 도착/작업 성공 시 PATCH /api/fleet/tasks/{task_id} {"current_status":"RUNNING", "status":"SUCCESS"}
+ORDER_RECEIVED
+ORDER_WAIT
+SORTING
+DELIVERING
+INSPECTING
+PICKUP_READY
+COMPLETED
+ERROR
 ```
 
-### INSPECTION_COBOT 담당
+### order_item_status
 
 ```text
-1. GET /api/fleet/tasks?robot_id=INSPECTION_COBOT&status=ASSIGNED
-2. 배정된 INSPECTION task 선택
-3. PATCH /api/fleet/tasks/{task_id} {"current_status":"ASSIGNED", "status":"RUNNING"}
-4. INSPECTION 시작이면 Control Server가 pickup_slot을 RESERVED 처리
-5. 실제 검수 수행
-6. 성공 시 PATCH /api/fleet/tasks/{task_id} {"current_status":"RUNNING", "status":"SUCCESS"}
-7. INSPECTION 성공이면 Control Server가 pickup_slot OCCUPIED, order PICKUP_READY 처리
-8. 실패 시 POST /api/fleet/exceptions
+WAITING
+SORTED
+INSPECTED
+MISSING
+EXCESS
+MISMATCH
 ```
 
-## 자주 나는 실수
+### pickup_slot_status
 
 ```text
-DB를 직접 수정하지 않는다.
-GET 요청은 request body가 없다.
-PATCH는 바꾸고 싶은 필드만 보내면 된다.
-task 상태 변경은 가능하면 current_status를 함께 보내서 중복/역순 보고를 막는다.
-pickup slot은 GET 후 PATCH 두 번으로 직접 예약하지 말고 assign-pickup-slot을 쓴다.
-고객 UI는 PICKUP_READY 전까지 픽업 번호를 보여주지 않는다.
-API 호출 후 Admin/Customer UI는 WebSocket으로 자동 갱신된다.
-직접 psql로 DB를 수정하면 WebSocket broadcast가 안 되므로 새로고침이 필요할 수 있다.
+EMPTY
+RESERVED
+OCCUPIED
+BLOCKED
 ```
 
-## HTTP 응답 코드
+### robot_type
 
-| 코드 | 의미 | 주로 발생하는 상황 |
+```text
+PICKY
+COBOT
+```
+
+### robot_status
+
+```text
+OFFLINE
+IDLE
+BUSY
+CHARGING
+EMERGENCY_STOP
+ERROR
+```
+
+### picky_state
+
+```text
+CHARGING
+STANDBY
+MOVING_TO_PRODUCT
+WAITING_FOR_COBOT
+MOVING_TO_PICKUP
+MOVING_TO_STOCK
+MOVING_TO_STORAGE
+RETURNING
+DOCKING
+ERROR_RECOVERY
+```
+
+### cobot_state
+
+```text
+STANDBY
+SORTING
+LOADING
+INSPECTING
+UNLOADING
+STOCKING_SORTING
+STOCKING_LOADING
+STOCKING_PLACING
+STOWING_ARM
+SAFETY_STOPPED
+```
+
+### task_type
+
+```text
+MOVE_TO_PRODUCT
+SORTING_AND_LOAD
+MOVE_TO_PICKUP
+INSPECTION
+UNLOAD
+MOVE_TO_STOCK
+STOCKING_PICK
+MOVE_TO_STORAGE
+STOCKING_PLACE
+RETURN_HOME
+CHARGE
+```
+
+### task_status
+
+```text
+QUEUED
+ASSIGNED
+RUNNING
+PAUSED
+SUCCESS
+FAILED
+CANCELLED
+```
+
+### exception_type
+
+```text
+OBSTACLE_DETECTED
+LOW_BATTERY
+NAVIGATION_FAILED
+HARDWARE_ERROR
+TIMEOUT
+SORTING_FAIL
+INSPECTION_FAIL
+HUMAN_DETECTED
+SYSTEM_ERROR
+```
+
+---
+
+## 7. task_type별 기본 담당
+
+| task_type | 담당 | 설명 |
 |---|---|---|
-| `200` | 성공 | 조회/수정 성공 |
-| `201` | 생성 성공 | 주문/상품/픽업 슬롯/event/exception 생성 |
-| `404` | 대상 없음 | 없는 order/task/robot/slot ID 사용 |
-| `409` | 현재 상태에서 처리 불가 | task current_status 불일치, 완료 주문에 슬롯 배정, 빈 슬롯 없음 |
-| `422` | 요청 형식 오류 | status 오타, 필수 필드 누락 |
+| `MOVE_TO_PRODUCT` | PICKY | 주문 상품 보관 구역으로 이동 |
+| `SORTING_AND_LOAD` | COBOT | 주문 상품 선별 후 PICKY에 상차 |
+| `MOVE_TO_PICKUP` | PICKY | 픽업존으로 이동 |
+| `INSPECTION` | COBOT | 주문 상품 검수 |
+| `UNLOAD` | COBOT | 픽업 슬롯에 하차 |
+| `MOVE_TO_STOCK` | PICKY | 입고존으로 이동 |
+| `STOCKING_PICK` | COBOT | 입고 상품 선별 후 PICKY에 상차 |
+| `MOVE_TO_STORAGE` | PICKY | 상품 보관 위치로 이동 |
+| `STOCKING_PLACE` | COBOT | 상품 보관 위치에 적재 |
+| `RETURN_HOME` | PICKY | 대기/충전 구역 복귀 |
+| `CHARGE` | PICKY | 충전 |
+
+---
+
+## 8. 빠른 curl 예시
+
+서버 상태:
+
+```bash
+curl http://localhost:8000/api/health/db
+```
+
+관리자 snapshot:
+
+```bash
+curl http://localhost:8000/api/admin/status
+```
+
+Fleet snapshot:
+
+```bash
+curl http://localhost:8000/api/fleet/snapshot
+```
+
+PICKY1 조회:
+
+```bash
+curl http://localhost:8000/api/fleet/robots/PICKY1
+```
+
+PICKY1 task 조회:
+
+```bash
+curl "http://localhost:8000/api/fleet/tasks?robot_name=PICKY1"
+```
+
+진행 중 task 조회:
+
+```bash
+curl "http://localhost:8000/api/fleet/tasks?status=RUNNING"
+```
+
+예외 보고:
+
+```bash
+curl -X POST http://localhost:8000/api/fleet/exceptions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "exception_type": "OBSTACLE_DETECTED",
+    "robot_name": "PICKY2",
+    "detail": "테스트 예외"
+  }'
+```

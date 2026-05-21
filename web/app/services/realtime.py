@@ -41,6 +41,7 @@ class WebSocketManager:
 
 admin_websockets = WebSocketManager()
 customer_websockets = WebSocketManager()
+fleet_event_websockets = WebSocketManager()
 
 
 def get_admin_snapshot():
@@ -65,6 +66,10 @@ async def broadcast_admin_status() -> None:
 
 async def broadcast_customer_status() -> None:
     await customer_websockets.broadcast(get_customer_snapshot())
+
+
+async def broadcast_fleet_event(payload) -> None:
+    await fleet_event_websockets.broadcast(payload)
 
 
 async def broadcast_all_status() -> None:

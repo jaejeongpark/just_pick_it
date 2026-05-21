@@ -25,35 +25,58 @@ CREATE TYPE pickup_slot_status AS ENUM (
     'BLOCKED'
 );
 
+CREATE TYPE robot_type AS ENUM (
+    'PICKY',
+    'COBOT'
+);
+
 CREATE TYPE robot_status AS ENUM (
+    'OFFLINE',
     'IDLE',
-    'MOVING',
-    'WAITING',
+    'BUSY',
+    'CHARGING',
+    'EMERGENCY_STOP',
+    'ERROR'
+);
+
+CREATE TYPE picky_state AS ENUM (
+    'CHARGING',
+    'STANDBY',
+    'MOVING_TO_PRODUCT',
+    'WAITING_FOR_COBOT',
+    'MOVING_TO_PICKUP',
+    'MOVING_TO_STOCK',
+    'MOVING_TO_STORAGE',
+    'RETURNING',
+    'DOCKING',
+    'ERROR_RECOVERY'
+);
+
+CREATE TYPE cobot_state AS ENUM (
     'STANDBY',
     'SORTING',
     'LOADING',
-    'PARKING',
     'INSPECTING',
     'UNLOADING',
-    'PATROLLING',
-    'CHARGING',
-    'RETURNING',
-    'DOCKING',
-    'EMERGENCY_STOP',
-    'ERROR',
-    'OFFLINE'
+    'STOCKING_SORTING',
+    'STOCKING_LOADING',
+    'STOCKING_PLACING',
+    'STOWING_ARM',
+    'SAFETY_STOPPED'
 );
 
 CREATE TYPE task_type AS ENUM (
-    'STANDBY_LOAD',
-    'STANDBY_UNLOAD',
-    'SORTING',
-    'LOAD',
+    'MOVE_TO_PRODUCT',
+    'SORTING_AND_LOAD',
+    'MOVE_TO_PICKUP',
     'INSPECTION',
     'UNLOAD',
-    'PATROL',
-    'CHARGE',
-    'RETURN_HOME'
+    'MOVE_TO_STOCK',
+    'STOCKING_PICK',
+    'MOVE_TO_STORAGE',
+    'STOCKING_PLACE',
+    'RETURN_HOME',
+    'CHARGE'
 );
 
 CREATE TYPE task_status AS ENUM (
@@ -75,13 +98,27 @@ CREATE TYPE exception_type AS ENUM (
     'SORTING_FAIL',
     'INSPECTION_FAIL',
     'HUMAN_DETECTED',
-    'SYSTEM_ERROR',
-    'FIRE_DETECTED'
+    'SYSTEM_ERROR'
+);
+
+CREATE TYPE stocking_policy AS ENUM (
+    'REQUESTED_QUANTITY',
+    'ALL_DETECTED'
+);
+
+CREATE TYPE stocking_item_status AS ENUM (
+    'REQUESTED',
+    'ASSIGNED',
+    'IN_PROGRESS',
+    'COMPLETED',
+    'FAILED',
+    'CANCELLED'
 );
 
 CREATE TABLE zone (
     zone_id SERIAL PRIMARY KEY,
     zone_name VARCHAR(50) NOT NULL,
+    zone_type VARCHAR(30) NOT NULL,
     pos_x FLOAT NOT NULL,
     pos_y FLOAT NOT NULL,
     pos_z FLOAT NOT NULL,
@@ -93,7 +130,7 @@ CREATE TABLE product (
     name VARCHAR(100) NOT NULL,
     image_url TEXT,
     stock_qty INT NOT NULL DEFAULT 0 CHECK (stock_qty >= 0),
-    storage_location VARCHAR(50) NOT NULL
+    storage_zone_id INT NOT NULL REFERENCES zone(zone_id)
 );
 
 CREATE TABLE pickup_slot (
@@ -102,12 +139,19 @@ CREATE TABLE pickup_slot (
     status pickup_slot_status NOT NULL DEFAULT 'EMPTY'
 );
 
+CREATE TABLE robot_unit (
+    unit_id SERIAL PRIMARY KEY,
+    unit_name VARCHAR(50) NOT NULL,
+    description TEXT
+);
+
 CREATE TABLE orders (
     order_id SERIAL PRIMARY KEY,
     order_no VARCHAR(30) UNIQUE,
     status order_status NOT NULL DEFAULT 'ORDER_RECEIVED',
     priority INT NOT NULL DEFAULT 2,
-    pickup_slot_id INT REFERENCES pickup_slot(slot_id)
+    pickup_slot_id INT REFERENCES pickup_slot(slot_id),
+    assigned_unit_id INT REFERENCES robot_unit(unit_id)
 );
 
 CREATE TABLE order_item (
@@ -118,27 +162,64 @@ CREATE TABLE order_item (
     status order_item_status NOT NULL DEFAULT 'WAITING'
 );
 
+CREATE TABLE stocking_item (
+    stocking_item_id SERIAL PRIMARY KEY,
+    product_id INT NOT NULL REFERENCES product(product_id),
+    requested_quantity INT CHECK (requested_quantity IS NULL OR requested_quantity > 0),
+    detected_quantity INT CHECK (detected_quantity IS NULL OR detected_quantity >= 0),
+    stock_delta INT CHECK (stock_delta IS NULL OR stock_delta >= 0),
+    stocking_policy stocking_policy NOT NULL,
+    status stocking_item_status NOT NULL DEFAULT 'REQUESTED',
+    assigned_unit_id INT REFERENCES robot_unit(unit_id),
+    CHECK (
+        (stocking_policy = 'REQUESTED_QUANTITY' AND requested_quantity IS NOT NULL)
+        OR
+        (stocking_policy = 'ALL_DETECTED' AND requested_quantity IS NULL)
+    )
+);
+
 CREATE TABLE robot (
-    robot_id VARCHAR(30) PRIMARY KEY,
-    status robot_status NOT NULL DEFAULT 'IDLE',
+    robot_id SERIAL PRIMARY KEY,
+    robot_name VARCHAR(30) UNIQUE NOT NULL,
+    unit_id INT REFERENCES robot_unit(unit_id),
+    robot_type robot_type NOT NULL,
+    robot_status robot_status NOT NULL DEFAULT 'IDLE',
+    picky_state picky_state,
+    cobot_state cobot_state,
     current_task_id INT,
     ros_namespace VARCHAR(50),
     battery_level INT CHECK (battery_level BETWEEN 0 AND 100),
     pos_x FLOAT,
     pos_y FLOAT,
-    pos_theta FLOAT
+    pos_theta FLOAT,
+    CHECK (
+        (robot_type = 'PICKY' AND cobot_state IS NULL)
+        OR
+        (robot_type = 'COBOT' AND picky_state IS NULL)
+    )
 );
 
 CREATE TABLE task (
     task_id SERIAL PRIMARY KEY,
     order_id INT REFERENCES orders(order_id) ON DELETE CASCADE,
-    assigned_robot_id VARCHAR(30) REFERENCES robot(robot_id),
+    order_item_id INT REFERENCES order_item(item_id) ON DELETE CASCADE,
+    stocking_item_id INT REFERENCES stocking_item(stocking_item_id) ON DELETE CASCADE,
+    sequence_no INT NOT NULL,
+    assigned_robot_id INT REFERENCES robot(robot_id),
     task_type task_type NOT NULL,
     status task_status NOT NULL DEFAULT 'QUEUED',
-    priority INT NOT NULL DEFAULT 1,
+    priority INT NOT NULL DEFAULT 2,
     source_zone_id INT REFERENCES zone(zone_id),
     target_zone_id INT REFERENCES zone(zone_id),
-    result_message TEXT
+    result_message TEXT,
+    CHECK (
+        NOT (order_item_id IS NOT NULL AND stocking_item_id IS NOT NULL)
+    ),
+    CHECK (
+        stocking_item_id IS NULL
+        OR
+        (order_id IS NULL AND order_item_id IS NULL)
+    )
 );
 
 ALTER TABLE robot
@@ -148,7 +229,7 @@ ALTER TABLE robot
 CREATE TABLE task_event (
     event_id SERIAL PRIMARY KEY,
     task_id INT NOT NULL REFERENCES task(task_id) ON DELETE CASCADE,
-    robot_id VARCHAR(30) REFERENCES robot(robot_id),
+    robot_id INT REFERENCES robot(robot_id),
     from_status task_status,
     to_status task_status NOT NULL,
     event_name VARCHAR(50),
@@ -158,7 +239,7 @@ CREATE TABLE task_event (
 
 CREATE TABLE exception_log (
     exception_id SERIAL PRIMARY KEY,
-    robot_id VARCHAR(30) REFERENCES robot(robot_id),
+    robot_id INT REFERENCES robot(robot_id),
     task_id INT REFERENCES task(task_id),
     order_id INT REFERENCES orders(order_id),
     exception_type exception_type NOT NULL,
@@ -170,11 +251,29 @@ CREATE TABLE exception_log (
 CREATE INDEX idx_orders_status
 ON orders(status);
 
+CREATE INDEX idx_orders_assigned_unit_id
+ON orders(assigned_unit_id);
+
 CREATE INDEX idx_order_item_order_id
 ON order_item(order_id);
 
-CREATE INDEX idx_robot_status
-ON robot(status);
+CREATE INDEX idx_order_item_product_id
+ON order_item(product_id);
+
+CREATE INDEX idx_stocking_item_product_id
+ON stocking_item(product_id);
+
+CREATE INDEX idx_stocking_item_status
+ON stocking_item(status);
+
+CREATE INDEX idx_stocking_item_assigned_unit_id
+ON stocking_item(assigned_unit_id);
+
+CREATE INDEX idx_robot_unit_id
+ON robot(unit_id);
+
+CREATE INDEX idx_robot_type_status
+ON robot(robot_type, robot_status);
 
 CREATE INDEX idx_robot_current_task_id
 ON robot(current_task_id);
@@ -182,14 +281,17 @@ ON robot(current_task_id);
 CREATE INDEX idx_task_order_id
 ON task(order_id);
 
+CREATE INDEX idx_task_order_item_id
+ON task(order_item_id);
+
+CREATE INDEX idx_task_stocking_item_id
+ON task(stocking_item_id);
+
 CREATE INDEX idx_task_assigned_robot_id
 ON task(assigned_robot_id);
 
-CREATE INDEX idx_task_status
-ON task(status);
-
-CREATE INDEX idx_task_priority
-ON task(priority);
+CREATE INDEX idx_task_status_priority
+ON task(status, priority);
 
 CREATE INDEX idx_task_event_task_id
 ON task_event(task_id);

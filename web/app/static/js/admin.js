@@ -78,46 +78,57 @@ const TASK_STATUSES = [
   "FAILED",
   "CANCELLED",
 ];
-const ORDER_TASK_PIPELINE = [
-  "STANDBY_LOAD",
-  "LOAD",
-  "SORTING",
-  "STANDBY_UNLOAD",
-  "UNLOAD",
+const TASK_TYPE_SEQUENCE = [
+  "MOVE_TO_PRODUCT",
+  "SORTING_AND_LOAD",
+  "MOVE_TO_PICKUP",
   "INSPECTION",
+  "UNLOAD",
+  "MOVE_TO_STOCK",
+  "STOCKING_PICK",
+  "MOVE_TO_STORAGE",
+  "STOCKING_PLACE",
+  "RETURN_HOME",
+  "CHARGE",
 ];
-const DEFAULT_TASK_ROBOT = {
-  STANDBY_LOAD: "AMR_1",
-  LOAD: "AMR_1",
-  SORTING: "SORTING_COBOT",
-  STANDBY_UNLOAD: "AMR_1",
-  UNLOAD: "AMR_1",
-  INSPECTION: "INSPECTION_COBOT",
-};
 const ROBOT_DISPLAY_NAMES = {
-  AMR_1: "AMR 1",
-  AMR_2: "AMR 2",
-  SORTING_COBOT: "선별 로봇",
-  INSPECTION_COBOT: "검수 로봇",
+  PICKY1: "PICKY 1",
+  PICKY2: "PICKY 2",
+  COBOT1: "COBOT 1",
+  COBOT2: "COBOT 2",
 };
-const ROBOT_TYPES = ["AMR", "JetCobot"];
+const ROBOT_TYPES = ["PICKY", "COBOT"];
 const ROBOT_STATUSES = [
+  "OFFLINE",
   "IDLE",
-  "MOVING",
-  "WAITING",
+  "BUSY",
+  "CHARGING",
+  "EMERGENCY_STOP",
+  "ERROR",
+];
+const PICKY_STATES = [
+  "CHARGING",
+  "STANDBY",
+  "MOVING_TO_PRODUCT",
+  "WAITING_FOR_COBOT",
+  "MOVING_TO_PICKUP",
+  "MOVING_TO_STOCK",
+  "MOVING_TO_STORAGE",
+  "RETURNING",
+  "DOCKING",
+  "ERROR_RECOVERY",
+];
+const COBOT_STATES = [
   "STANDBY",
   "SORTING",
   "LOADING",
-  "PARKING",
   "INSPECTING",
   "UNLOADING",
-  "PATROLLING",
-  "CHARGING",
-  "RETURNING",
-  "DOCKING",
-  "EMERGENCY_STOP",
-  "ERROR",
-  "OFFLINE",
+  "STOCKING_SORTING",
+  "STOCKING_LOADING",
+  "STOCKING_PLACING",
+  "STOWING_ARM",
+  "SAFETY_STOPPED",
 ];
 const PICKUP_SLOT_STATUSES = ["EMPTY", "RESERVED", "OCCUPIED", "BLOCKED"];
 const STOCK_LEVEL_LABELS = {
@@ -134,13 +145,16 @@ const STOCK_LEVEL_CLASSES = {
 const statusText = {
   ORDER_RECEIVED: "주문 접수",
   ORDER_WAIT: "주문 대기",
-  STANDBY_LOAD: "상차 대기",
-  STANDBY_UNLOAD: "하차 대기",
-  SORTING: "선별 중",
-  LOAD: "상차",
+  SORTING: "선별/상차 중",
+  MOVE_TO_PRODUCT: "상품 위치 이동",
+  SORTING_AND_LOAD: "선별/상차",
+  MOVE_TO_PICKUP: "픽업존 이동",
   INSPECTION: "검수",
   UNLOAD: "하차",
-  PATROL: "순찰",
+  MOVE_TO_STOCK: "입고존 이동",
+  STOCKING_PICK: "입고 선별/상차",
+  MOVE_TO_STORAGE: "적재 위치 이동",
+  STOCKING_PLACE: "입고상품 적재",
   CHARGE: "충전",
   RETURN_HOME: "복귀",
   DELIVERING: "운반 중",
@@ -148,17 +162,27 @@ const statusText = {
   PICKUP_READY: "픽업 준비",
   COMPLETED: "완료",
   ERROR: "예외",
-  IDLE: "유휴",
-  MOVING: "이동",
-  WAITING: "작업 대기",
-  STANDBY: "상하차 대기",
+  PICKY: "PICKY",
+  COBOT: "COBOT",
+  IDLE: "대기",
+  BUSY: "작업 중",
+  MOVING_TO_PRODUCT: "상품 위치 이동 중",
+  WAITING_FOR_COBOT: "코봇 작업 대기",
+  MOVING_TO_PICKUP: "픽업존 이동 중",
+  MOVING_TO_STOCK: "입고존 이동 중",
+  MOVING_TO_STORAGE: "적재 위치 이동 중",
+  STANDBY: "대기",
   LOADING: "상차 중",
-  UNLOADING: "하차",
-  PATROLLING: "순찰",
+  UNLOADING: "하차 중",
+  STOCKING_SORTING: "입고상품 선별 중",
+  STOCKING_LOADING: "입고상품 상차 중",
+  STOCKING_PLACING: "입고상품 적재 중",
+  STOWING_ARM: "팔 기본 자세 복귀",
+  SAFETY_STOPPED: "안전 정지",
   CHARGING: "충전",
   RETURNING: "복귀",
-  PARKING: "파킹 중",
   DOCKING: "도킹 중",
+  ERROR_RECOVERY: "오류 복구",
   EMERGENCY_STOP: "긴급정지",
   OFFLINE: "오프라인",
   EMPTY: "비어 있음",
@@ -174,6 +198,17 @@ const statusText = {
   CANCELLED: "취소",
 };
 
+const robotStateText = {
+  SORTING: "상품 선별",
+  LOADING: "상품 상차",
+  INSPECTING: "상품 검수",
+  UNLOADING: "상품 하차",
+  STOCKING_SORTING: "입고 상품 선별",
+  STOCKING_LOADING: "입고 상품 상차",
+  STOCKING_PLACING: "입고상품 적재 중",
+  STOWING_ARM: "팔 기본 자세 복귀",
+};
+
 function setSocketState(text) {
   if (socketState) {
     socketState.textContent = text;
@@ -185,6 +220,115 @@ setSocketState("offline");
 
 function label(value) {
   return statusText[value] || value || "-";
+}
+
+function robotStateTextLabel(value) {
+  return robotStateText[value] || label(value);
+}
+
+function normalizeId(value) {
+  return value === null || value === undefined ? "" : String(value);
+}
+
+function sameId(left, right) {
+  return normalizeId(left) === normalizeId(right);
+}
+
+function findRobotById(robotId) {
+  if (robotId && typeof robotId === "object") {
+    return robotId;
+  }
+
+  const normalizedRobotId = normalizeId(robotId);
+
+  return (latestAdminStatus?.robots || []).find(
+    (robot) =>
+      sameId(robot.robot_id, normalizedRobotId) ||
+      robot.robot_name === normalizedRobotId,
+  );
+}
+
+function robotStatusValue(robot) {
+  return robot?.robot_status || robot?.status || "OFFLINE";
+}
+
+function robotStateValue(robot) {
+  if (!robot) {
+    return null;
+  }
+
+  return robotType(robot) === "PICKY" ? robot.picky_state : robot.cobot_state;
+}
+
+function robotStateLabel(robot) {
+  return robotStateValue(robot)
+    ? robotStateTextLabel(robotStateValue(robot))
+    : "-";
+}
+
+function assignedRobotLabel(task) {
+  if (!task?.assigned_robot_id && !task?.assigned_robot_name) {
+    return "로봇 미배정";
+  }
+
+  return task.assigned_robot_name || robotDisplayName(task.assigned_robot_id);
+}
+
+function findTaskOrderItem(task) {
+  if (!task?.order_item_id) {
+    return null;
+  }
+
+  const orders = [
+    ...(latestAdminStatus?.orders || []),
+    ...(latestAdminStatus?.order_history || []),
+  ];
+  const order = orders.find(
+    (candidate) =>
+      sameId(candidate.order_id, task.order_id) ||
+      candidate.order_no === task.order_no,
+  );
+
+  return (order?.items || []).find((item) =>
+    sameId(item.item_id, task.order_item_id),
+  );
+}
+
+function taskProductName(task) {
+  const orderItem = findTaskOrderItem(task);
+
+  return (
+    task?.product_name ||
+    orderItem?.product_name ||
+    null
+  );
+}
+
+function taskDisplayTitle(task) {
+  const productName = taskProductName(task);
+
+  if (!productName) {
+    return label(task?.task_type);
+  }
+
+  const productTaskLabels = {
+    MOVE_TO_PRODUCT: `${productName} 위치 이동`,
+    SORTING_AND_LOAD: `${productName} 선별/상차`,
+    MOVE_TO_STOCK: `${productName} 입고존 이동`,
+    STOCKING_PICK: `${productName} 입고 선별/상차`,
+    MOVE_TO_STORAGE: `${productName} 적재 위치 이동`,
+    STOCKING_PLACE: `${productName} 입고상품 적재`,
+  };
+
+  return productTaskLabels[task.task_type] || label(task.task_type);
+}
+
+function productStorageLabel(product) {
+  return (
+    product.storage_zone_name ||
+    product.storage_location ||
+    (product.storage_zone_id ? `Zone #${product.storage_zone_id}` : "-")
+  );
 }
 
 function formatSlotName(slotName) {
@@ -284,7 +428,12 @@ function closeModal() {
   modalPanel?.classList.remove("modal-compact");
 }
 
-function renderOptions(values, selectedValue, emptyLabel = null) {
+function renderOptions(
+  values,
+  selectedValue,
+  emptyLabel = null,
+  labelFormatter = label,
+) {
   const isEmptySelected =
     selectedValue === null || selectedValue === undefined || selectedValue === "";
   const emptyOption =
@@ -295,19 +444,42 @@ function renderOptions(values, selectedValue, emptyLabel = null) {
   return `${emptyOption}${values
     .map(
       (value) => `
-      <option value="${value}" ${value === selectedValue ? "selected" : ""}>${label(value)}</option>
+      <option value="${value}" ${sameId(value, selectedValue) ? "selected" : ""}>${labelFormatter(value)}</option>
     `,
     )
     .join("")}`;
 }
 
 function renderRobotOptions(selectedRobotId) {
-  const robots = latestAdminStatus?.robots || [];
+  const robots = sortedRobots(latestAdminStatus?.robots || []);
+
+  const emptySelected =
+    selectedRobotId === null ||
+    selectedRobotId === undefined ||
+    selectedRobotId === "";
+
+  return `
+    <option value="" ${emptySelected ? "selected" : ""}>미배정</option>
+    ${robots
+      .map(
+        (robot) => `
+        <option value="${robot.robot_id}" ${sameId(robot.robot_id, selectedRobotId) ? "selected" : ""}>
+          ${robotDisplayName(robot)} · ${label(robot.robot_type)}
+        </option>
+      `,
+      )
+      .join("")}
+  `;
+}
+
+function renderRobotStateOptions(robot) {
+  const states = robotType(robot) === "PICKY" ? PICKY_STATES : COBOT_STATES;
 
   return renderOptions(
-    robots.map((robot) => robot.robot_id),
-    selectedRobotId,
-    "미배정",
+    states,
+    robotStateValue(robot),
+    "세부 상태 없음",
+    robotStateTextLabel,
   );
 }
 
@@ -320,8 +492,8 @@ function renderTaskOptions(selectedTaskId) {
     ${tasks
       .map(
         (task) => `
-        <option value="${task.task_id}" ${task.task_id === selectedTaskId ? "selected" : ""}>
-          #${task.task_id} ${label(task.task_type)}
+        <option value="${task.task_id}" ${sameId(task.task_id, selectedTaskId) ? "selected" : ""}>
+          #${task.task_id} ${taskDisplayTitle(task)}
         </option>
       `,
       )
@@ -338,7 +510,7 @@ function renderPickupSlotOptions(selectedSlotId) {
     ${slots
       .map(
         (slot) => `
-        <option value="${slot.slot_id}" ${slot.slot_id === selectedSlotId ? "selected" : ""}>
+        <option value="${slot.slot_id}" ${sameId(slot.slot_id, selectedSlotId) ? "selected" : ""}>
           ${formatSlotName(slot.slot_name)} · ${label(slot.status)}
         </option>
       `,
@@ -397,8 +569,8 @@ function renderOrderTasks(order) {
               <div class="queue-rank">#${task.task_id}</div>
               <div class="task-main">
                 <div class="task-title-line">
-                  <strong>${label(task.task_type)}</strong>
-                  <span>${task.assigned_robot_id || "로봇 미배정"}</span>
+                  <strong>${taskDisplayTitle(task)}</strong>
+                  <span>${assignedRobotLabel(task)}</span>
                 </div>
                 <span>${task.result_message || "결과 메시지 없음"}</span>
               </div>
@@ -416,13 +588,13 @@ function renderOrderTasks(order) {
 
 function findOrder(orderId) {
   return (latestAdminStatus?.orders || []).find(
-    (order) => order.order_id === orderId,
+    (order) => sameId(order.order_id, orderId),
   );
 }
 
 function findTask(taskId) {
   return (latestAdminStatus?.tasks || []).find(
-    (task) => task.task_id === taskId,
+    (task) => sameId(task.task_id, taskId),
   );
 }
 
@@ -438,67 +610,20 @@ function orderTasks(order) {
     )
     .sort(
       (a, b) =>
+        (a.sequence_no ?? taskTypeOrder(a.task_type)) -
+          (b.sequence_no ?? taskTypeOrder(b.task_type)) ||
         taskTypeOrder(a.task_type) - taskTypeOrder(b.task_type) ||
         a.task_id - b.task_id,
     );
 }
 
 function taskTypeOrder(taskType) {
-  const index = ORDER_TASK_PIPELINE.indexOf(taskType);
-  return index === -1 ? ORDER_TASK_PIPELINE.length : index;
-}
-
-function expectedTaskStatus(orderStatus, taskType) {
-  const orderStage = {
-    ORDER_RECEIVED: -1,
-    ORDER_WAIT: -1,
-    SORTING: 2,
-    DELIVERING: 3,
-    INSPECTING: 5,
-    PICKUP_READY: 6,
-    COMPLETED: 6,
-    ERROR: -1,
-  };
-  const currentStage = orderStage[orderStatus] ?? -1;
-  const taskStage = taskTypeOrder(taskType);
-
-  if (currentStage >= ORDER_TASK_PIPELINE.length) {
-    return "SUCCESS";
-  }
-
-  if (taskStage < currentStage) {
-    return "SUCCESS";
-  }
-
-  if (taskStage === currentStage) {
-    return "RUNNING";
-  }
-
-  return "QUEUED";
+  const index = TASK_TYPE_SEQUENCE.indexOf(taskType);
+  return index === -1 ? TASK_TYPE_SEQUENCE.length : index;
 }
 
 function taskQueueForOrder(order) {
-  const actualTasks = orderTasks(order);
-
-  return ORDER_TASK_PIPELINE.map((taskType) => {
-    const task = actualTasks.find(
-      (candidate) => candidate.task_type === taskType,
-    );
-
-    if (task) {
-      return task;
-    }
-
-    return {
-      task_id: null,
-      order_id: order.order_id,
-      order_no: order.order_no,
-      assigned_robot_id: DEFAULT_TASK_ROBOT[taskType],
-      task_type: taskType,
-      status: expectedTaskStatus(order.status, taskType),
-      is_placeholder: true,
-    };
-  });
+  return orderTasks(order);
 }
 
 function workTaskStatusLabel(status) {
@@ -549,14 +674,14 @@ function normalizeOrderWorkSelection(data) {
 
   if (
     selectedTaskId !== null &&
-    !tasks.some((task) => task.task_id === selectedTaskId)
+    !tasks.some((task) => sameId(task.task_id, selectedTaskId))
   ) {
     selectedTaskId = null;
   }
 
   if (
     selectedOrderId !== null &&
-    !orders.some((order) => order.order_id === selectedOrderId)
+    !orders.some((order) => sameId(order.order_id, selectedOrderId))
   ) {
     selectedOrderId = null;
   }
@@ -617,7 +742,7 @@ function renderOrderWorkDetail() {
     <div class="work-detail-header">
       <div>
         <span>${activeTask?.task_id ? `Task #${activeTask.task_id}` : "주문 상세"}</span>
-        <strong>${order.order_no}${activeTask ? ` · ${label(activeTask.task_type)}` : ""}</strong>
+        <strong>${order.order_no}${activeTask ? ` · ${taskDisplayTitle(activeTask)}` : ""}</strong>
       </div>
       <div class="work-detail-status">
         <span class="state-badge ${statusClass(activeTask?.status || order.status)}">${label(activeTask?.status || order.status)}</span>
@@ -640,18 +765,18 @@ function renderOrderWorkDetail() {
         </div>
       </div>
       <div class="work-detail-block">
-        <h3>작업 큐</h3>
+        <h3>Fleet 작업</h3>
         <div class="work-detail-task-list">
           ${
             tasks.length === 0
-              ? '<span class="muted">연결된 작업 없음</span>'
+              ? '<span class="muted">Fleet Manager가 생성한 작업 없음</span>'
               : tasks
                   .map(
                     (task) => `
-              <button class="work-detail-task ${task.task_id && task.task_id === activeTask?.task_id ? "is-selected" : ""} ${task.is_placeholder ? "is-planned" : ""}" type="button" ${task.task_id ? `data-work-task="${task.task_id}"` : "disabled"}>
-                <span>${task.task_id ? `#${task.task_id}` : "예정"}</span>
-                <strong>${label(task.task_type)}</strong>
-                <em>${task.assigned_robot_id || "미배정"}</em>
+              <button class="work-detail-task ${sameId(task.task_id, activeTask?.task_id) ? "is-selected" : ""}" type="button" data-work-task="${task.task_id}">
+                <span>#${task.task_id}</span>
+                <strong>${taskDisplayTitle(task)}</strong>
+                <em>${assignedRobotLabel(task)}</em>
                 <i class="state-badge ${statusClass(task.status)}">${workTaskStatusLabel(task.status)}</i>
               </button>
             `,
@@ -680,7 +805,7 @@ function findRobotTask(robot) {
   const tasks = getRobotTasks(robot.robot_id);
 
   return (
-    tasks.find((task) => task.task_id === robot.current_task_id) ||
+    tasks.find((task) => sameId(task.task_id, robot.current_task_id)) ||
     tasks.find((task) => task.status === "RUNNING") ||
     null
   );
@@ -699,10 +824,11 @@ function getRobotTasks(robotId) {
   };
 
   return tasks
-    .filter((task) => task.assigned_robot_id === robotId)
+    .filter((task) => sameId(task.assigned_robot_id, robotId))
     .sort(
       (a, b) =>
         (statusOrder[a.status] || 99) - (statusOrder[b.status] || 99) ||
+        (a.sequence_no ?? 999) - (b.sequence_no ?? 999) ||
         a.task_id - b.task_id,
     );
 }
@@ -730,21 +856,13 @@ function batteryClass(level) {
 }
 
 function robotCategory(robot) {
-  if (["ERROR", "EMERGENCY_STOP", "OFFLINE"].includes(robot.status)) {
+  const status = robotStatusValue(robot);
+
+  if (["ERROR", "EMERGENCY_STOP", "OFFLINE"].includes(status)) {
     return "error";
   }
 
-  if (
-    [
-      "IDLE",
-      "WAITING",
-      "STANDBY",
-      "PARKING",
-      "RETURNING",
-      "DOCKING",
-      "CHARGING",
-    ].includes(robot.status)
-  ) {
+  if (["IDLE", "CHARGING"].includes(status)) {
     return "idle";
   }
 
@@ -789,19 +907,10 @@ function clampNumber(value, min, max) {
 }
 
 function mapRobotPosition(robot) {
-  if (robot.robot_id === "SORTING_COBOT") {
-    return { x: 20, y: 53 };
-  }
-
-  if (robot.robot_id === "INSPECTION_COBOT") {
-    return { x: 76, y: 53 };
-  }
-
   if (robot.pos_x !== null && robot.pos_y !== null) {
     const x = 15 + (Number(robot.pos_x) / 1.8) * 70;
     const y = 78 - (Number(robot.pos_y) / 1.0) * 60;
-    const offset =
-      robot.robot_id === "AMR_1" ? -1.8 : robot.robot_id === "AMR_2" ? 1.8 : 0;
+    const offset = robot.robot_name === "PICKY1" ? -1.8 : robot.robot_name === "PICKY2" ? 1.8 : 0;
 
     return {
       x: clampNumber(x + offset, 10, 90),
@@ -809,11 +918,11 @@ function mapRobotPosition(robot) {
     };
   }
 
-  if (robot.robot_id === "AMR_1") {
+  if (robot.robot_name === "PICKY1") {
     return { x: 50, y: 24 };
   }
 
-  if (robot.robot_id === "AMR_2") {
+  if (robot.robot_name === "PICKY2") {
     return { x: 50, y: 78 };
   }
 
@@ -833,17 +942,23 @@ function renderMapRobots(robots) {
     return;
   }
 
-  mapRobotLayer.innerHTML = robots
+  const pickyRobots = robots.filter(
+    (robot) =>
+      robotType(robot) === "PICKY" &&
+      !normalizeId(robot.robot_name).startsWith("UI_"),
+  );
+
+  mapRobotLayer.innerHTML = pickyRobots
     .map((robot) => {
       const position = mapRobotPosition(robot);
-      const isAmr = robotType(robot) === "AMR";
-      const markerClass = isAmr ? "map-marker-amr" : "map-marker-cobot";
+      const markerClass = "map-marker-amr";
       const displayName = robotDisplayName(robot);
+      const status = robotStatusValue(robot);
 
       return `
         <div class="robot-map-marker ${markerClass} ${robotColorClass(robot.robot_id)}"
           style="--marker-x: ${position.x}%; --marker-y: ${position.y}%; --heading: ${robotHeadingDeg(robot)}deg"
-          title="${displayName} · ${robot.robot_id} · ${label(robot.status)}">
+          title="${displayName} · ${label(status)}">
           <i class="marker-heading"></i>
           <span>${displayName}</span>
         </div>
@@ -943,38 +1058,47 @@ function renderMiniProgress(value, status) {
 }
 
 function robotColorClass(robotId) {
-  if (robotId === "AMR_1") {
+  const robot = findRobotById(robotId);
+  const robotName = robot?.robot_name || normalizeId(robotId);
+
+  if (robot?.unit_id === 1 || robotName === "PICKY1" || robotName === "COBOT1") {
     return "robot-dot-amr1";
   }
 
-  if (robotId === "AMR_2") {
+  if (robot?.unit_id === 2 || robotName === "PICKY2" || robotName === "COBOT2") {
     return "robot-dot-amr2";
-  }
-
-  if (robotId === "SORTING_COBOT") {
-    return "robot-dot-cobot1";
-  }
-
-  if (robotId === "INSPECTION_COBOT") {
-    return "robot-dot-cobot2";
   }
 
   return "robot-dot-neutral";
 }
 
 function robotDisplayName(robotOrId) {
-  const robotId =
-    typeof robotOrId === "string" ? robotOrId : robotOrId?.robot_id;
+  const robot = findRobotById(robotOrId);
+  const robotId = robot?.robot_name || normalizeId(robotOrId);
 
   return ROBOT_DISPLAY_NAMES[robotId] || robotId || "-";
 }
 
 function robotType(robot) {
-  return robot.robot_id.startsWith("AMR") ? "AMR" : "JetCobot";
+  return robot?.robot_type || "COBOT";
+}
+
+function robotTypeOrder(robot) {
+  return robotType(robot) === "PICKY" ? 0 : 1;
+}
+
+function sortedRobots(robots) {
+  return [...(robots || [])].sort(
+    (a, b) =>
+      (a.unit_id ?? 999) - (b.unit_id ?? 999) ||
+      robotTypeOrder(a) - robotTypeOrder(b) ||
+      normalizeId(a.robot_name).localeCompare(normalizeId(b.robot_name)) ||
+      Number(a.robot_id || 0) - Number(b.robot_id || 0),
+  );
 }
 
 function robotImageUrl(robot) {
-  return robotType(robot) === "AMR"
+  return robotType(robot) === "PICKY"
     ? "/static/img/pinky.png"
     : "/static/img/jetcobot.png";
 }
@@ -1003,18 +1127,21 @@ function robotFilterValue(element) {
 
 function filterRobotsForManagement(robots) {
   const search = (robotSearchInput?.value || "").trim().toLowerCase();
-  const status = robotFilterValue(robotStatusFilter);
+  const statusFilter = robotFilterValue(robotStatusFilter);
   const type = robotFilterValue(robotTypeFilter);
 
   return robots.filter((robot) => {
     const task = findRobotTask(robot);
+    const status = robotStatusValue(robot);
     const searchable = [
-      robot.robot_id,
+      robot.robot_name,
+      `#${robot.robot_id}`,
       robotDisplayName(robot),
       robotType(robot),
-      label(robot.status),
+      label(status),
+      robotStateLabel(robot),
       task?.order_no,
-      task ? label(task.task_type) : "",
+      task ? taskDisplayTitle(task) : "",
     ]
       .filter(Boolean)
       .join(" ")
@@ -1022,7 +1149,7 @@ function filterRobotsForManagement(robots) {
 
     return (
       (!search || searchable.includes(search)) &&
-      (!status || robot.status === status) &&
+      (!statusFilter || robotStatusValue(robot) === statusFilter) &&
       (!type || robotType(robot) === type)
     );
   });
@@ -1043,18 +1170,19 @@ function renderRobotManagementDetail(robot) {
   const type = robotType(robot);
   const imageUrl = robotImageUrl(robot);
   const displayName = robotDisplayName(robot);
+  const status = robotStatusValue(robot);
   const currentTask = task
-    ? `${task.order_no || `Task #${task.task_id}`} · ${label(task.task_type)}`
+    ? `${task.order_no || `Task #${task.task_id}`} · ${taskDisplayTitle(task)}`
     : "작업 없음";
 
   robotDetailPanel.innerHTML = `
     <div class="robot-detail-visual">
       <div class="robot-detail-title">
         <span class="${robotColorClass(robot.robot_id)}"></span>
-        <strong title="${robot.robot_id}">${displayName}</strong>
-        <span class="state-badge ${statusClass(robot.status)}">${label(robot.status)}</span>
+        <strong title="#${robot.robot_id}">${displayName}</strong>
+        <span class="state-badge ${statusClass(status)}">${label(status)}</span>
       </div>
-      <span>${type}</span>
+      <span>${label(type)}</span>
       <img src="${imageUrl}" alt="${displayName} ${type}">
     </div>
     <div class="robot-detail-metrics">
@@ -1072,13 +1200,21 @@ function renderRobotManagementDetail(robot) {
       </div>
       <div>
         <span>상태</span>
-        <strong>${label(robot.status)}</strong>
+        <strong>${label(status)}</strong>
+      </div>
+      <div>
+        <span>세부 상태</span>
+        <strong>${robotStateLabel(robot)}</strong>
       </div>
     </div>
     <div class="robot-inline-editor">
       <div>
         <label for="robot-panel-status-select">로봇 상태</label>
-        <select id="robot-panel-status-select">${renderOptions(ROBOT_STATUSES, robot.status)}</select>
+        <select id="robot-panel-status-select">${renderOptions(ROBOT_STATUSES, status)}</select>
+      </div>
+      <div>
+        <label for="robot-panel-state-select">세부 상태</label>
+        <select id="robot-panel-state-select">${renderRobotStateOptions(robot)}</select>
       </div>
       <div>
         <label for="robot-panel-current-task-select">현재 작업</label>
@@ -1094,14 +1230,14 @@ function renderRobotManagement(robots) {
 
   if (
     !selectedRobotId ||
-    !robots.some((robot) => robot.robot_id === selectedRobotId)
+    !robots.some((robot) => sameId(robot.robot_id, selectedRobotId))
   ) {
     selectedRobotId =
       filteredRobots[0]?.robot_id || robots[0]?.robot_id || null;
   }
 
   const selectedRobot =
-    robots.find((robot) => robot.robot_id === selectedRobotId) ||
+    robots.find((robot) => sameId(robot.robot_id, selectedRobotId)) ||
     filteredRobots[0] ||
     null;
 
@@ -1121,6 +1257,7 @@ function renderRobotManagement(robots) {
         <span>로봇</span>
         <span>유형</span>
         <span>상태</span>
+        <span>세부 상태</span>
         <span>배터리</span>
         <span>현재 작업</span>
         <span>위치</span>
@@ -1128,16 +1265,18 @@ function renderRobotManagement(robots) {
       ${filteredRobots
         .map((robot) => {
           const task = findRobotTask(robot);
-          const isSelected = robot.robot_id === selectedRobotId;
+          const isSelected = sameId(robot.robot_id, selectedRobotId);
           const displayName = robotDisplayName(robot);
+          const status = robotStatusValue(robot);
 
           return `
             <div class="admin-table-row robot-management-row ${isSelected ? "selected" : ""}" data-robot-select="${robot.robot_id}">
-              <span class="robot-name-cell" title="${robot.robot_id}"><i class="${robotColorClass(robot.robot_id)}"></i><strong>${displayName}</strong></span>
-              <span>${robotType(robot)}</span>
-              <span><span class="state-badge ${statusClass(robot.status)}">${label(robot.status)}</span></span>
+              <span class="robot-name-cell" title="#${robot.robot_id}"><i class="${robotColorClass(robot.robot_id)}"></i><strong>${displayName}</strong></span>
+              <span>${label(robotType(robot))}</span>
+              <span><span class="state-badge ${statusClass(status)}">${label(status)}</span></span>
+              <span>${robotStateLabel(robot)}</span>
               <span>${renderBatteryMeter(robot.battery_level)}</span>
-              <span class="task-cell">${task ? `${task.order_no || `Task #${task.task_id}`} · ${label(task.task_type)}` : "-"}</span>
+              <span class="task-cell">${task ? `${task.order_no || `Task #${task.task_id}`} · ${taskDisplayTitle(task)}` : "-"}</span>
               <span class="location-cell">${robotLocationText(robot)}</span>
             </div>
           `;
@@ -1154,12 +1293,14 @@ function renderRobots(robots) {
     return;
   }
 
+  const robotsToRender = sortedRobots(robots);
+
   if (adminPage === "robots") {
-    renderRobotManagement(robots);
+    renderRobotManagement(robotsToRender);
     return;
   }
 
-  if (robots.length === 0) {
+  if (robotsToRender.length === 0) {
     renderEmpty(robotStatus, "등록된 로봇이 없습니다");
     return;
   }
@@ -1169,23 +1310,24 @@ function renderRobots(robots) {
       <div class="admin-table-head">
         <span>로봇</span>
         <span>상태</span>
+        <span>세부 상태</span>
         <span>현재 작업</span>
         <span>배터리</span>
-        <span>위치</span>
       </div>
-      ${robots
+      ${robotsToRender
         .map((robot) => {
           const task = findRobotTask(robot);
           const robotTypeClass = robotColorClass(robot.robot_id);
           const displayName = robotDisplayName(robot);
+          const status = robotStatusValue(robot);
 
           return `
             <button class="admin-table-row robot-table-row" type="button" data-robot-detail="${robot.robot_id}">
-              <span class="robot-name-cell" title="${robot.robot_id}"><i class="${robotTypeClass}"></i>${displayName}</span>
-              <span><span class="state-badge ${statusClass(robot.status)}">${label(robot.status)}</span></span>
-              <span class="task-cell">${task ? `${task.order_no || `Task #${task.task_id}`} · ${label(task.task_type)}` : "-"}</span>
+              <span class="robot-name-cell" title="#${robot.robot_id}"><i class="${robotTypeClass}"></i>${displayName}</span>
+              <span><span class="state-badge ${statusClass(status)}">${label(status)}</span></span>
+              <span>${robotStateLabel(robot)}</span>
+              <span class="task-cell">${task ? `${task.order_no || `Task #${task.task_id}`} · ${taskDisplayTitle(task)}` : "-"}</span>
               <span>${renderBatteryMeter(robot.battery_level)}</span>
-              <span class="location-cell">${robotLocationText(robot)}</span>
             </button>
           `;
         })
@@ -1217,10 +1359,10 @@ function renderOrders(orders) {
         .map((order) => {
           const linkedTaskSelected =
             selectedTaskId !== null &&
-            orderTasks(order).some((task) => task.task_id === selectedTaskId);
+            orderTasks(order).some((task) => sameId(task.task_id, selectedTaskId));
           const isSelected =
             adminPage === "orders" &&
-            (order.order_id === selectedOrderId || linkedTaskSelected);
+            (sameId(order.order_id, selectedOrderId) || linkedTaskSelected);
 
           return `
             <button class="admin-table-row order-table-row ${isSelected ? "is-selected" : ""}" type="button" data-order-detail="${order.order_id}">
@@ -1343,7 +1485,7 @@ function renderInventory(products) {
             </span>
             <span>${product.stock_qty}</span>
             <span class="${stockLevelClass(level)}">${stockLevelLabel(level)}</span>
-            <span>${product.storage_location}</span>
+            <span>${productStorageLabel(product)}</span>
           </button>
         `;
         })
@@ -1367,15 +1509,7 @@ function renderTaskSnapshot(tasks) {
     return;
   }
 
-  const visibleTasks = tasks.filter(
-    (task) => !["SUCCESS", "FAILED", "CANCELLED"].includes(task.status),
-  );
-  const tasksToRender =
-    adminPage === "dashboard"
-      ? (visibleTasks.length > 0 ? visibleTasks : tasks).slice(0, 5)
-      : visibleTasks.length > 0
-        ? visibleTasks
-        : tasks;
+  const tasksToRender = tasks;
 
   taskList.innerHTML = `
     <div class="admin-table task-table">
@@ -1389,11 +1523,11 @@ function renderTaskSnapshot(tasks) {
       ${tasksToRender
         .map(
           (task) => `
-          <button class="admin-table-row task-table-row ${adminPage === "orders" && task.task_id === selectedTaskId ? "is-selected" : ""}" type="button" data-task-detail="${task.task_id}">
+          <button class="admin-table-row task-table-row ${adminPage === "orders" && sameId(task.task_id, selectedTaskId) ? "is-selected" : ""}" type="button" data-task-detail="${task.task_id}">
             <span>#${task.task_id}</span>
-            <span>${label(task.task_type)}</span>
+            <span>${taskDisplayTitle(task)}</span>
             <span>${task.order_no || "주문 없음"}</span>
-            <span>${task.assigned_robot_id || "미배정"}</span>
+            <span>${assignedRobotLabel(task)}</span>
             <span><span class="state-badge ${statusClass(task.status)}">${label(task.status)}</span></span>
           </button>
         `,
@@ -1464,7 +1598,7 @@ function renderExceptions(exceptions) {
           (exception) => `
           <div class="admin-table-row exception-table-row ${exception.is_resolved ? "" : "danger-row"}">
             <span>${formatDateTime(exception.created_at)}</span>
-            <span>${exception.robot_id || "-"}</span>
+            <span>${exception.robot_name || exception.robot_id || "-"}</span>
             <span class="${exception.is_resolved ? "" : "table-danger"}">${exception.detail || exception.exception_type}</span>
             <span>${
               exception.is_resolved
@@ -1487,6 +1621,7 @@ function exceptionMatches(exception, query) {
   const haystack = [
     exception.exception_type,
     exception.detail,
+    exception.robot_name,
     exception.robot_id,
     exception.task_id ? `task ${exception.task_id}` : "",
     exception.order_id ? `order ${exception.order_id}` : "",
@@ -1523,7 +1658,7 @@ function renderExceptionHistoryList(exceptions, query = "") {
         <div>
           <strong>${exception.exception_type}</strong>
           <span>${exception.detail || "상세 없음"}</span>
-          <span>${formatDateTime(exception.created_at)} · ${exception.robot_id || "로봇 미지정"}</span>
+          <span>${formatDateTime(exception.created_at)} · ${exception.robot_name || exception.robot_id || "로봇 미지정"}</span>
         </div>
         <div class="metric">${exception.is_resolved ? "처리" : "미처리"}</div>
       </div>
@@ -1571,7 +1706,7 @@ function renderInventoryManager(products) {
             <div class="inventory-product-editor">
               <input type="text" value="${product.name}" data-product-name-input="${product.product_id}" aria-label="${product.name} name">
               <input type="number" min="0" value="${product.stock_qty}" data-stock-input="${product.product_id}" aria-label="${product.name} stock">
-              <input type="text" value="${product.storage_location}" data-product-location-input="${product.product_id}" aria-label="${product.name} location">
+              <input type="text" value="${productStorageLabel(product)}" data-product-location-input="${product.product_id}" aria-label="${product.name} location">
               <input type="text" value="${product.image_url || ""}" data-product-image-input="${product.product_id}" aria-label="${product.name} image url" placeholder="이미지 URL">
               <button class="small-action-button" type="button" data-save-product="${product.product_id}">저장</button>
             </div>
@@ -1619,7 +1754,7 @@ function renderProductDetail(product) {
         </div>
         <div>
           <label for="product-detail-location">보관 위치</label>
-          <input id="product-detail-location" type="text" value="${product.storage_location}" data-product-location-input="${product.product_id}">
+          <input id="product-detail-location" type="text" value="${productStorageLabel(product)}" data-product-location-input="${product.product_id}">
         </div>
         <div>
           <label for="product-detail-image">이미지 URL</label>
@@ -1657,10 +1792,10 @@ function renderRobotManager(robots) {
               .map(
                 (robot) => `
           <button class="task-queue-row data-button" type="button" data-robot-detail="${robot.robot_id}">
-            <div class="queue-rank" title="${robot.robot_id}">${robotDisplayName(robot)}</div>
+            <div class="queue-rank" title="#${robot.robot_id}">${robotDisplayName(robot)}</div>
             <div class="task-main">
               <div class="task-title-line">
-                <strong>${label(robot.status)}</strong>
+                <strong>${label(robotStatusValue(robot))}</strong>
                 <span>${robot.current_task_id ? `Task #${robot.current_task_id}` : "작업 없음"}</span>
               </div>
               <span>${robot.battery_level === null ? "전원 연결" : `${robot.battery_level}%`}</span>
@@ -1681,7 +1816,7 @@ function openRobotManager() {
 
   openModal(
     "Robot Management",
-    renderRobotManager(latestAdminStatus.robots || []),
+    renderRobotManager(sortedRobots(latestAdminStatus.robots || [])),
   );
 }
 
@@ -1742,7 +1877,7 @@ function renderTaskDetail(task) {
       </div>
       <div>
         <span>작업</span>
-        <strong>${label(task.task_type)}</strong>
+        <strong>${taskDisplayTitle(task)}</strong>
       </div>
       <div>
         <span>상태</span>
@@ -1756,7 +1891,7 @@ function renderTaskDetail(task) {
       </div>
       <div>
         <span>로봇</span>
-        <strong>${task.assigned_robot_id || "로봇 미배정"}</strong>
+        <strong>${assignedRobotLabel(task)}</strong>
       </div>
       <div>
         <span>결과</span>
@@ -1790,10 +1925,10 @@ function renderTaskManager(tasks) {
             <div class="queue-rank">#${task.task_id}</div>
             <div class="task-main">
               <div class="task-title-line">
-                <strong>${label(task.task_type)}</strong>
+                <strong>${taskDisplayTitle(task)}</strong>
                 <span>${task.order_no || "주문 없음"}</span>
               </div>
-              <span>${task.assigned_robot_id || "로봇 미배정"}</span>
+              <span>${assignedRobotLabel(task)}</span>
             </div>
             <div class="task-side">
               <div class="state-badge ${statusClass(task.status)}">${label(task.status)}</div>
@@ -1837,7 +1972,8 @@ function openTaskDetail(taskId) {
 function renderAdminStatus(data) {
   latestAdminStatus = data;
   normalizeOrderWorkSelection(data);
-  const robotCounts = data.robots.reduce(
+  const robots = sortedRobots(data.robots || []);
+  const robotCounts = robots.reduce(
     (counts, robot) => {
       counts.total += 1;
       counts[robotCategory(robot)] += 1;
@@ -1847,8 +1983,7 @@ function renderAdminStatus(data) {
   );
   const activeRobots =
     robotCounts.total -
-    robotCounts.error -
-    data.robots.filter((robot) => robot.status === "OFFLINE").length;
+    robots.filter((robot) => robotStatusValue(robot) === "OFFLINE").length;
 
   if (summaryRobots) {
     summaryRobots.textContent = String(robotCounts.total);
@@ -1901,8 +2036,8 @@ function renderAdminStatus(data) {
     );
   }
 
-  renderRobots(data.robots);
-  renderMapRobots(data.robots);
+  renderRobots(robots);
+  renderMapRobots(robots);
   renderOrders(data.orders);
   renderPickupSlots(data.pickup_slots);
   renderInventory(data.products || []);
@@ -1917,12 +2052,17 @@ function renderAdminStatus(data) {
 
 function renderRobotTaskQueue(robot) {
   const tasks = getRobotTasks(robot.robot_id);
+  const status = robotStatusValue(robot);
 
   return `
     <div class="state-editor-form">
       <div>
         <label for="robot-status-select">로봇 상태</label>
-        <select id="robot-status-select">${renderOptions(ROBOT_STATUSES, robot.status)}</select>
+        <select id="robot-status-select">${renderOptions(ROBOT_STATUSES, status)}</select>
+      </div>
+      <div>
+        <label for="robot-state-select">세부 상태</label>
+        <select id="robot-state-select">${renderRobotStateOptions(robot)}</select>
       </div>
       <div>
         <label for="robot-current-task-select">현재 작업</label>
@@ -1942,7 +2082,7 @@ function renderRobotTaskQueue(robot) {
             <div class="queue-rank">${index + 1}</div>
             <div class="task-main">
               <div class="task-title-line">
-                <strong>${label(task.task_type)}</strong>
+                <strong>${taskDisplayTitle(task)}</strong>
                 <span>Task #${task.task_id}</span>
               </div>
               <span>${task.order_no || "주문 없음"}</span>
@@ -1978,7 +2118,7 @@ function openRobotDetail(robotId) {
   }
 
   const robot = latestAdminStatus.robots.find(
-    (item) => item.robot_id === robotId,
+    (item) => sameId(item.robot_id, robotId) || item.robot_name === robotId,
   );
 
   if (!robot) {
@@ -2165,20 +2305,6 @@ async function patchJson(path, body) {
   await loadAdminStatus();
 }
 
-async function deleteAdminResource(path) {
-  const response = await fetch(path, {
-    method: "DELETE",
-  });
-
-  if (!response.ok) {
-    const errorBody = await response.json().catch(() => ({}));
-    throw new Error(errorBody.detail || "delete failed");
-  }
-
-  await loadAdminStatus();
-  closeModal();
-}
-
 function selectNumberOrNull(selector) {
   const value = modalBody.querySelector(selector)?.value;
   return value ? Number(value) : null;
@@ -2203,15 +2329,35 @@ async function updateTaskState(taskId) {
 
   await patchJson(`/api/fleet/tasks/${taskId}`, {
     status: modalBody.querySelector("#task-status-select")?.value,
-    assigned_robot_id: assignedRobotId,
+    assigned_robot_id: assignedRobotId ? Number(assignedRobotId) : null,
   });
   openTaskDetail(taskId);
+}
+
+function robotStateUpdatePayload(robotId, statusSelector, stateSelector) {
+  const robot = findRobotById(robotId);
+  const payload = {
+    robot_status: document.querySelector(statusSelector)?.value,
+  };
+  const stateValue = document.querySelector(stateSelector)?.value || null;
+
+  if (robotType(robot) === "PICKY") {
+    payload.picky_state = stateValue;
+  } else if (robotType(robot) === "COBOT") {
+    payload.cobot_state = stateValue;
+  }
+
+  return payload;
 }
 
 async function updateRobotState(robotId) {
   const encodedRobotId = encodeURIComponent(robotId);
   await patchJson(`/api/fleet/robots/${encodedRobotId}`, {
-    status: modalBody.querySelector("#robot-status-select")?.value,
+    ...robotStateUpdatePayload(
+      robotId,
+      "#robot-status-select",
+      "#robot-state-select",
+    ),
     current_task_id: selectNumberOrNull("#robot-current-task-select"),
   });
   openRobotDetail(robotId);
@@ -2227,7 +2373,11 @@ async function updatePickupSlotState(slotId) {
 async function updateRobotPanelState(robotId) {
   const encodedRobotId = encodeURIComponent(robotId);
   await patchJson(`/api/fleet/robots/${encodedRobotId}`, {
-    status: document.querySelector("#robot-panel-status-select")?.value,
+    ...robotStateUpdatePayload(
+      robotId,
+      "#robot-panel-status-select",
+      "#robot-panel-state-select",
+    ),
     current_task_id: (() => {
       const value = document.querySelector(
         "#robot-panel-current-task-select",
@@ -2393,8 +2543,12 @@ function appendLlmMessage(role, text) {
 function buildLlmFailureReply(command) {
   const lowerCommand = command.toLowerCase();
 
-  if (lowerCommand.includes("순찰") || lowerCommand.includes("patrol")) {
-    return "순찰 명령을 처리하지 못했습니다. AI 메시지 API와 서버 상태를 확인해주세요.";
+  if (
+    lowerCommand.includes("입고") ||
+    lowerCommand.includes("stocking") ||
+    lowerCommand.includes("stock in")
+  ) {
+    return "입고 명령을 처리하지 못했습니다. AI 메시지 API와 Fleet Manager 상태를 확인해주세요.";
   }
 
   if (lowerCommand.includes("재고") || lowerCommand.includes("stock")) {
@@ -2704,9 +2858,10 @@ dashboardLlmForm?.addEventListener("submit", async (event) => {
 
   try {
     const response = await sendLlmMessage(command);
+    const isError = response.result === "error";
     setDashboardLlmFeedback(
-      "success",
-      "응답 완료",
+      isError ? "error" : "success",
+      isError ? "응답 실패" : "응답 완료",
       response.message || "AI 응답이 도착했습니다.",
     );
   } catch (error) {

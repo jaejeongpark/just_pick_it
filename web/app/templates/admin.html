@@ -4,12 +4,12 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Just Pick It Admin</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260513-assets" />
+    <link rel="stylesheet" href="/static/css/style.css?v=20260520-fleet-ui-3" />
   </head>
   <body class="admin-console" data-admin-page="{{ page }}">
     <div class="admin-app-shell">
       <aside class="admin-sidebar" aria-label="Admin navigation">
-        <div class="brand-lockup">
+        <a class="brand-lockup" href="/admin" aria-label="Admin dashboard home">
           <div class="brand-mark">
             <img src="/static/img/logo.png" alt="Just Pick It" />
           </div>
@@ -17,7 +17,7 @@
             <strong>JUST PICK IT</strong>
             <span>Control Console</span>
           </div>
-        </div>
+        </a>
         <nav class="side-nav">
           <a class="{{ 'active' if page == 'dashboard' else '' }}" href="/admin"
             >대시보드</a
@@ -138,10 +138,8 @@
               aria-label="Robot position overview"
             >
               <div class="map-robot-legend" aria-label="Robot color legend">
-                <span><i class="robot-dot-amr1"></i>AMR 1</span>
-                <span><i class="robot-dot-amr2"></i>AMR 2</span>
-                <span><i class="robot-dot-cobot1"></i>선별 로봇</span>
-                <span><i class="robot-dot-cobot2"></i>검수 로봇</span>
+                <span><i class="robot-dot-amr1"></i>PICKY 1</span>
+                <span><i class="robot-dot-amr2"></i>PICKY 2</span>
               </div>
               <div
                 id="map-robot-layer"
@@ -163,7 +161,7 @@
                 <div class="template-pin pin-blue"></div>
                 <div class="template-pin pin-green"></div>
                 <div class="template-pin pin-purple"></div>
-                <div class="template-robot map-amr">AMR</div>
+                <div class="template-robot map-amr">PICKY</div>
                 <div class="template-robot map-cobot-one">선별 로봇</div>
                 <div class="template-robot map-cobot-two">검수 로봇</div>
                 <span class="map-entrance">입구</span>
@@ -244,7 +242,7 @@
                       font-size="11"
                       font-weight="900"
                     >
-                      AMR
+                      PICKY
                     </text>
                   </g>
                   <g id="map-arm">
@@ -703,7 +701,7 @@
                 <div class="work-zone loading-zone">
                   <strong>Loading zone</strong>
                   <span>Sorting</span>
-                  <div class="mini-amr">AMR</div>
+                  <div class="mini-amr">PICKY</div>
                 </div>
               </section>
 
@@ -715,18 +713,18 @@
                 <div class="center-zone standby-zone top-zone">
                   <strong>Standby zone</strong>
                   <span>Standby</span>
-                  <div class="mini-amr">AMR</div>
+                  <div class="mini-amr">PICKY</div>
                 </div>
                 <div class="center-zone charging-zone">
                   <strong>Charging zone</strong>
                   <span>Charging</span>
-                  <div class="mini-amr">AMR</div>
+                  <div class="mini-amr">PICKY</div>
                   <b>CHG</b>
                 </div>
                 <div class="center-zone standby-zone bottom-zone">
                   <strong>Standby zone</strong>
                   <span>Standby</span>
-                  <div class="mini-amr">AMR</div>
+                  <div class="mini-amr">PICKY</div>
                 </div>
               </section>
 
@@ -748,7 +746,7 @@
                 <div class="work-zone unloading-zone">
                   <strong>Unloading zone</strong>
                   <span>Inspection</span>
-                  <div class="mini-amr">AMR</div>
+                  <div class="mini-amr">PICKY</div>
                 </div>
                 <div class="cobot-unit inspection-cobot">
                   <span>Inspection<br />JetCobot</span>
@@ -779,7 +777,7 @@
                 id="dashboard-llm-input"
                 type="text"
                 autocomplete="off"
-                placeholder="예: 1번 구역 순찰해줘"
+                placeholder="예: 우유 5개 입고해줘"
               />
               <button
                 id="dashboard-llm-submit"
@@ -792,7 +790,7 @@
             </form>
             <div class="ai-command-feedback">
               <p id="dashboard-llm-result">
-                명령을 입력하면 AI 응답이 여기에 표시됩니다.
+                입고 명령이나 재고/예외 질문을 입력하면 AI 응답이 여기에 표시됩니다.
               </p>
             </div>
           </section>
@@ -880,7 +878,7 @@
                 <div class="work-zone loading-zone">
                   <strong>Loading zone</strong>
                   <span>Sorting</span>
-                  <div class="mini-amr">AMR</div>
+                  <div class="mini-amr">PICKY</div>
                 </div>
               </section>
 
@@ -892,18 +890,18 @@
                 <div class="center-zone standby-zone top-zone">
                   <strong>Standby zone</strong>
                   <span>Standby</span>
-                  <div class="mini-amr">AMR</div>
+                  <div class="mini-amr">PICKY</div>
                 </div>
                 <div class="center-zone charging-zone">
                   <strong>Charging zone</strong>
                   <span>Charging</span>
-                  <div class="mini-amr">AMR</div>
+                  <div class="mini-amr">PICKY</div>
                   <b>CHG</b>
                 </div>
                 <div class="center-zone standby-zone bottom-zone">
                   <strong>Standby zone</strong>
                   <span>Standby</span>
-                  <div class="mini-amr">AMR</div>
+                  <div class="mini-amr">PICKY</div>
                 </div>
               </section>
 
@@ -925,7 +923,7 @@
                 <div class="work-zone unloading-zone">
                   <strong>Unloading zone</strong>
                   <span>Inspection</span>
-                  <div class="mini-amr">AMR</div>
+                  <div class="mini-amr">PICKY</div>
                 </div>
                 <div class="cobot-unit inspection-cobot">
                   <span>Inspection<br />JetCobot</span>
@@ -1069,7 +1067,7 @@
       <div class="llm-header">
         <div>
           <strong>LLM Command</strong>
-          <span>Patrol command</span>
+          <span>Stocking command</span>
         </div>
         <button id="llm-close-button" class="ghost-button" type="button">
           Close
@@ -1077,7 +1075,7 @@
       </div>
       <div id="llm-messages" class="llm-messages">
         <div class="llm-message bot">
-          순찰 명령이나 관제 질문을 입력하면 Control Server가 처리합니다.
+          입고 명령이나 재고/예외 질문을 입력하면 Control Server가 처리합니다.
         </div>
       </div>
       <form id="llm-form" class="llm-form">
@@ -1085,7 +1083,7 @@
           id="llm-input"
           type="text"
           autocomplete="off"
-          placeholder="예: 1번 구역 순찰해줘"
+          placeholder="예: 우유 5개 입고해줘"
         />
         <button class="small-action-button" type="submit">Send</button>
       </form>
@@ -1108,6 +1106,6 @@
       </section>
     </div>
 
-    <script src="/static/js/admin.js?v=20260513-images"></script>
+    <script src="/static/js/admin.js?v=20260520-fleet-ui-5"></script>
   </body>
 </html>

@@ -67,7 +67,7 @@ echo "[web-setup] installing python packages"
 "$WEB_DIR/.venv/bin/pip" install -r "$WEB_DIR/requirements.txt"
 
 # .env가 없으면 예시 파일을 복사한다.
-# DB URL, host, port, Claude API key는 web/.env에서 조정한다.
+# DB URL, host, port는 web/.env에서 조정한다.
 if [ ! -f "$WEB_DIR/.env" ]; then
   echo "[web-setup] creating web/.env from .env.example"
   cp "$WEB_DIR/.env.example" "$WEB_DIR/.env"
@@ -128,12 +128,6 @@ else
   echo "[web-setup] applying schema and seed"
   psql "$DB_URL" -f "$ROOT_DIR/db/schema.sql"
   psql "$DB_URL" -f "$ROOT_DIR/db/seed.sql"
-fi
-
-# 기존 DB를 유지한 채 enum 값만 추가해야 하는 경우를 대비한다.
-# 새로 만드는 DB는 schema.sql에 이미 들어 있으므로 이 명령은 아무것도 하지 않는다.
-if psql "$DB_URL" -tAc "SELECT 1 FROM pg_type WHERE typname='robot_status'" | grep -q 1; then
-  psql "$DB_URL" -c "ALTER TYPE robot_status ADD VALUE IF NOT EXISTS 'PARKING';"
 fi
 
 echo "[web-setup] done"

@@ -138,8 +138,10 @@ pinky_bringup이 cmd_vel을 바퀴 명령으로 바꾼다.
 고객/관리자 UI
   ↓ HTTP/WebSocket
 web Control Server
-  ↓ Fleet API
-AMR Robot Control Node
+  ↓ Fleet event/API
+Fleet Manager
+  ↓ State Manager / ROS2 command
+PICKY runner
   ↓ 직접 만든 navigation API 또는 cmd_vel
 Custom AMR Navigation Stack
   ↓ cmd_vel
@@ -152,8 +154,9 @@ pinky_bringup
 
 | 계층 | 이 프로젝트의 위치 | 책임 |
 |---|---|---|
-| 웹/관제 | `web/app` | 주문, task 생성/배정, 로봇 상태 저장, 관리자 UI 표시 |
-| AMR runner | 앞으로 만들 후보: `src/just_pick_amr` 또는 별도 ROS 패키지 | Control Server API polling, task 상태 보고, 직접 만든 주행 모듈 호출 |
+| 웹/관제 | `web/app` | 주문/재고/로봇/task 상태 저장, 관리자 UI 표시 |
+| Fleet Manager | 앞으로 만들 후보: 별도 ROS/Fleet 패키지 | task 생성/배정, 경로 판단, State Manager 명령, Control Server 상태 보고 |
+| PICKY runner | 앞으로 만들 후보: `src/just_pick_amr` 또는 별도 ROS 패키지 | Fleet Manager 명령 수신, task 실행 결과 보고, 직접 만든 주행 모듈 호출 |
 | Custom navigation | 앞으로 직접 구현 | pose/scan/map/goal을 받아 planner/controller 계산 후 `cmd_vel` 발행 |
 | 로봇 bringup | `src/pinky_pro/pinky_bringup` | 최소 하드웨어 adapter: `cmd_vel` 구독, 모터 제어, `odom`/TF 발행 |
 | 제공 Navigation | `src/pinky_pro/pinky_navigation` | 참고 구현: SLAM, AMCL, Nav2, costmap, web bridge |
@@ -162,8 +165,9 @@ pinky_bringup
 중요한 기준:
 
 ```text
-Control Server는 "무슨 일을 할지"를 결정한다.
-AMR runner는 "task를 언제 시작/종료할지"를 결정한다.
+Control Server는 "업무 데이터와 상태를 저장한다."
+Fleet Manager는 "무슨 일을 어떤 순서로 할지"를 결정한다.
+PICKY runner는 "받은 주행 명령을 실제로 수행한다."
 Custom navigation은 "목표까지 어떻게 움직일지"를 직접 계산한다.
 pinky_bringup은 "cmd_vel을 실제 바퀴 명령으로 바꾸는 일"만 맡긴다.
 ```
@@ -188,7 +192,7 @@ pinky_bringup은 "cmd_vel을 실제 바퀴 명령으로 바꾸는 일"만 맡긴
 5. 직접 map 표현 또는 OccupancyGrid 사용
 6. A* 같은 global planner 구현
 7. Pure Pursuit/DWA 계열 local controller 구현
-8. AMR runner와 연결해서 task target_zone_pose 수행
+8. PICKY runner와 연결해서 Fleet Manager가 내려준 goal pose 수행
 9. Gazebo 검증 후 실로봇 적용
 ```
 
@@ -271,19 +275,20 @@ bridge 기준:
 | 파일 | 봐야 하는 이유 |
 |---|---|
 | `web/WORKFLOW.md` | 주문/task 상태 전이 기준 문서 |
-| `web/app/routers/fleet_router.py` | AMR runner가 호출할 Fleet API |
-| `web/app/services/workflow_service.py` | task 배정, robot 상태, order 상태 변경 정책 |
-| `web/scripts/smoke_runtime_flow.py` | 서버 쪽 주문/task 흐름 smoke 검증 |
+| `web/app/routers/fleet_router.py` | Fleet Manager가 호출할 Fleet API |
+| `web/app/services/workflow_service.py` | task 상태 결과가 order/robot/stocking 상태에 반영되는 정책 |
 
-AMR runner가 우선 써야 하는 API:
+Fleet Manager가 우선 써야 하는 API:
 
 | 목적 | API |
 |---|---|
+| 전체 상태 복구 | `GET /api/fleet/snapshot` |
+| PICKY 주차/상품/픽업/슬롯 좌표 조회 | `GET /api/fleet/zones` |
+| task bulk 생성 | `POST /api/fleet/tasks/bulk` |
 | 로봇 상태/pose/battery 보고 | `PATCH /api/fleet/robots/{robot_id}` |
-| 배정 task 조회 | `GET /api/fleet/tasks?robot_id={robot_id}&status=ASSIGNED` |
 | task 시작/완료/실패 보고 | `PATCH /api/fleet/tasks/{task_id}` |
 | 예외 보고 | `POST /api/fleet/exceptions` |
-| 다른 AMR의 실행 task 확인 | `GET /api/fleet/robots/{robot_id}/running-task` |
+| 다른 PICKY의 실행 task 확인 | `GET /api/fleet/robots/{robot_id}/running-task` |
 
 ---
 
@@ -300,59 +305,62 @@ AMR runner가 우선 써야 하는 API:
 |---|---|---|
 | Dynamixel motor 제어 | `pinky_bringup` 사용 | `cmd_vel`만 내면 로봇이 움직이는 경계를 확보 |
 | Encoder odometry | `pinky_bringup` 사용 | 현재 pose 추정의 최소 입력 확보 |
-| Battery publish | `battery_publisher.py` 사용 | Control Server 보고에 필요 |
+| Battery publish | `battery_publisher.py` 사용 | Fleet Manager 상태 보고에 필요 |
 | Gazebo bridge | `pinky_gz_sim` 사용 | 직접 만든 알고리즘을 안전하게 반복 테스트 |
 | SLAM | 처음엔 제공 launch로 개념 확인, 이후 직접 구현/대체 검토 | map 품질 문제와 주행 문제를 분리 |
 | Localization | 처음엔 odom 기반, 이후 AMCL/직접 localization 비교 | 처음부터 particle filter까지 가면 범위가 너무 커짐 |
 | Global planner | 직접 구현 | A*, Dijkstra부터 시작하기 좋음 |
 | Local controller | 직접 구현 | go-to-goal, Pure Pursuit, DWA 순서로 확장 |
 | Obstacle avoidance | 직접 구현 | `/scan` 기반 정지/회피부터 시작 |
-| Fleet task runner | 직접 구현 | 우리 Control Server와 직접 연결되는 핵심 |
+| Fleet task runner | 직접 구현 | Control Server API와 PICKY/COBOT 실행부를 이어주는 핵심 |
 
 최종적으로 더 깊게 가고 싶으면 `pinky_bringup`까지 대체할 수 있습니다. 하지만 프로젝트 목표가 AMR 자율주행이라면 1차로는 `cmd_vel`, `odom`, `scan`, `tf` 경계를 안정적으로 쓰고 그 위의 주행 스택을 직접 만드는 편이 좋습니다.
 
 ---
 
-## 0.5 우리 프로젝트의 AMR 실행 흐름
+## 0.5 우리 프로젝트의 PICKY 실행 흐름
 
-Control Server 기준 task 흐름은 다음입니다.
+Fleet Manager 기준 task 흐름은 다음입니다.
 
 ```text
 주문 생성
   ↓
-Control Server가 task 생성
+Control Server가 ORDER_CREATED 이벤트 전송
   ↓
-AMR이 자기 상태를 PATCH /api/fleet/robots/{robot_id}로 보고
+Fleet Manager가 주문/상품/zone/robot snapshot 조회
   ↓
-Control Server가 가능한 AMR에 task 배정
+Fleet Manager가 task 생성/배정 후 POST /api/fleet/tasks/bulk
   ↓
-AMR runner가 ASSIGNED task 조회
+Fleet Manager가 PICKY runner에 주행 명령
   ↓
-AMR runner가 task를 RUNNING으로 보고
+Fleet Manager가 task RUNNING 및 robot BUSY 상태 보고
   ↓
 Custom navigation이 목표 지점으로 이동
   ↓
-성공/실패 결과를 Control Server에 보고
+Fleet Manager가 성공/실패 결과를 Control Server에 보고
 ```
 
-주문 AMR task:
+PICKY 주행 task:
 
 | task_type | 의미 | 1차 주행 처리 |
 |---|---|---|
-| `STANDBY_LOAD` | 상차 대기존 이동 | target zone pose로 이동 |
-| `LOAD` | 상차 위치 이동 | target zone pose로 이동 |
-| `STANDBY_UNLOAD` | 하차 대기존 이동 | target zone pose로 이동 |
-| `UNLOAD` | 하차 위치 이동 | target zone pose로 이동 |
-| `PATROL` | 순찰 | target zone pose 이동 후 회전/감시 |
+| `MOVE_TO_PRODUCT` | 주문 상품 주차존 이동 | target zone pose로 이동 |
+| `MOVE_TO_PICKUP` | 픽업존 이동 | target zone pose로 이동 |
+| `MOVE_TO_STOCK` | 입고존 이동 | target zone pose로 이동 |
+| `MOVE_TO_STORAGE` | 적재 위치 이동 | target zone pose로 이동 |
+| `RETURN_HOME` | 대기/충전 구역 복귀 | standby 또는 dock 앞 pose로 이동 |
+| `CHARGE` | 충전 도킹 | 도킹 보정 루틴 실행 |
 
-로봇 쪽에서 처음 구현할 runner는 DB를 직접 보면 안 됩니다. Control Server API만 호출해야 합니다.
+COBOT task(`SORTING_AND_LOAD`, `INSPECTION`, `UNLOAD`, `STOCKING_PICK`, `STOCKING_PLACE`)는 PICKY 주행 runner가 직접 실행하지 않고 Fleet Manager/State Manager가 COBOT 쪽으로 분리해서 내려준다.
+
+로봇 쪽에서 처음 구현할 runner는 DB를 직접 보면 안 됩니다. Fleet Manager가 내려주는 명령만 실행하고 결과를 Fleet Manager에 돌려주는 구조로 둡니다.
 
 좋은 구조:
 
 ```text
-AmrTaskRunner
-  - HTTP API polling/reporting
-  - task 상태 전이
+PickyTaskRunner
+  - Fleet Manager 명령 수신
+  - 이동 시작/완료/실패 결과 보고
   - battery/pose report
   - NavigationAdapter 호출
 
@@ -503,21 +511,20 @@ else:
 
 처음부터 예쁜 회피 경로를 만들 필요는 없습니다. “부딪히지 않고 멈춤”이 먼저입니다.
 
-### 7단계: Control Server task와 연결
+### 7단계: Fleet Manager 명령과 연결
 
-Control Server가 켜진 상태에서 AMR runner가 할 일:
+Fleet Manager가 켜진 상태에서 PICKY runner가 할 일:
 
 ```text
 1. battery/percent 구독
 2. TF 또는 odom으로 현재 pose 추출
-3. PATCH /api/fleet/robots/AMR_1
-4. GET /api/fleet/tasks?robot_id=AMR_1&status=ASSIGNED
-5. task를 RUNNING으로 변경
-6. target_zone_pose를 직접 만든 navigation goal로 전달
-7. 결과를 SUCCESS 또는 FAILED로 보고
+3. Fleet Manager로 현재 pose/battery 주기 보고
+4. Fleet Manager에서 주행 goal 수신
+5. target_zone_pose를 직접 만든 navigation goal로 전달
+6. 결과를 SUCCESS 또는 FAILED로 보고
 ```
 
-이 단계에서도 runner와 navigation은 분리합니다. runner는 HTTP와 task 상태만 알고, navigation은 goal 이동만 알아야 합니다.
+이 단계에서도 runner와 navigation은 분리합니다. runner는 Fleet Manager 명령과 실행 결과만 알고, navigation은 goal 이동만 알아야 합니다.
 
 ### 8단계: map과 planner 추가
 
@@ -599,13 +606,13 @@ TF가 안 맞으면 제공 Nav2도 실패하고, 직접 만든 자율주행도 p
 
 목표:
 
-- `GET /api/fleet/tasks?robot_id=AMR_1&status=ASSIGNED` 조회
+- `GET /api/fleet/tasks?robot_name=PICKY1&status=ASSIGNED` 조회
 - 배정 task를 `RUNNING`으로 변경
 - 실제 주행 없이 몇 초 후 `SUCCESS` 보고
 
 검증:
 
-- `web/scripts/smoke_runtime_flow.py` 또는 UI 주문 흐름에서 AMR task 상태가 진행됨.
+- Fleet Manager가 생성한 task가 UI와 `GET /api/fleet/tasks`에서 진행 상태로 보임.
 - 실패 시 어느 API에서 실패했는지 로그로 추적 가능.
 
 ### Milestone 3: standalone go-to-goal controller
@@ -638,12 +645,12 @@ TF가 안 맞으면 제공 Nav2도 실패하고, 직접 만든 자율주행도 p
 - 장애물이 사라지면 다시 goal 방향 진행.
 - 정지/회피 상태가 로그로 추적 가능.
 
-### Milestone 5: AMR runner와 custom navigation 연결
+### Milestone 5: PICKY runner와 custom navigation 연결
 
 목표:
 
-- task의 `target_zone_pose`를 직접 만든 navigation goal로 변환.
-- 이동 성공/실패 결과를 task `SUCCESS`/`FAILED`로 보고.
+- Fleet Manager 명령의 `target_zone_pose`를 직접 만든 navigation goal로 변환.
+- 이동 성공/실패 결과를 Fleet Manager에 보고.
 - timeout, obstacle blocked, no pose 같은 실패 원인을 `result_message`로 남김.
 
 검증:
@@ -678,12 +685,12 @@ TF가 안 맞으면 제공 Nav2도 실패하고, 직접 만든 자율주행도 p
 - path를 따라가며 흔들림 없이 이동.
 - goal 근처에서 안정적으로 정지.
 
-### Milestone 8: PATROL
+### Milestone 8: Stocking / Return Home 연결
 
 목표:
 
-- PATROL target zone 이동.
-- 도착 후 제자리 회전.
+- `MOVE_TO_STOCK`, `MOVE_TO_STORAGE`, `RETURN_HOME` task를 주행 runner에 연결.
+- 입고 작업 중 COBOT 작업 대기 상태를 Fleet Manager에 보고.
 - 예외 상황 발생 시 `/api/fleet/exceptions` 보고.
 
 검증:
@@ -708,7 +715,7 @@ TF가 안 맞으면 제공 Nav2도 실패하고, 직접 만든 자율주행도 p
 | Pose 처리 | odom pose 읽기, yaw 추출, goal까지 거리/각도 오차 계산 | `pose_utils.py` |
 | Go-to-goal 제어 | 목표 방향 정렬, 전진, 도착 정지, 속도 제한, goal tolerance | `go_to_goal_controller.py` |
 | Safety layer | LaserScan 전방 sector 추출, 유효 range 필터링, 정지 거리, blocked timeout | `safety_layer.py` |
-| Task runner | Control Server polling, task RUNNING/SUCCESS/FAILED 보고, retry/timeout 로그 | `amr_task_runner.py` |
+| Task runner | Fleet Manager 명령 수신, RUNNING/SUCCESS/FAILED 결과 보고, retry/timeout 로그 | `picky_task_runner.py` |
 | Navigation 인터페이스 | runner와 navigation 사이 action goal/result/feedback 분리 | `NavigateTask.action` |
 | Global planner | OccupancyGrid 해석, world-grid 변환, A*/Dijkstra, path 생성 | `grid_planner.py` |
 | Path tracking | waypoint list 추종, lookahead, Pure Pursuit 또는 carrot following | `path_tracker.py` |
