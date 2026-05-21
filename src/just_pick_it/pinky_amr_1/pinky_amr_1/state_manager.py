@@ -62,8 +62,8 @@ class StateManager(Node):
         super().__init__('state_manager')
 
         self.declare_parameter('server_base_url', 'http://192.168.4.1:8000')
-        self.declare_parameter('robot_id', 'AMR_001')
-        self.declare_parameter('robot_namespace', 'amr_001')
+        self.declare_parameter('robot_id', 'PICKY1')
+        self.declare_parameter('robot_namespace', 'picky1')
         self.declare_parameter('report_interval_sec', 1.0)
         self.declare_parameter('aruco_marker_id', 0)
         self.declare_parameter('standby_x', 0.0)

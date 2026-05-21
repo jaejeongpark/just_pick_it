@@ -941,21 +941,6 @@ def update_pickup_slot_state(
     return {"status": "ok"}
 
 
-@router.get("/zones")
-def list_zones(db: Session = Depends(get_db)):
-    zones = db.query(Zone).all()
-    return [
-        {
-            "zone_id": z.zone_id,
-            "zone_name": z.zone_name,
-            "zone_type": z.zone_type,
-            "pos_x": z.pos_x,
-            "pos_y": z.pos_y,
-        }
-        for z in zones
-    ]
-
-
 @router.post("/exceptions", response_model=FleetExceptionRead, status_code=201)
 def create_exception_report(
     exception_create: FleetExceptionCreate,

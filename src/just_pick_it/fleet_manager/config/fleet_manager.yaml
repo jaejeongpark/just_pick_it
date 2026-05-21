@@ -1,0 +1,6 @@
+fleet_manager:
+  ros__parameters:
+    robot_ids:
+      - PICKY1
+      - PICKY2
+    server_base_url: "http://192.168.4.1:8000"

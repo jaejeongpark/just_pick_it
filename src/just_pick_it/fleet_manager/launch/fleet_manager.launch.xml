@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+
+<launch>
+    <arg name="params_file"
+         default="$(find-pkg-share fleet_manager)/config/fleet_manager.yaml"/>
+
+    <node pkg="fleet_manager" exec="fleet_manager_node"
+          name="fleet_manager" output="screen">
+        <param from="$(var params_file)"/>
+    </node>
+</launch>
