@@ -1,0 +1,31 @@
+<?xml version='1.0' ?>
+
+<launch>
+    <arg name="calibration_file" default="$(find-pkg-share just_pick_it_perception)/result/camera_calibration.yaml"/>
+    <arg name="poses_file"       default="$(find-pkg-share just_pick_it_perception)/config/apriltag_world_poses.yaml"/>
+    <arg name="tag_size_m"       default="0.12"/>
+    <arg name="image_topic"      default="/camera/image_raw"/>
+    <arg name="camera_frame"     default="front_camera_link"/>
+    <arg name="base_frame"       default="base_link"/>
+    <arg name="use_sim_time"     default="true"/>
+
+    <node pkg="tf2_ros" exec="static_transform_publisher" name="map_to_odom_static"
+          args="--frame-id map --child-frame-id odom --x 0 --y 0 --z 0 --roll 0 --pitch 0 --yaw 0">
+        <param name="use_sim_time" value="$(var use_sim_time)"/>
+    </node>
+
+    <node pkg="just_pick_it_perception" exec="apriltag_map_tf_publisher" name="apriltag_map_tf_publisher">
+        <param name="poses_file"   value="$(var poses_file)"/>
+        <param name="use_sim_time" value="$(var use_sim_time)"/>
+    </node>
+
+    <node pkg="just_pick_it_perception" exec="apriltag_detector" name="apriltag_detector" output="screen">
+        <param name="calibration_file" value="$(var calibration_file)"/>
+        <param name="image_topic"      value="$(var image_topic)"/>
+        <param name="annotated_topic"  value="/apriltag/image_annotated"/>
+        <param name="tag_size_m"       value="$(var tag_size_m)"/>
+        <param name="camera_frame"     value="$(var camera_frame)"/>
+        <param name="base_frame"       value="$(var base_frame)"/>
+        <param name="use_sim_time"     value="$(var use_sim_time)"/>
+    </node>
+</launch>

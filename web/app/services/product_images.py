@@ -4,7 +4,7 @@ from app.models import Product
 
 
 STATIC_IMG_URL_PREFIX = "/static/img/"
-LEGACY_STATIC_IMG_URL_PREFIX = "/static/images/"
+OLD_STATIC_IMG_URL_PREFIX = "/static/images/"
 STATIC_IMG_DIR = Path(__file__).resolve().parents[1] / "static" / "img"
 PRODUCT_IMAGE_FILENAMES = {
     "우유": "milk.png",
@@ -15,9 +15,9 @@ PRODUCT_IMAGE_FILENAMES = {
     "바나나": "banana.png",
 }
 STATIC_IMAGE_FILENAME_ALIASES = {
-    legacy_filename: filename
+    alias_filename: filename
     for name, filename in PRODUCT_IMAGE_FILENAMES.items()
-    for legacy_filename in (name, f"{name}.png")
+    for alias_filename in (name, f"{name}.png")
 }
 
 
@@ -25,11 +25,11 @@ def resolve_product_image_url(product: Product) -> str | None:
     candidates = []
     image_url = product.image_url.strip() if product.image_url else ""
 
-    if image_url.startswith(LEGACY_STATIC_IMG_URL_PREFIX):
+    if image_url.startswith(OLD_STATIC_IMG_URL_PREFIX):
         candidates.append(
             normalize_static_image_url(
                 image_url.replace(
-                    LEGACY_STATIC_IMG_URL_PREFIX, STATIC_IMG_URL_PREFIX, 1
+                    OLD_STATIC_IMG_URL_PREFIX, STATIC_IMG_URL_PREFIX, 1
                 )
             )
         )

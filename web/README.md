@@ -2,7 +2,7 @@
 
 FastAPI 기반 Control Server와 고객/관리자 UI를 두는 폴더입니다.
 
-웹은 쇼핑몰 자체가 아니라 **로봇 시스템 관제와 주문 흐름을 확인하기 위한 Control Server + UI**입니다.  
+웹은 쇼핑몰 자체가 아니라 **로봇 시스템 관제와 주문 흐름을 확인하기 위한 Control Server + UI**입니다.
 최신 구현 계획은 [`../docs/web_plan.md`](../docs/web_plan.md), 작업 진행 기록은 [`WEB_STATUS.md`](WEB_STATUS.md)를 기준으로 봅니다.
 주문/로봇 상태 전이 흐름은 [`WORKFLOW.md`](WORKFLOW.md)에 따로 정리했습니다.
 로봇/Fleet/Vision/LLM에서 호출할 API 사용법은 [`API_USAGE.md`](API_USAGE.md)에 정리했습니다.
@@ -20,7 +20,7 @@ cd ~/just_pick_it
 web/scripts/setup.sh
 ```
 
-Ubuntu/apt 환경에서는 PostgreSQL이 없으면 `setup.sh`가 설치까지 시도합니다.  
+Ubuntu/apt 환경에서는 PostgreSQL이 없으면 `setup.sh`가 설치까지 시도합니다.
 설치와 DB 생성 과정에서 sudo 비밀번호를 물어볼 수 있습니다.
 
 2. 웹 서버를 실행합니다.
@@ -65,13 +65,6 @@ cd ~/just_pick_it
 web/scripts/reset_demo_data.sh
 ```
 
-Fleet runtime API smoke test:
-
-```bash
-cd ~/just_pick_it
-web/.venv/bin/python web/scripts/smoke_runtime_flow.py --reset-db
-```
-
 초기화 후 상품은 seed 기준 상품 6종이 각 2개씩 들어갑니다.
 
 브라우저:
@@ -99,7 +92,7 @@ web/scripts/reset_demo_data.sh
 
 ## 현재 연결 상태
 
-웹과 DB 연결은 **고객/관리자 UI + DB 연동 + 실제 Robot Control Node 상태 보고 API 기준으로 동작하는 상태**입니다.
+웹과 DB 연결은 **고객/관리자 UI + DB 연동 + Fleet Manager 상태 보고 API 기준으로 동작하는 상태**입니다.
 
 완료된 것:
 
@@ -118,7 +111,7 @@ web/scripts/reset_demo_data.sh
 - 관리자 대시보드/로봇/작업·주문/예외/재고 페이지
 - 로봇/주문/task/픽업슬롯/예외/재고 상태 표시
 - 관리자 UI에서 로봇/주문/task/픽업슬롯/재고 상태 수정
-- 실제 Robot Control Node 연동용 상태 보고 API
+- Fleet Manager 연동용 상태 보고 API
 - task_event 기록/조회 API
 - Vision/Robot 예외 보고 API
 - exception 처리 완료
@@ -128,16 +121,16 @@ web/scripts/reset_demo_data.sh
 웹 쪽에서 아직 실제 외부 시스템과 연결하지 않은 것:
 
 ```text
-- 실제 Robot Control Node / Control Bridge / ROS2 연결
-- Claude API key 설정 후 실제 LLM 호출 테스트
-- Robot Control Node와 Vision Server 사이의 영상 분석 요청/응답 연결
+- 실제 Fleet Manager / State Manager / ROS2 연결
+- LLM 담당 모듈 구현 후 자연어 입고 명령 파싱 연결
+- Fleet Manager 또는 로봇 쪽 Vision 모듈의 영상 분석 요청/응답 연결
 - task_event를 관리자 UI 타임라인으로 보여주는 화면
 - 재고 임계치 알림을 exception/alert로 자동 생성하는 정책
 ```
 
-즉, 현재 웹은 **로컬 DB와 UI 관제 기준으로는 바로 시연 가능한 상태**이고, 남은 큰 작업은 외부 Robot Control Node/Vision 시스템을 실제로 붙이는 일입니다.
-Vision Server는 Control Server가 직접 중계하지 않고 Robot Control Node가 직접 호출한 뒤 결과만 `/api/fleet/*`로 보고하는 방향입니다.
-LLM은 `ANTHROPIC_API_KEY`를 넣으면 Claude API로 호출하고, 비워두면 Claude tool-use 응답과 같은 형태의 로컬 고정 JSON으로 동작합니다.
+즉, 현재 웹은 **로컬 DB와 UI 관제 기준으로는 바로 시연 가능한 상태**이고, 남은 큰 작업은 외부 Fleet Manager/Vision 시스템을 실제로 붙이는 일입니다.
+Vision Server는 Control Server가 직접 중계하지 않고 Fleet Manager 또는 로봇 쪽 모듈이 직접 호출한 뒤 결과만 `/api/fleet/*`로 보고하는 방향입니다.
+LLM UI와 `/api/admin/llm/messages` API는 남겨두었지만, 현재 LLM client는 담당자 구현 대기용 stub만 반환합니다.
 
 ## Structure
 
@@ -207,7 +200,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 - schema/seed 적용
 ```
 
-이미 DB schema가 있으면 schema/seed 적용은 건너뜁니다.  
+이미 DB schema가 있으면 schema/seed 적용은 건너뜁니다.
 테이블 구조, enum, index까지 다시 만들고 싶으면 `RESET_DB=1 web/scripts/setup.sh`를 사용합니다.
 기본 로컬 DB(`just_pick_it_user` / `just_pick_it`) 기준으로 DB/user를 만들고, `web/.env`의 `DATABASE_URL`로 schema/seed를 적용합니다.
 스크립트 내부에 각 단계별 한글 주석을 달아두었으므로, 동작이 궁금하면 파일을 직접 열어 확인합니다.
@@ -224,12 +217,12 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```text
 - task_event, exception_log, task 삭제
 - order_item, orders 삭제
-- robot, pickup_slot, product, zone 삭제
+- stocking_item, robot, robot_unit, pickup_slot, product, zone 삭제
 - PK 번호를 1번부터 다시 시작
 - db/seed.sql 다시 적용
 ```
 
-주문과 작업은 상품/로봇/픽업 슬롯을 참조하므로 상품만 초기화하면 참조가 꼬일 수 있습니다.  
+주문과 작업은 상품/로봇/픽업 슬롯을 참조하므로 상품만 초기화하면 참조가 꼬일 수 있습니다.
 그래서 이 스크립트는 주문, 작업, 예외, 상품, 로봇, 픽업 슬롯, 존을 함께 초기화합니다.
 
 초기화 후 상태:
@@ -262,7 +255,7 @@ web/scripts/reset_demo_data.sh
 
 ## Environment
 
-`web/.env.example`은 예시 파일입니다.  
+`web/.env.example`은 예시 파일입니다.
 `web/scripts/setup.sh`를 실행하면 `web/.env`가 없을 때 자동으로 복사됩니다.
 
 실제 실행 시 읽는 파일:
@@ -275,7 +268,7 @@ web/.env
 
 ```text
 - web/app/config.py
-  - FastAPI 앱이 DATABASE_URL, APP_HOST, APP_PORT, CLAUDE_* 값을 읽음
+  - FastAPI 앱이 DATABASE_URL, APP_HOST, APP_PORT 값을 읽음
 - web/scripts/setup.sh
   - DATABASE_URL을 읽어 schema/seed 적용 대상 DB를 결정
 - web/scripts/run.sh
@@ -290,26 +283,27 @@ web/.env
 DATABASE_URL=postgresql://just_pick_it_user:just_pick_it_pw@localhost:5432/just_pick_it
 APP_HOST=0.0.0.0
 APP_PORT=8000
-ANTHROPIC_API_KEY=
-CLAUDE_MODEL=claude-sonnet-4-6
-CLAUDE_MAX_TOKENS=512
-CLAUDE_TIMEOUT_SECONDS=10
 ```
 
-`ANTHROPIC_API_KEY`가 비어 있으면 `/api/admin/llm/messages`는 `A_ZONE` 순찰 명령 JSON을 로컬로 반환합니다.
-키를 넣으면 Anthropic 공식 Python SDK로 Claude Messages API를 호출합니다.
+`/api/admin/llm/messages`는 UI/API 계약만 유지하고 있으며, 현재는 `provider:"stub"` 응답을 반환합니다.
+LLM 담당자는 `web/app/services/llm_client.py`의 `build_llm_message()`부터 구현하면 됩니다.
 
-## Robot Runtime API
+## Fleet Manager API
 
-`/api/fleet/*` 경로명은 기존 구현 호환을 위해 유지합니다.  
-현재 프로젝트 방향에서는 Fleet Manager 전용 API가 아니라 각 Robot Control Node 또는 Control Bridge가 task/robot/order 상태를 보고하는 runtime API로 사용합니다.
+`/api/fleet/*` 경로명은 Fleet Manager가 Control Server에 상태를 저장하거나 조회할 때 사용합니다.
+PICKY/COBOT은 Control Server와 직접 통신하지 않고 Fleet Manager를 통해 제어됩니다.
 
-각 로봇 담당 노드는 자기 로봇의 task 조회, 상태 보고, 예외 보고를 수행하고, Control Server는 받은 상태를 DB에 반영합니다.
-고객 주문 생성 시 기본 task는 자동 생성되며, 가능한 로봇에는 ready task가 `ASSIGNED` 상태로 자동 배정됩니다.
+고객 주문 생성 시 Control Server는 `orders`와 `order_item`만 만들고 `ORDER_CREATED` 이벤트를 보냅니다.
+task 생성/배정/경로 판단은 Fleet Manager가 담당하며, 생성된 task는 `POST /api/fleet/tasks/bulk`로 저장합니다.
 
 ```text
+GET   /api/fleet/snapshot
+GET   /api/fleet/zones
+POST  /api/fleet/stocking-items
+GET   /api/fleet/stocking-items
+PATCH /api/fleet/stocking-items/{stocking_item_id}
 GET   /api/fleet/tasks
-POST  /api/fleet/tasks
+POST  /api/fleet/tasks/bulk
 GET   /api/fleet/orders
 GET   /api/fleet/orders/{order_id}/tasks
 PATCH /api/fleet/orders/{order_id}
@@ -318,16 +312,20 @@ POST  /api/fleet/orders/{order_id}/assign-pickup-slot
 PATCH /api/fleet/tasks/{task_id}
 POST  /api/fleet/tasks/{task_id}/events
 GET   /api/fleet/tasks/{task_id}/events
+GET   /api/fleet/robots/{robot_id}
 PATCH /api/fleet/robots/{robot_id}
+GET   /api/fleet/robots/{robot_id}/running-task
 GET   /api/fleet/pickup-slots
 PATCH /api/fleet/pickup-slots/{slot_id}
 POST  /api/fleet/exceptions
+POST  /api/fleet/stocking/complete
 ```
 
 조회 예시:
 
 ```bash
-curl "http://localhost:8000/api/fleet/tasks?robot_id=AMR_1&status=ASSIGNED"
+curl "http://localhost:8000/api/fleet/tasks?robot_name=PICKY1&status=ASSIGNED"
+curl "http://localhost:8000/api/fleet/zones?zone_type=PRODUCT"
 curl "http://localhost:8000/api/fleet/orders?status=ORDER_WAIT"
 curl "http://localhost:8000/api/fleet/orders/7/tasks"
 curl "http://localhost:8000/api/fleet/pickup-slots?status=EMPTY"
@@ -350,9 +348,9 @@ curl -X POST http://localhost:8000/api/fleet/orders/7/assign-pickup-slot
 예시:
 
 ```bash
-curl -X PATCH http://localhost:8000/api/fleet/robots/AMR_1 \
+curl -X PATCH http://localhost:8000/api/fleet/robots/PICKY1 \
   -H "Content-Type: application/json" \
-  -d '{"status":"MOVING","current_task_id":12,"battery_level":84,"pos_x":1.2,"pos_y":0.4}'
+  -d '{"robot_status":"BUSY","picky_state":"MOVING_TO_PRODUCT","current_task_id":12,"battery_level":84,"pos_x":1.2,"pos_y":0.4,"pos_theta":0.0}'
 ```
 
 작업 이벤트 기록 예시:
@@ -360,7 +358,7 @@ curl -X PATCH http://localhost:8000/api/fleet/robots/AMR_1 \
 ```bash
 curl -X POST http://localhost:8000/api/fleet/tasks/12/events \
   -H "Content-Type: application/json" \
-  -d '{"robot_id":"AMR_1","to_status":"RUNNING","event_name":"STANDBY_UNLOAD_STARTED","reason":"AMR started moving to unloading standby zone"}'
+  -d '{"robot_name":"PICKY1","to_status":"RUNNING","event_name":"MOVE_TO_PRODUCT_STARTED","reason":"상품 보관 구역으로 이동 시작"}'
 ```
 
 예외 보고 예시:
@@ -368,14 +366,14 @@ curl -X POST http://localhost:8000/api/fleet/tasks/12/events \
 ```bash
 curl -X POST http://localhost:8000/api/fleet/exceptions \
   -H "Content-Type: application/json" \
-  -d '{"exception_type":"INSPECTION_FAIL","robot_id":"INSPECTION_COBOT","task_id":13,"order_id":7,"detail":"검수 결과가 주문과 일치하지 않음"}'
+  -d '{"exception_type":"INSPECTION_FAIL","robot_name":"COBOT1","task_id":13,"order_id":7,"detail":"검수 결과가 주문과 일치하지 않음"}'
 ```
 
 ## Troubleshooting
 
 ### `psql: command not found`
 
-Ubuntu/apt 환경이면 `web/scripts/setup.sh`가 PostgreSQL 설치를 시도합니다.  
+Ubuntu/apt 환경이면 `web/scripts/setup.sh`가 PostgreSQL 설치를 시도합니다.
 apt가 없는 환경이면 PostgreSQL을 수동 설치해야 합니다.
 
 ```bash
@@ -391,12 +389,12 @@ web/scripts/setup.sh
 
 ### `[sudo] password for ...`
 
-정상입니다. PostgreSQL 서비스 시작, DB/user 생성, schema 권한 설정에는 `sudo` 권한이 필요할 수 있습니다.  
+정상입니다. PostgreSQL 서비스 시작, DB/user 생성, schema 권한 설정에는 `sudo` 권한이 필요할 수 있습니다.
 현재 Ubuntu 계정 비밀번호를 입력하면 됩니다.
 
 ### `permission denied for schema public`
 
-PostgreSQL 15 이상에서 public schema 권한 때문에 생길 수 있습니다.  
+PostgreSQL 15 이상에서 public schema 권한 때문에 생길 수 있습니다.
 보통 `web/scripts/setup.sh`가 자동으로 처리합니다.
 
 수동으로 처리하려면:

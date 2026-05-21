@@ -35,9 +35,11 @@ TRUNCATE TABLE
   task_event,
   exception_log,
   task,
+  stocking_item,
   order_item,
   orders,
   robot,
+  robot_unit,
   pickup_slot,
   product,
   zone

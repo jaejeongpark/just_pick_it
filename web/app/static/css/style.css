@@ -969,10 +969,9 @@ body {
 
 .inventory-product-editor {
   display: grid;
-  grid-template-columns: minmax(150px, 1.2fr) 84px minmax(140px, 1fr) minmax(
-      160px,
-      1fr
-    ) auto auto;
+  grid-template-columns:
+    minmax(150px, 1.2fr) 84px minmax(140px, 1fr) minmax(160px, 1fr)
+    auto auto;
   align-items: center;
   gap: 8px;
 }
@@ -1430,6 +1429,21 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.brand-lockup:hover .brand-mark,
+.brand-lockup:focus-visible .brand-mark {
+  border-color: rgba(45, 212, 191, 0.72);
+  background: rgba(20, 184, 166, 0.18);
+}
+
+.brand-lockup:focus-visible {
+  outline: 2px solid rgba(45, 212, 191, 0.48);
+  outline-offset: 4px;
+  border-radius: 8px;
 }
 
 .brand-mark {
@@ -2076,16 +2090,13 @@ body {
   background: #a78bfa;
 }
 
-.robot-dot-amr2 {
+.robot-dot-amr2,
+.robot-dot-cobot2 {
   background: #f59e0b;
 }
 
 .robot-dot-cobot1 {
-  background: #22c55e;
-}
-
-.robot-dot-cobot2 {
-  background: #a78bfa;
+  background: #38bdf8;
 }
 
 .robot-dot-neutral {
@@ -2155,7 +2166,7 @@ body {
 
 .robot-table .admin-table-head,
 .robot-table-row {
-  grid-template-columns: 1.1fr 0.85fr 1.55fr 1.15fr 0.95fr;
+  grid-template-columns: 1.05fr 0.72fr 1fr minmax(0, 1.65fr) 1.05fr;
 }
 
 .task-table .admin-table-head,
@@ -2190,10 +2201,9 @@ body {
 
 .admin-console .exception-table .admin-table-head,
 .admin-console .exception-table-row {
-  grid-template-columns: minmax(112px, 0.72fr) minmax(72px, 0.5fr) minmax(
-      0,
-      2.5fr
-    ) minmax(92px, 0.62fr);
+  grid-template-columns:
+    minmax(112px, 0.72fr) minmax(72px, 0.5fr) minmax(0, 2.5fr)
+    minmax(92px, 0.62fr);
   column-gap: 20px;
 }
 
@@ -2628,10 +2638,9 @@ body {
 
 .work-detail-grid {
   display: grid;
-  grid-template-columns: minmax(160px, 0.8fr) minmax(220px, 1fr) minmax(
-      260px,
-      1.15fr
-    ) 160px;
+  grid-template-columns:
+    minmax(160px, 0.8fr) minmax(220px, 1fr) minmax(260px, 1.15fr)
+    160px;
   gap: 12px;
   min-height: 0;
 }
@@ -2824,10 +2833,6 @@ body {
   min-width: 54px;
 }
 
-.work-detail-task.is-planned {
-  opacity: 0.78;
-}
-
 .work-detail-task:disabled {
   cursor: default;
 }
@@ -2942,11 +2947,11 @@ body {
 }
 
 .robot-map-marker.robot-dot-cobot1 {
-  color: #22c55e;
+  color: #38bdf8;
 }
 
 .robot-map-marker.robot-dot-cobot2 {
-  color: #a78bfa;
+  color: #f59e0b;
 }
 
 .admin-console .section-band h2 {
@@ -4572,19 +4577,23 @@ body {
 .pickup-summary-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 10px;
+  gap: 5px;
+  margin-top: 6px;
 }
 
 .pickup-summary-item {
-  min-height: 52px;
-  padding: 8px 10px;
+  min-height: 45px;
+  padding: 4px 10px;
   border: 1px solid #2a3b52;
-  border-left: 4px solid #22c55e;
+  border-left: 2px solid #22c55e;
   border-radius: 6px;
   background: #101c2b;
   color: #dbe7f5;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font: inherit;
+  line-height: 1;
   text-align: left;
   cursor: pointer;
   transition:
@@ -4662,21 +4671,41 @@ body {
 
 .pickup-summary-item strong,
 .pickup-summary-item span {
-  display: block;
+  display: inline-block;
 }
 
 .pickup-summary-item strong {
   color: #ffffff;
-  font-size: 13px;
+  font-size: 8px;
   font-weight: 900;
+  line-height: 1;
 }
 
 .pickup-summary-item span {
-  margin-top: 3px;
+  margin-top: 0;
   color: #aebdd0;
-  font-size: 11px;
+  font-size: 8px;
   font-weight: 800;
+  line-height: 1;
 }
+.admin-console .pickup-summary-card .pickup-summary-item strong,
+.admin-console .pickup-summary-card .pickup-summary-item span {
+  display: inline-block;
+  line-height: 1;
+}
+
+.admin-console .pickup-summary-card .pickup-summary-item strong {
+  margin-top: 0;
+  color: #60a5fa;
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.admin-console .pickup-summary-card .pickup-summary-item span {
+  margin-top: 0;
+  font-size: 10px;
+}
+
 
 .ai-command-section {
   grid-column: 8 / span 5;
@@ -4840,23 +4869,42 @@ body {
 }
 
 .dashboard-grid .warehouse-map {
-  height: calc(100% - 50px);
+  height: calc(100% - 36px);
   min-height: 0;
   display: block;
   position: relative;
+  overflow: visible;
   background:
-    url("/static/img/minimap.png") 42% center / auto calc(100% - 16px) no-repeat,
+    url("/static/img/minimap.png") center / auto calc(100% - 10px)
+      no-repeat,
     #111827;
+}
+
+.dashboard-grid .warehouse-map .map-robot-layer {
+  inset: auto;
+  left: 50%;
+  top: 50%;
+  width: auto;
+  height: calc(100% - 10px);
+  aspect-ratio: 2 / 1;
+  transform: translate(-50%, -50%);
 }
 
 .dashboard-grid .warehouse-map .map-robot-legend {
   position: absolute;
-  top: 50%;
-  right: clamp(8px, 1.2vw, 18px);
-  transform: translateY(-50%);
-  width: 148px;
+  top: 12px;
+  right: 4px;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: auto;
+  min-width: 86px;
   margin: 0;
+  gap: 6px;
+  padding: 6px 8px;
 }
+
 
 .admin-console .robot-management-page {
   grid-template-columns: minmax(0, 1fr);
@@ -4903,10 +4951,9 @@ body {
 
 .robot-management-table .admin-table-head,
 .robot-management-table .robot-management-row {
-  grid-template-columns: minmax(130px, 1.15fr) 0.62fr 0.72fr 0.82fr minmax(
-      150px,
-      1.35fr
-    ) 0.95fr;
+  grid-template-columns:
+    minmax(130px, 1.08fr) 0.55fr 0.68fr 0.9fr 0.78fr minmax(150px, 1.35fr)
+    0.95fr;
 }
 
 .robot-management-row {
