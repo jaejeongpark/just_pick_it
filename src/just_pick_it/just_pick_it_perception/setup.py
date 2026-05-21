@@ -16,6 +16,7 @@ setup(
         (os.path.join('share', package_name, 'config'),
             glob('config/*.yaml') + glob('config/*.rviz')),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.xml')),
+        (os.path.join('share', package_name, 'result'), glob('result/*.yaml')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -34,6 +35,7 @@ setup(
             'camera_calibrator = just_pick_it_perception.camera_calibrator:main',
             'apriltag_pose_estimator = just_pick_it_perception.apriltag_pose_estimator:main',
             'apriltag_detector = just_pick_it_perception.apriltag_detector:main',
+            'apriltag_map_tf_publisher = just_pick_it_perception.apriltag_map_tf_publisher:main',
         ],
     },
 )
