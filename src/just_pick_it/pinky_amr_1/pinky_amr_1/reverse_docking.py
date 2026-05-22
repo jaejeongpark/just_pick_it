@@ -254,7 +254,11 @@ class ReverseDocking(Node):
     # ------------------------------------------------------------------ #
 
     def _phase1_lateral_prealign(self, marker_id: int) -> bool:
-        """tvec[0] 허용 범위 이내가 될 때까지 전진 아크로 횡방향 보정."""
+        """tvec[0] 허용 범위 이내가 될 때까지 아크로 횡방향 보정.
+
+        기본은 후진 아크. tvec[2] <= dock_switch_distance 에 도달하면
+        전진 아크로 전환하여 벽 충돌 없이 보정을 완료한다.
+        """
         deadline = time.time() + 10.0
 
         while time.time() < deadline:
@@ -270,16 +274,25 @@ class ReverseDocking(Node):
 
             tvec, _ = result
             lat_err = float(tvec[0])
+            dist    = float(tvec[2])
 
             if abs(lat_err) <= self._prealign_thresh:
                 self._stop()
                 self.get_logger().info(f"Phase 1: done — tvec[0]={lat_err:.3f} m")
                 return True
 
-            # 마커가 우측(lat_err > 0)이면 좌회전하며 전진
+            if dist <= self._switch_dist:
+                # 너무 가까워졌으면 전진 아크로 전환 (벽 충돌 방지)
+                lin = 0.04
+                ang = self._clamp(self._prealign_kp * lat_err)
+            else:
+                # 기본: 후진 아크 (부호 반전)
+                lin = -0.04
+                ang = self._clamp(-self._prealign_kp * lat_err)
+
             twist = Twist()
-            twist.linear.x = 0.04
-            twist.angular.z = self._clamp(-self._prealign_kp * lat_err)
+            twist.linear.x  = lin
+            twist.angular.z = ang
             self._cmd_pub.publish(twist)
             time.sleep(0.05)
 
