@@ -1,0 +1,14 @@
+world_frame: world
+family: tag36h11
+default_size_m: 0.15
+
+tags:
+  0:
+    group: PRODUCT_A
+    size_m: 0.15
+  1:
+    group: PRODUCT_B
+    size_m: 0.15
+  2:
+    group: PRODUCT_C
+    size_m: 0.15

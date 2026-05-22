@@ -1,0 +1,6 @@
+int32 apriltag_id
+int32 track_id
+---
+bool success
+int32 selected_track_id
+string message
