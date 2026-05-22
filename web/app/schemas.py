@@ -2,7 +2,6 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
 OrderStatus = Literal[
     "ORDER_RECEIVED",
     "ORDER_WAIT",
@@ -81,6 +80,7 @@ TaskType = Literal[
     "MOVE_TO_STORAGE",
     "STOCKING_PLACE",
     "RETURN_HOME",
+    "DOCK_IN",
     "CHARGE",
 ]
 
