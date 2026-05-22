@@ -19,7 +19,7 @@ from tf2_ros import Buffer, TransformListener
 from just_pick_it_interfaces.action import MoveCommand
 
 from pinky_amr_1.move_to_goal import MoveToGoal
-from pinky_amr_1.aruco_parking import ArucoParking
+from pinky_amr_1.reverse_docking import ReverseDocking
 
 
 # task_type → 이동 시작 시 전환할 picky_state
@@ -58,7 +58,7 @@ class StateManager(Node):
       Publisher     : /{ns}/picky_state   (std_msgs/String)
     """
 
-    def __init__(self, move_node: MoveToGoal, aruco_node: ArucoParking) -> None:
+    def __init__(self, move_node: MoveToGoal, aruco_node: ReverseDocking) -> None:
         super().__init__('state_manager')
 
         self.declare_parameter('server_base_url', 'http://192.168.4.1:8000')
@@ -299,7 +299,7 @@ def main(args=None) -> None:
     rclpy.init(args=args)
 
     move_node = MoveToGoal()
-    aruco_node = ArucoParking()
+    aruco_node = ReverseDocking()
     state_mgr = StateManager(move_node, aruco_node)
 
     executor = MultiThreadedExecutor(num_threads=4)

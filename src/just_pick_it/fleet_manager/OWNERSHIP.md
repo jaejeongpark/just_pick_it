@@ -97,7 +97,7 @@ FleetManagerNode  # 유일한 rclpy.Node
 | 모듈 | 위치 | 담당 |
 |---|---|---|
 | PICKY `state_manager.py` | `pinky_amr_1/` | **미정** |
-| PICKY `aruco_parking.py` | `pinky_amr_1/` | **박서우 담당** |
+| PICKY `reverse_docking.py` | `pinky_amr_1/` | **박서우 담당** |
 | PICKY `move_to_goal.py` | `pinky_amr_1/` | **이명제 담당** |
 | Control Server (FastAPI) | `web/` | **이명제 담당** |
 
