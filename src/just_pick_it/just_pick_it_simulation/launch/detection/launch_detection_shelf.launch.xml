@@ -6,8 +6,8 @@
   좌표 설계:
     arm base       (0.00,  0.00, 0.05)  mycobot.gazebo.launch.py 기본값
     shelf origin   (0.38,  0.00, 0.00)  선반 앞면 x=0.38, 팔 base와 0.30m 이상 간격
-    lower board top  z=0.15  제품 중심 z=0.20
-    upper board top  z=0.35  제품 중심 z=0.40
+    shelf ver2: 240mm wide x 100mm deep x 105mm tall (origin at bottom-center)
+    NOTE: 박스 및 AprilTag z 위치는 ver2 선반 형상에 맞게 별도 조정 필요
 
   카메라 토픽: /camera_head/color/image_raw  (mycobot_gazebo image_bridge)
 -->
@@ -43,9 +43,9 @@
         <arg name="z"                value="0.05"/>
     </include>
 
-    <!-- 소형 2단 선반: 앞면 x=0.38, 폭 0.40m, 깊이 0.20m, 높이 0.50m -->
+    <!-- ver2 선반: 폭 0.24m, 깊이 0.10m, 높이 0.105m, origin at bottom-center -->
     <node pkg="ros_gz_sim" exec="create" name="spawn_shelf" output="screen"
-          args="-name shelf_small -file $(find-pkg-share just_pick_it_simulation)/models/shelf_small/model.sdf -x 0.38 -y 0.0 -z 0.0">
+          args="-name shelf -file $(find-pkg-share just_pick_it_simulation)/models/shelf/model.sdf -x 0.38 -y 0.0 -z 0.0">
         <param name="use_sim_time" value="true"/>
     </node>
 

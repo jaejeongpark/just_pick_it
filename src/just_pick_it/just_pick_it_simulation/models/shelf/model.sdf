@@ -1,0 +1,77 @@
+<?xml version="1.0"?>
+<sdf version="1.8">
+  <model name="shelf">
+    <static>true</static>
+
+    <!--
+      Origin: bottom-center of assembled shelf
+      X axis: length direction (left-right)   -0.12 to +0.12 m
+      Y axis: depth direction (front-back)    -0.05 to +0.05 m
+      Z axis: height direction (up)            0.00 to +0.105 m
+
+      STL coordinate system (CATIA, mm):
+        X: -120 to +120
+        Y:    0 to +100
+        Z: -102.5 to +2.5  (bottom plate at Z -102.5 to -97.5, frame up to +2.5)
+
+      Mesh pose offset applied to each visual/collision:
+        z: +0.1025 m  (shifts STL bottom from Z=-102.5mm to Gazebo Z=0)
+        y: -0.05   m  (centers Y: STL 0-100mm to Gazebo -50 to +50mm)
+        scale: 0.001  (mm to m)
+    -->
+
+    <link name="link">
+
+      <visual name="top_visual">
+        <pose>0 -0.05 0.1025 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>model://shelf/meshes/ver2_top.stl</uri>
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+        <material>
+          <ambient>0.75 0.65 0.50 1</ambient>
+          <diffuse>0.75 0.65 0.50 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+        </material>
+      </visual>
+
+      <collision name="top_collision">
+        <pose>0 -0.05 0.1025 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>model://shelf/meshes/ver2_top.stl</uri>
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+      </collision>
+
+      <visual name="bottom_visual">
+        <pose>0 -0.05 0.1025 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>model://shelf/meshes/ver2_bottom.stl</uri>
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+        <material>
+          <ambient>0.75 0.65 0.50 1</ambient>
+          <diffuse>0.75 0.65 0.50 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+        </material>
+      </visual>
+
+      <collision name="bottom_collision">
+        <pose>0 -0.05 0.1025 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>model://shelf/meshes/ver2_bottom.stl</uri>
+            <scale>0.001 0.001 0.001</scale>
+          </mesh>
+        </geometry>
+      </collision>
+
+    </link>
+  </model>
+</sdf>
