@@ -22,14 +22,15 @@ class PathResult:
     reason: str | None = None
 
 
-# zone 이름 기반 인접 그래프.
-# 맵 상의 실제 노드와 엣지를 그대로 반영한다.
-#   - 상단 복도 T1~T3, 하단 복도 B1~B3 단차선 양방향
-#   - 우측 수직 복도 R1~R4 단차선 양방향
-#   - 각 열 내부 수직 통로: TRAFFIC_T(i) ↔ PZ_i ↔ PZ_(i+3) ↔ TRAFFIC_B(i)
+# zone 이름 기반 인접 그래프. docs/Traffic_node_graph.jpg 의 노드 배치를 반영한다.
+#   - 상단 복도 T1, T2, T3 과 하단 복도 B1, B2, B3 은 단차선 양방향
+#   - 좌측 수직 복도 TRAFFIC_L1 (상단), L2 (중간), L3 (하단) 도 단차선 양방향
+#   - 각 열 내부 수직 통로는 TRAFFIC_T(i) 와 PRODUCT_ZONE_i, PRODUCT_ZONE_(i+3),
+#     TRAFFIC_B(i) 로 이어진다
 #   - STANDBY_ZONE_1 은 STANDBY_ZONE_2 를 거쳐야만 외부로 진출 (안쪽 도크 안전)
-#   - STOCK_ZONE 은 TRAFFIC_T1 으로만 진출
-#   - STANDBY_ZONE_2 는 PZ_1, PZ_4 로 직접 진입 가능
+#   - STOCK_ZONE 은 TRAFFIC_L1 으로만 진출
+#   - STANDBY_ZONE_2 는 TRAFFIC_L2 를 거쳐 PRODUCT_ZONE_1, PRODUCT_ZONE_4 로 진입
+#   - PICKUP_ZONE_1 은 TRAFFIC_T3, PICKUP_ZONE_2 는 TRAFFIC_B3 와 직접 인접
 ZONE_GRAPH: dict[str, list[str]] = {
     # 좌측 충전 구역
     'CHARGING_DOCK_1': ['STANDBY_ZONE_1'],
@@ -37,41 +38,38 @@ ZONE_GRAPH: dict[str, list[str]] = {
 
     # 좌측 대기 구역
     'STANDBY_ZONE_1':  ['CHARGING_DOCK_1', 'STANDBY_ZONE_2'],
-    'STANDBY_ZONE_2':  ['CHARGING_DOCK_2', 'STANDBY_ZONE_1',
-                        'PRODUCT_ZONE_1', 'PRODUCT_ZONE_4'],
+    'STANDBY_ZONE_2':  ['CHARGING_DOCK_2', 'STANDBY_ZONE_1', 'TRAFFIC_L2'],
 
     # 좌측 재고 구역
-    'STOCK_ZONE':      ['TRAFFIC_T1'],
+    'STOCK_ZONE':      ['TRAFFIC_L1'],
+
+    # 좌측 수직 복도 (단차선 양방향)
+    'TRAFFIC_L1': ['STOCK_ZONE', 'TRAFFIC_T1', 'TRAFFIC_L2'],
+    'TRAFFIC_L2': ['TRAFFIC_L1', 'TRAFFIC_L3', 'STANDBY_ZONE_2',
+                   'PRODUCT_ZONE_1', 'PRODUCT_ZONE_4'],
+    'TRAFFIC_L3': ['TRAFFIC_L2', 'TRAFFIC_B1'],
 
     # 상단 복도 (단차선 양방향)
-    'TRAFFIC_T1': ['STOCK_ZONE', 'PRODUCT_ZONE_1', 'TRAFFIC_T2'],
-    'TRAFFIC_T2': ['TRAFFIC_T1', 'PRODUCT_ZONE_2', 'TRAFFIC_T3'],
-    'TRAFFIC_T3': ['TRAFFIC_T2', 'PRODUCT_ZONE_3', 'TRAFFIC_R1'],
+    'TRAFFIC_T1': ['TRAFFIC_L1', 'TRAFFIC_T2', 'PRODUCT_ZONE_1'],
+    'TRAFFIC_T2': ['TRAFFIC_T1', 'TRAFFIC_T3', 'PRODUCT_ZONE_2'],
+    'TRAFFIC_T3': ['TRAFFIC_T2', 'PRODUCT_ZONE_3', 'PICKUP_ZONE_1'],
 
     # 하단 복도 (단차선 양방향)
-    'TRAFFIC_B1': ['PRODUCT_ZONE_4', 'TRAFFIC_B2'],
-    'TRAFFIC_B2': ['TRAFFIC_B1', 'PRODUCT_ZONE_5', 'TRAFFIC_B3'],
-    'TRAFFIC_B3': ['TRAFFIC_B2', 'PRODUCT_ZONE_6', 'TRAFFIC_R4'],
+    'TRAFFIC_B1': ['TRAFFIC_L3', 'TRAFFIC_B2', 'PRODUCT_ZONE_4'],
+    'TRAFFIC_B2': ['TRAFFIC_B1', 'TRAFFIC_B3', 'PRODUCT_ZONE_5'],
+    'TRAFFIC_B3': ['TRAFFIC_B2', 'PRODUCT_ZONE_6', 'PICKUP_ZONE_2'],
 
-    # 상품 구역 (열 내부 수직 단차선 + 좌측 1열은 STANDBY_2 진입)
-    'PRODUCT_ZONE_1': ['TRAFFIC_T1', 'PRODUCT_ZONE_4', 'STANDBY_ZONE_2'],
+    # 상품 구역 (열 내부 수직 단차선, 좌측 1열은 TRAFFIC_L2 와도 인접)
+    'PRODUCT_ZONE_1': ['TRAFFIC_T1', 'PRODUCT_ZONE_4', 'TRAFFIC_L2'],
     'PRODUCT_ZONE_2': ['TRAFFIC_T2', 'PRODUCT_ZONE_5'],
     'PRODUCT_ZONE_3': ['TRAFFIC_T3', 'PRODUCT_ZONE_6'],
-    'PRODUCT_ZONE_4': ['TRAFFIC_B1', 'PRODUCT_ZONE_1', 'STANDBY_ZONE_2'],
+    'PRODUCT_ZONE_4': ['TRAFFIC_B1', 'PRODUCT_ZONE_1', 'TRAFFIC_L2'],
     'PRODUCT_ZONE_5': ['TRAFFIC_B2', 'PRODUCT_ZONE_2'],
     'PRODUCT_ZONE_6': ['TRAFFIC_B3', 'PRODUCT_ZONE_3'],
 
-    # 우측 수직 복도 (단차선 양방향)
-    'TRAFFIC_R1': ['TRAFFIC_T3', 'TRAFFIC_R2', 'PICKUP_ZONE_1'],
-    'TRAFFIC_R2': ['TRAFFIC_R1', 'TRAFFIC_R3', 'PICKUP_ZONE_2'],
-    'TRAFFIC_R3': ['TRAFFIC_R2', 'TRAFFIC_R4', 'PICKUP_ZONE_3'],
-    'TRAFFIC_R4': ['TRAFFIC_R3', 'TRAFFIC_B3', 'PICKUP_ZONE_4'],
-
-    # 우측 픽업 구역
-    'PICKUP_ZONE_1': ['TRAFFIC_R1'],
-    'PICKUP_ZONE_2': ['TRAFFIC_R2'],
-    'PICKUP_ZONE_3': ['TRAFFIC_R3'],
-    'PICKUP_ZONE_4': ['TRAFFIC_R4'],
+    # 우측 픽업 구역 (각 복도 끝에 1개씩)
+    'PICKUP_ZONE_1': ['TRAFFIC_T3'],
+    'PICKUP_ZONE_2': ['TRAFFIC_B3'],
 }
 
 # 이동 중인 상태: 해당 로봇의 경로 노드 + 엣지 모두 차단
@@ -95,53 +93,50 @@ DOCK_PRIORITY = [
     ('CHARGING_DOCK_2', 'STANDBY_ZONE_2'),  # 바깥쪽
 ]
 
-# SLAM 완료 전 임시 좌표. Traffic_node.pdf 의 노드 배치를 2m x 1m 맵에 추정 배치.
-# 원점은 좌하단 (x: 0 → 2.0 오른쪽, y: 0 → 1.0 위쪽).
-# 좌측 구역  : x ≈ 0.00 ~ 0.40
-# 중앙 구역  : x ≈ 0.40 ~ 1.55
-# 우측 구역  : x ≈ 1.55 ~ 2.00
+# SLAM 완료 전 임시 좌표. docs/Traffic_node_graph.jpg 의 노드 배치를 2m x 1m 맵에 추정 배치.
+# 원점은 좌하단 (x: 0 이 좌측, 2.0 이 우측. y: 0 이 하단, 1.0 이 상단).
+# 좌측 구역  : x 는 약 0.00 부터 0.45
+# 중앙 구역  : x 는 약 0.55 부터 1.50
+# 우측 구역  : x 는 약 1.70 부터 2.00
 # Control Server 의 /api/fleet/zones 응답이 있으면 그 값으로 덮어쓴다.
 DEFAULT_ZONE_COORDS: dict[str, tuple[float, float]] = {
     # 좌측 충전 구역 (도킹 위치)
-    'CHARGING_DOCK_1':  (0.13, 0.12),
-    'CHARGING_DOCK_2':  (0.30, 0.12),
+    'CHARGING_DOCK_1':  (0.10, 0.10),
+    'CHARGING_DOCK_2':  (0.27, 0.10),
 
     # 좌측 대기 구역 (도킹 진입 위치)
-    'STANDBY_ZONE_1':   (0.13, 0.38),
-    'STANDBY_ZONE_2':   (0.30, 0.38),
+    'STANDBY_ZONE_1':   (0.10, 0.40),
+    'STANDBY_ZONE_2':   (0.27, 0.40),
 
     # 좌측 재고 구역
-    'STOCK_ZONE':       (0.20, 0.85),
+    'STOCK_ZONE':       (0.18, 0.85),
 
-    # 상단 복도 (y ≈ 0.85)
-    'TRAFFIC_T1':       (0.60, 0.85),
-    'TRAFFIC_T2':       (0.95, 0.85),
-    'TRAFFIC_T3':       (1.30, 0.85),
+    # 좌측 수직 복도 (x 약 0.45)
+    'TRAFFIC_L1':       (0.45, 0.85),
+    'TRAFFIC_L2':       (0.45, 0.40),
+    'TRAFFIC_L3':       (0.45, 0.15),
 
-    # 하단 복도 (y ≈ 0.15)
-    'TRAFFIC_B1':       (0.60, 0.15),
-    'TRAFFIC_B2':       (0.95, 0.15),
-    'TRAFFIC_B3':       (1.30, 0.15),
+    # 상단 복도 (y 약 0.85)
+    'TRAFFIC_T1':       (0.70, 0.85),
+    'TRAFFIC_T2':       (1.05, 0.85),
+    'TRAFFIC_T3':       (1.40, 0.85),
+
+    # 하단 복도 (y 약 0.15)
+    'TRAFFIC_B1':       (0.70, 0.15),
+    'TRAFFIC_B2':       (1.05, 0.15),
+    'TRAFFIC_B3':       (1.40, 0.15),
 
     # 상품 구역 (열별로 위/아래 2개)
-    'PRODUCT_ZONE_1':   (0.60, 0.62),
-    'PRODUCT_ZONE_2':   (0.95, 0.62),
-    'PRODUCT_ZONE_3':   (1.30, 0.62),
-    'PRODUCT_ZONE_4':   (0.60, 0.38),
-    'PRODUCT_ZONE_5':   (0.95, 0.38),
-    'PRODUCT_ZONE_6':   (1.30, 0.38),
+    'PRODUCT_ZONE_1':   (0.70, 0.60),
+    'PRODUCT_ZONE_2':   (1.05, 0.60),
+    'PRODUCT_ZONE_3':   (1.40, 0.60),
+    'PRODUCT_ZONE_4':   (0.70, 0.35),
+    'PRODUCT_ZONE_5':   (1.05, 0.35),
+    'PRODUCT_ZONE_6':   (1.40, 0.35),
 
-    # 우측 수직 복도 (x ≈ 1.60)
-    'TRAFFIC_R1':       (1.60, 0.85),
-    'TRAFFIC_R2':       (1.60, 0.62),
-    'TRAFFIC_R3':       (1.60, 0.38),
-    'TRAFFIC_R4':       (1.60, 0.15),
-
-    # 우측 픽업 구역 (x ≈ 1.85)
-    'PICKUP_ZONE_1':    (1.85, 0.85),
-    'PICKUP_ZONE_2':    (1.85, 0.62),
-    'PICKUP_ZONE_3':    (1.85, 0.38),
-    'PICKUP_ZONE_4':    (1.85, 0.15),
+    # 우측 픽업 구역
+    'PICKUP_ZONE_1':    (1.80, 0.80),
+    'PICKUP_ZONE_2':    (1.80, 0.20),
 }
 
 
@@ -184,40 +179,16 @@ class TrafficManager:
     # ── 외부 인터페이스 (TaskManager 가 호출) ──────────────────────────
     #
     # 표준 흐름:
-    #   1. estimate_path() 로 후보 zone 들의 가능 여부/cost 를 미리 평가
-    #   2. reserve_path() 또는 reserve_return_home_path() 로 실제 경로 예약
-    #   3. update_path_progress() 로 waypoint 통과 시점마다 점유 해제
-    #   4. task 종료(SUCCESS/FAILED/CANCELLED/timeout) 시 release_path()
+    #   1. reserve_path() / reserve_nearest_from() / reserve_return_home_path()
+    #      중 하나로 경로를 예약한다. 평가와 예약은 단일 lock 안에서 atomic.
+    #   2. update_path_progress() 로 waypoint 통과 시점마다 점유 해제
+    #   3. task 종료(SUCCESS/FAILED/CANCELLED/timeout) 시 release_path()
+    #
+    # 후보 상품 중 가장 가까운 zone 선정도 TrafficManager 책임이며
+    # reserve_nearest_from() 이 평가와 예약을 한 번에 처리한다.
     #
     # 한 robot 은 한 시점에 최대 1개의 reserve 만 보유한다.
     # 도크 점유는 notify_state(CHARGING -> 타상태) 에서 자동 해제된다.
-
-    def estimate_path(
-        self,
-        robot_id: str,
-        source_zone: str,
-        target_zone: str,
-    ) -> PathResult:
-        """예약 없이 현재 traffic 기준 경로 가능 여부와 cost 만 반환한다.
-
-        상품 후보 선정 등 평가 단계에서 사용한다.
-        다음 순간 다른 로봇이 점유할 수 있으므로 100% 보장이 아니며,
-        실제 실행 직전에 reserve_path() 로 확정해야 한다.
-        """
-        with self._lock:
-            blocked_nodes, blocked_edges = self._build_blocked_sets(robot_id)
-            path = self._bfs(source_zone, target_zone, blocked_nodes, blocked_edges)
-
-        if path is None:
-            return PathResult(
-                ok=False,
-                reason=f'no path: {source_zone} -> {target_zone}',
-            )
-        return PathResult(
-            ok=True,
-            waypoints=tuple(path),
-            cost=float(len(path) - 1),
-        )
 
     def reserve_path(
         self,
@@ -264,15 +235,26 @@ class TrafficManager:
     def reserve_nearest_from(
         self,
         robot_id: str,
-        task_id: int,
+        task_id: int | None,
         source_zone: str,
-        candidates: list[str],
+        candidates: dict[str, int],
     ) -> PathResult:
         """candidates 중 reserve 가능하고 cost 가 가장 낮은 zone 을 atomic 하게 예약한다.
 
-        TaskManager 가 남은 상품 zone 리스트를 그대로 넘기면 한 번의 호출로
+        candidates 는 {zone_name: 상품 수량} 매핑이다. TaskManager 가 남은
+        상품 목록을 zone 단위로 집계한 dict 을 그대로 넘기면 한 번의 호출로
         평가 + 선정 + 예약이 끝난다. 선택된 zone 은 PathResult.waypoints[-1].
-        호출자는 zone -> 도메인 객체(상품 등) 매핑을 자체적으로 보유해야 한다.
+        호출자는 zone -> 도메인 객체(상품) 매핑을 자체적으로 보유해야 한다.
+
+        같은 zone 에 상품이 여러 개여도 픽업 자체는 한 번이므로
+        TrafficManager 는 zone 이름만 사용하고 수량 값은 참고하지 않는다.
+        수량을 받는 이유는 TaskManager 측 자료구조를 변환 없이 그대로
+        넘길 수 있도록 하기 위한 것뿐이다.
+
+        task_id 는 None 으로 호출할 수 있다. MOVE_TO_PRODUCT 의 첫 호출처럼
+        path 가 먼저 결정돼야 task INSERT 가 가능 (= task_id 도 그때 발행)
+        인 흐름에서 None 으로 호출해 path 만 받고, INSERT 후 발행된
+        task_id 를 attach_task_id() 로 사후 연결한다.
 
         평가와 예약을 단일 lock 안에서 원자적으로 수행하여, 평가 결과를 보고
         예약하는 사이에 다른 로봇이 점유하는 race 를 차단한다.
@@ -314,6 +296,36 @@ class TrafficManager:
             waypoints=tuple(best_path),
             cost=best_cost,
         )
+
+    def attach_task_id(self, robot_id: str, task_id: int) -> bool:
+        """task INSERT 후 발행된 task_id 를 현재 임시 예약에 사후 연결한다.
+
+        호출 전제: reserve_nearest_from(task_id=None) 으로 path 가 등록돼 있고
+        _robot_reservations[robot_id] 가 None 인 상태.
+
+        성공 시 True. 이미 다른 task_id 가 연결돼 있거나 임시 예약 path 자체가
+        없으면 False 와 함께 warn 로그.
+        """
+        with self._lock:
+            current = self._robot_reservations.get(robot_id)
+            if current is not None:
+                self._node.get_logger().warn(
+                    f'[TrafficManager] {robot_id} attach_task_id({task_id}) '
+                    f'무시: 이미 task={current} 가 연결되어 있음'
+                )
+                return False
+            if not self._robot_paths.get(robot_id):
+                self._node.get_logger().warn(
+                    f'[TrafficManager] {robot_id} attach_task_id({task_id}) '
+                    f'무시: 임시 예약된 path 가 없음'
+                )
+                return False
+            self._robot_reservations[robot_id] = task_id
+
+        self._node.get_logger().info(
+            f'[TrafficManager] {robot_id} task_id 연결: {task_id}'
+        )
+        return True
 
     def reserve_return_home_path(
         self,
@@ -391,25 +403,43 @@ class TrafficManager:
             if 0 < current_waypoint_index < len(path):
                 self._robot_paths[robot_id] = path[current_waypoint_index:]
 
-    def release_path(self, robot_id: str, task_id: int) -> None:
+    def release_path(self, robot_id: str, task_id: int | None) -> None:
         """task 종료(SUCCESS/FAILED/CANCELLED/timeout) 시 경로 예약을 해제한다.
 
-        task_id 가 현재 예약과 일치하지 않으면 stale release 로 간주하고
-        무시한다. 도크 점유는 별도이며, picky_state 의 CHARGING 이탈 시점에
+        task_id 의 의미:
+          - 정상 케이스: 현재 예약의 task_id 와 일치해야 해제. 다르면 stale
+            release 로 간주하고 warn 로그 후 무시.
+          - None: 현재 예약이 task_id 미배정 상태(reserve_nearest_from(task_id=None)
+            직후, attach_task_id 호출 전) 일 때만 임시 예약 path 를 해제.
+            이미 task_id 가 연결된 상태라면 warn 후 무시한다.
+
+        도크 점유는 별도이며, picky_state 의 CHARGING 이탈 시점에
         notify_state() 가 자동 해제한다.
         """
         with self._lock:
             current_task = self._robot_reservations.get(robot_id)
-            if current_task is None:
-                return
-            if current_task != task_id:
-                self._node.get_logger().warn(
-                    f'[TrafficManager] {robot_id} release_path(task={task_id}) '
-                    f'무시: 현재 예약 task={current_task}'
-                )
-                return
-            self._robot_paths[robot_id] = []
-            self._robot_reservations[robot_id] = None
+            if task_id is None:
+                # 임시 예약 해제: 현재 task_id 미배정 상태일 때만 동작
+                if current_task is not None:
+                    self._node.get_logger().warn(
+                        f'[TrafficManager] {robot_id} release_path(None) 무시: '
+                        f'task={current_task} 가 연결되어 있음'
+                    )
+                    return
+                if not self._robot_paths.get(robot_id):
+                    return
+                self._robot_paths[robot_id] = []
+            else:
+                if current_task is None:
+                    return
+                if current_task != task_id:
+                    self._node.get_logger().warn(
+                        f'[TrafficManager] {robot_id} release_path(task={task_id}) '
+                        f'무시: 현재 예약 task={current_task}'
+                    )
+                    return
+                self._robot_paths[robot_id] = []
+                self._robot_reservations[robot_id] = None
 
         self._node.get_logger().info(
             f'[TrafficManager] {robot_id} task={task_id} 경로 해제'
@@ -509,8 +539,17 @@ class TrafficManager:
         exclude_robot_id: str,
     ) -> tuple[set[str], set[tuple[str, str]]]:
         """
-        exclude_robot_id 를 제외한 다른 로봇의 상태와 경로를 기반으로
+        exclude_robot_id 를 제외한 다른 로봇의 path 와 상태를 기반으로
         차단 노드 집합과 차단 엣지 집합을 생성한다.
+
+        path 가 등록되어 있으면 (picky_state 무관) 그 path 의 노드와 엣지를
+        차단한다. reserve_* 성공 자체가 "이 로봇이 곧 그 path 를 점유" 라는
+        약속이므로, picky_state 가 MOVING 으로 갱신되기 전 race window 도
+        자연히 닫힌다.
+
+        예외: state 가 OCCUPYING_STATES (WAITING_FOR_COBOT 등) 면 이미 도착해
+        작업 중이므로 path[-1] (현재 머무는 노드) 만 차단하고 경유 노드는
+        풀어준다.
         """
         blocked_nodes: set[str] = set()
         blocked_edges: set[tuple[str, str]] = set()
@@ -520,15 +559,14 @@ class TrafficManager:
                 continue
 
             path = self._robot_paths.get(robot_id, [])
+            if not path:
+                continue
 
-            if state in MOVING_STATES and path:
-                # 이동 중: 경로 전체 노드 + 엣지 차단
+            if state in OCCUPYING_STATES:
+                blocked_nodes.add(path[-1])
+            else:
                 blocked_nodes.update(path)
                 for i in range(len(path) - 1):
                     blocked_edges.add((path[i], path[i + 1]))
-
-            elif state in OCCUPYING_STATES and path:
-                # 목적지에서 작업 중: 해당 노드만 차단
-                blocked_nodes.add(path[-1])
 
         return blocked_nodes, blocked_edges

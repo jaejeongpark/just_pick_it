@@ -37,37 +37,47 @@ class PathResult:
 
 ## 메서드 명세
 
-### `estimate_path(robot_id, source_zone, target_zone) -> PathResult`
-
-예약 없이 현재 traffic 기준 경로 가능 여부와 비용만 계산.
-
-- **사용처**: 상품 후보 선정 등 평가 단계.
-- **보장 수준**: 다음 순간 다른 로봇이 점유할 수 있어 100% 보장이 아님.
-  실제 실행 직전에는 반드시 `reserve_path`로 재확정.
-- **부수효과**: 없음 (read-only).
-
 ### `reserve_path(robot_id, task_id, source_zone, target_zone) -> PathResult`
 
-경로를 계산하고 내부 예약 레지스트리에 등록.
+목적지가 단일 zone 으로 정해진 이동에 사용. 경로를 계산하고 내부 예약
+레지스트리에 등록한다 (예: MOVE_TO_PICKUP, MOVE_TO_STORAGE).
 
 - **원자성**: BFS + 등록을 단일 lock 안에서 수행.
 - **중복 예약**: 한 로봇이 이미 예약을 보유 중이면 그 예약을 덮어쓴다.
   일반적으로는 `release_path` 후 호출하는 것이 안전.
-- **실패 시**: `PathResult(ok=False, reason=...)` 반환. 호출자는 다른 후보를
-  시도하거나 잠시 대기 후 재시도.
+- **실패 시**: `PathResult(ok=False, reason=...)` 반환. 호출자는 잠시 대기 후 재시도.
 
 ### `reserve_nearest_from(robot_id, task_id, source_zone, candidates) -> PathResult`
 
-`candidates` 중 reserve 가능하고 cost가 가장 낮은 zone을 atomic하게 예약한다.
+`candidates` 중 reserve 가능하고 cost 가 가장 낮은 zone 을 atomic 하게 예약한다.
+후보가 여럿인 이동(예: MOVE_TO_PRODUCT) 에서 평가 + 선정 + 예약을 한 호출에 끝낸다.
 
-- **사용처**: TaskManager가 주문에 남은 상품 zone 리스트를 그대로 넘기는 경우.
-  평가 + 선정 + 예약을 한 호출에서 끝낸다.
-- **원자성**: 평가와 예약을 단일 lock 안에서 수행 → estimate 결과를 보고 reserve
-  하는 사이에 다른 로봇이 점유하는 race를 차단한다.
+- **`task_id` 타입**: `int | None`. MOVE_TO_PRODUCT 의 첫 호출처럼 "path 가
+  먼저 결정돼야 task INSERT 가 가능 (= task_id 도 그때 발행)" 인 흐름에서는
+  `None` 으로 호출해 path 만 받고, INSERT 후 발행된 task_id 를
+  `attach_task_id()` 로 사후 연결한다.
+- **`candidates` 형식**: `dict[str, int]` — `{zone_name: 상품 수량}` 매핑.
+  TaskManager 가 보유한 매핑을 변환 없이 그대로 넘길 수 있도록 dict 형태로 받는다.
+  같은 zone 의 상품이 여러 개여도 픽업은 한 번이므로 TrafficManager 는 key 만
+  사용하고 value (수량) 는 참고하지 않는다.
+- **원자성**: 평가와 예약을 단일 lock 안에서 수행 → 평가 결과를 보고 예약하는
+  사이에 다른 로봇이 점유하는 race 를 차단한다.
 - **선택된 zone 확인**: `result.waypoints[-1]`.
-- **상품 도메인은 모름**: `candidates`는 단순 zone_name 리스트. 호출자(TaskManager)가
-  zone → 도메인 객체(상품 등) 매핑을 자체적으로 보유한다.
+- **상품 도메인은 모름**: 호출자(TaskManager) 가 zone → 도메인 객체(상품) 매핑을
+  자체적으로 보유한다.
 - **모든 후보 차단 시**: `PathResult(ok=False, reason='all candidates blocked')`.
+
+### `attach_task_id(robot_id, task_id) -> bool`
+
+`reserve_nearest_from(task_id=None)` 으로 등록된 임시 예약 path 에 task INSERT
+후 발행된 `task_id` 를 사후 연결한다.
+
+- **전제**: `_robot_reservations[robot_id]` 가 `None` 이고 path 가 등록되어
+  있는 상태 (즉 직전에 `reserve_nearest_from(task_id=None, ...)` 가 성공한 직후).
+- **반환**: 성공 시 `True`, 실패 시 `False` (warn 로그).
+- **실패 케이스**: 이미 다른 `task_id` 가 연결되어 있거나 (실수 호출) 임시
+  예약된 path 자체가 없는 경우.
+- **호출 시점**: TaskManager 가 task DB INSERT 로 `task_id` 를 받은 직후.
 
 ### `reserve_return_home_path(robot_id, task_id, source_zone) -> PathResult`
 
@@ -90,10 +100,15 @@ RETURN_HOME 전용. 비어있는 충전 도크를 안쪽 우선으로 선택해 
 
 ### `release_path(robot_id, task_id) -> None`
 
-task 종료 시 경로 예약을 해제.
+task 종료 시 경로 예약을 해제. `task_id` 타입은 `int | None`.
 
 - **호출 시점**: task가 SUCCESS / FAILED / CANCELLED / timeout 으로 종료될 때.
-- **stale 호출**: `task_id`가 현재 예약과 다르면 무시하고 warn 로그.
+- **`task_id` 가 int 인 경우 (정상)**: 현재 예약의 task_id 와 일치해야 해제.
+  다르면 stale release 로 간주하고 warn 로그 후 무시.
+- **`task_id` 가 None 인 경우**: 현재 예약이 task_id 미배정 상태일 때만 임시
+  예약 path 를 해제. `reserve_nearest_from(task_id=None)` 후 `attach_task_id`
+  호출 전에 task DB INSERT 가 실패한 경우 같은 임시 예약 정리용. 이미 task_id
+  가 연결된 상태면 warn 로그 후 무시.
 - **도크 점유**: 별도. picky_state 변화로 자동 해제됨 (아래 참고).
 
 ### `notify_state(robot_id, state) -> None`
@@ -121,9 +136,13 @@ OCCUPYING_STATES = {
 }
 ```
 
-- `MOVING_STATES`: 해당 로봇의 경로 전체 노드 + 엣지가 다른 로봇에게 차단됨.
-- `OCCUPYING_STATES`: 마지막 노드(목적지)만 차단됨.
-- 그 외 상태(`STANDBY`, `CHARGING`, `IDLE`, `ERROR_RECOVERY` 등): 어떤 노드도 차단하지 않음.
+- **path 가 등록되어 있고 state ∈ `OCCUPYING_STATES`**: 마지막 노드(현재 머무는
+  노드) 만 차단됨. 경유 노드는 풀어줌.
+- **path 가 등록되어 있고 그 외 모든 state**: 경로 전체 노드 + 엣지가 다른
+  로봇에게 차단됨. 여기에는 `STANDBY` 같은 idle 상태도 포함된다 — reserve_\*
+  성공 자체가 "이 로봇이 곧 path 를 점유" 라는 약속이므로, picky_state 가
+  MOVING 으로 갱신되기 전 짧은 윈도우에도 path 가 차단된다.
+- **path 가 등록되지 않은 경우**: 어떤 노드도 차단하지 않음.
 
 ### 도메인 제약: 노드 점유 단일성
 
@@ -150,47 +169,65 @@ traffic.update_path_progress('PICKY1', task_id=42, current_waypoint_index=i)
 traffic.release_path('PICKY1', task_id=42)
 ```
 
-### 패턴 2. 후보 중 최적 선정 (MOVE_TO_PRODUCT 등)
+### 패턴 2. 후보 중 최적 선정 + task_id 사후 발행 (MOVE_TO_PRODUCT)
+
+TaskManager 의 흐름: 주문 큐에서 배정받은 직후, task 가 아직 INSERT 되지
+않아 `task_id` 가 없다. MOVE_TO_PRODUCT 를 실행하려면 어느 PD 로 갈지 결정해야
+하는데 그건 `reserve_nearest_from` 결과로 정해진다. 즉 reserve → INSERT 순서.
 
 ```python
-# TaskManager 가 보유한 zone -> 상품 매핑
+# TaskManager 가 보유한 zone -> 상품 매핑 (도메인 객체)
 zone_to_item = {
     'PRODUCT_ZONE_2': item_A,
     'PRODUCT_ZONE_3': item_C,
     'PRODUCT_ZONE_5': item_B,
 }
 
-# 한 호출로 평가 + 선정 + 예약
+# TrafficManager 에 넘길 후보 dict: zone -> 상품 수량
+candidates = {
+    'PRODUCT_ZONE_2': 1,
+    'PRODUCT_ZONE_3': 2,
+    'PRODUCT_ZONE_5': 1,
+}
+
+# 1. task_id 가 아직 없는 상태로 임시 예약 (path 만 결정)
 result = traffic.reserve_nearest_from(
-    'PICKY1', task_id=42, current_zone, list(zone_to_item.keys())
+    'PICKY1', None, current_zone, candidates
 )
 if not result.ok:
     # 모든 후보 차단 — 잠시 대기 후 재시도
-    ...
+    return
 
-# 선택된 zone 으로부터 상품 역추적
 selected_zone = result.waypoints[-1]
 selected_item = zone_to_item[selected_zone]
 
-# 이후는 패턴 1 과 동일하게 update_path_progress / release_path
+# 2. selected_zone 으로 task DB INSERT → task_id 발행
+task_id = control_server.create_move_to_product(
+    unit_id='PICKY1', target_zone=selected_zone, item=selected_item, ...
+)
+
+# 3. 발행된 task_id 를 임시 예약에 사후 연결
+if not traffic.attach_task_id('PICKY1', task_id):
+    # 매우 드문 경우: 임시 예약이 사라졌거나 다른 task 가 연결됨
+    # → control_server.delete_task(task_id) 등 보상 처리
+    return
+
+# 4. 이후 update_path_progress / release_path 는 task_id 로 호출 (패턴 1 과 동일)
 ```
 
-### 패턴 3. 예약 없이 평가만 (우선순위 정렬 등)
+INSERT 가 실패해서 task_id 가 발행되지 못한 경우:
 
 ```python
-# 후보들의 cost 만 알고 싶을 때
-costs = {}
-for zone in candidates:
-    r = traffic.estimate_path('PICKY1', current_zone, zone)
-    if r.ok:
-        costs[zone] = r.cost
-# costs 를 다른 휴리스틱과 결합해서 최종 결정
+result = traffic.reserve_nearest_from('PICKY1', None, current_zone, candidates)
+try:
+    task_id = control_server.create_move_to_product(...)
+except DBError:
+    # 임시 예약 정리 (task_id 없이 해제)
+    traffic.release_path('PICKY1', None)
+    raise
 ```
 
-> 평가 후 실제 실행 시점에는 반드시 `reserve_path` 또는 `reserve_nearest_from`
-> 으로 재확정해야 한다. estimate 결과는 다음 순간 무효해질 수 있다.
-
-### 패턴 4. RETURN_HOME
+### 패턴 3. RETURN_HOME
 
 ```python
 result = traffic.reserve_return_home_path('PICKY1', task_id=99, current_zone)
@@ -205,9 +242,9 @@ traffic.release_path('PICKY1', task_id=99)
 ## 동시성 보장
 
 - 모든 BFS, 예약, 해제는 단일 `self._lock` 안에서 원자적으로 수행됨.
-- 두 로봇이 동시에 `reserve_path`를 호출해도 한 쪽만 성공하고
-  다른 쪽은 갱신된 점유 상태를 본다.
-- `estimate_path`는 read-only이므로 동시 호출 가능.
+- 두 로봇이 동시에 `reserve_path` / `reserve_nearest_from` /
+  `reserve_return_home_path` 를 호출해도 한 쪽만 성공하고 다른 쪽은 갱신된
+  점유 상태를 본다.
 
 ## 알려진 한계
 
@@ -221,11 +258,6 @@ traffic.release_path('PICKY1', task_id=99)
    - 현재는 hop 수. zone 간 실제 거리가 다르면 부정확.
    - 필요 시 유클리드 거리 합으로 교체 (`_zone_coords` 활용).
 
-3. **상품 후보 evaluation race**
-   - `estimate_path` 결과로 선정한 후보를 `reserve_path` 호출 시점에
-     다른 로봇이 점유해버릴 수 있다.
-   - 호출자(TaskManager)가 실패 시 다음 후보로 재시도하는 로직 필수.
-
 ## 변경 이력
 
 - 2026-05-21: 초안. `find_path` 계열 제거, `estimate_path` / `reserve_path` /
@@ -236,3 +268,23 @@ traffic.release_path('PICKY1', task_id=99)
   넘기면 되므로 race 와 호출 횟수 모두 감소.
 - 2026-05-21: BFS 의 "목적지 차단 무시" 정책 제거. 도메인 제약상 같은 노드에
   두 로봇이 동시에 머무를 수 없으므로 차단된 노드는 목적지여도 도달 불가.
+- 2026-05-22: `estimate_path` 제거. 후보 평가+선정+예약을 `reserve_nearest_from`
+  이 atomic 하게 처리하므로 평가 전용 API 가 더 이상 필요하지 않다.
+  "estimate 결과로 선정 후 reserve 사이에 다른 로봇이 점유" race 도 함께 사라짐.
+- 2026-05-22: `reserve_nearest_from` 의 `candidates` 타입을 `list[str]` 에서
+  `dict[str, int]` (`{zone_name: 상품 수량}`) 로 변경. TaskManager 측 자료구조를
+  변환 없이 그대로 넘기기 위함. TrafficManager 는 key 만 사용한다.
+- 2026-05-22: `docs/Traffic_node_graph.jpg` 의 새 맵 토폴로지 반영. 좌측 수직 복도
+  `TRAFFIC_L1`/`L2`/`L3` 추가, 우측 수직 복도 `TRAFFIC_R1~R4` 와
+  `PICKUP_ZONE_3`/`_4` 제거. `STOCK_ZONE` 진출이 `TRAFFIC_L1` 으로 변경되고
+  `STANDBY_ZONE_2` 와 `PRODUCT_ZONE_1`/`_4` 사이에 `TRAFFIC_L2` 가 끼어 hop 1
+  거리가 hop 2 로 늘어남. `PICKUP_ZONE_1` 은 `TRAFFIC_T3`, `PICKUP_ZONE_2` 는
+  `TRAFFIC_B3` 와 직접 인접.
+- 2026-05-22: `reserve_nearest_from` 의 `task_id` 를 `int | None` 으로 확장.
+  task_id 가 task INSERT 시점에 비로소 발행되는 흐름(MOVE_TO_PRODUCT) 을
+  지원. 새 메서드 `attach_task_id(robot_id, task_id)` 신설 — 임시 예약 path 에
+  사후 발행된 task_id 를 연결. `release_path` 에서도 task_id=None 허용 (임시
+  예약 정리용).
+- 2026-05-22: `_build_blocked_sets` 정책 변경. picky_state 와 무관하게 path 가
+  등록되어 있으면 차단 (단 OCCUPYING_STATES 면 path[-1] 만). reserve 직후
+  picky_state 가 MOVING 으로 갱신되기 전의 race window 가 닫힘.
