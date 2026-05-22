@@ -36,6 +36,10 @@ setup(
             'apriltag_pose_estimator = just_pick_it_perception.apriltag_pose_estimator:main',
             'apriltag_detector = just_pick_it_perception.apriltag_detector:main',
             'apriltag_map_tf_publisher = just_pick_it_perception.apriltag_map_tf_publisher:main',
+            'detection_tracker = just_pick_it_perception.detection_tracker_node:main',
+            'target_manager = just_pick_it_perception.target_manager_node:main',
+            'udp_image_sender = just_pick_it_perception.udp_image_sender_node:main',
+            'udp_image_receiver = just_pick_it_perception.udp_image_receiver:main',
         ],
     },
 )
