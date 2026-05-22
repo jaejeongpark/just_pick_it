@@ -81,12 +81,22 @@ class PathResult:
 
 ### `reserve_return_home_path(robot_id, task_id, source_zone) -> PathResult`
 
-RETURN_HOME 전용. 비어있는 충전 도크를 안쪽 우선으로 선택해 예약.
+RETURN_HOME 전용. `STANDBY_ZONE_1` / `STANDBY_ZONE_2` 중 BFS 비용이 가장 낮은 곳으로 경로를 예약한다.
+
+- **도크 예약 없음**: 도크 점유는 하지 않는다. 도크 예약은 이후 DOCK_IN task 시작 시
+  `reserve_dock_path()` 로 별도 수행한다.
+- **반환 의미**: `waypoints[-1]`이 도착 STANDBY_ZONE.
+- **모든 standby zone 차단 시**: `PathResult(ok=False, reason='no path to standby zone')`.
+
+### `reserve_dock_path(robot_id, task_id, source_zone) -> PathResult`
+
+DOCK_IN 전용. 빈 충전 도크를 안쪽 우선으로 선택해 경로 + 도크를 예약한다.
 
 - **도크 우선순위**: `CHARGING_DOCK_1` (안쪽) → `CHARGING_DOCK_2` (바깥쪽).
-- **반환 의미**: `waypoints[-1]`이 도착 STANDBY_ZONE.
-  도킹 자체는 State Manager가 별도로 수행한다.
-- **모든 도크 점유 시**: `PathResult(ok=False, reason='no available charging dock')`.
+- **원자성**: 도크 선정과 경로/도크 예약을 단일 lock 안에서 수행.
+- **반환 의미**: `waypoints[-1]`이 목적지 `CHARGING_DOCK`.
+  실제 도킹 동작(ArUco 등)은 State Manager가 별도로 수행한다.
+- **모든 도크 점유 또는 경로 없음**: `PathResult(ok=False, reason='no available charging dock')`.
 
 ### `update_path_progress(robot_id, task_id, current_waypoint_index) -> None`
 
@@ -232,11 +242,24 @@ except DBError:
 ```python
 result = traffic.reserve_return_home_path('PICKY1', task_id=99, current_zone)
 if not result.ok:
-    # 모든 도크 점유 — 잠시 대기 또는 STANDBY 유지
+    # 모든 standby zone 차단 — 잠시 대기 후 재시도
     ...
 target_standby = result.waypoints[-1]
 # Task 종료 시
 traffic.release_path('PICKY1', task_id=99)
+```
+
+### 패턴 4. DOCK_IN
+
+```python
+result = traffic.reserve_dock_path('PICKY1', task_id=100, current_zone)
+if not result.ok:
+    # 모든 도크 점유 또는 경로 없음 — 잠시 대기 후 재시도
+    ...
+target_dock = result.waypoints[-1]  # CHARGING_DOCK_1 또는 CHARGING_DOCK_2
+# Task 종료 시 (도킹 성공/실패 무관)
+traffic.release_path('PICKY1', task_id=100)
+# 도크 점유는 picky_state 가 CHARGING 에서 이탈할 때 notify_state() 가 자동 해제
 ```
 
 ## 동시성 보장
@@ -248,10 +271,10 @@ traffic.release_path('PICKY1', task_id=99)
 
 ## 알려진 한계
 
-1. **RETURN_HOME 실패 시 도크 leak 가능성**
-   - 로봇이 STANDBY_ZONE 도달 전에 task가 FAILED/CANCELLED 되면
+1. **DOCK_IN 실패 시 도크 leak 가능성**
+   - 로봇이 CHARGING_DOCK 도달 전에 task 가 FAILED/CANCELLED 되면
      `_robot_dock` 예약은 `release_path` 만으로는 해제되지 않는다.
-   - 현재는 picky_state가 CHARGING 으로 전환되지 않으면 도크 점유가 남는다.
+   - 현재는 picky_state 가 CHARGING 으로 전환되지 않으면 도크 점유가 남는다.
    - 대응: 명시적 `release_dock` API 필요 시 후속 추가.
 
 2. **`cost` 의 단위**
@@ -288,3 +311,7 @@ traffic.release_path('PICKY1', task_id=99)
 - 2026-05-22: `_build_blocked_sets` 정책 변경. picky_state 와 무관하게 path 가
   등록되어 있으면 차단 (단 OCCUPYING_STATES 면 path[-1] 만). reserve 직후
   picky_state 가 MOVING 으로 갱신되기 전의 race window 가 닫힘.
+- 2026-05-23: DOCK_IN task 분리 반영. `reserve_return_home_path` 에서 도크 예약 제거
+  (STANDBY_ZONE 도착까지만 담당). `reserve_dock_path` 신설 — DOCK_IN 시작 시
+  TaskManager 가 호출하여 도크 예약 + CHARGING_DOCK 까지의 경로를 원자적으로 수행.
+  `STANDBY_ZONES` 상수 추가.

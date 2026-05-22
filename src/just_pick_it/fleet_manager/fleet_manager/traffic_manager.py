@@ -93,6 +93,9 @@ DOCK_PRIORITY = [
     ('CHARGING_DOCK_2', 'STANDBY_ZONE_2'),  # 바깥쪽
 ]
 
+# RETURN_HOME 의 목적지 후보. BFS 비용 최소 zone 을 선택한다.
+STANDBY_ZONES: list[str] = ['STANDBY_ZONE_1', 'STANDBY_ZONE_2']
+
 # SLAM 완료 전 임시 좌표. docs/Traffic_node_graph.jpg 의 노드 배치를 2m x 1m 맵에 추정 배치.
 # 원점은 좌하단 (x: 0 이 좌측, 2.0 이 우측. y: 0 이 하단, 1.0 이 상단).
 # 좌측 구역  : x 는 약 0.00 부터 0.45
@@ -333,13 +336,62 @@ class TrafficManager:
         task_id: int,
         source_zone: str,
     ) -> PathResult:
-        """RETURN_HOME 전용. 비어있는 충전 도크를 안쪽 우선으로 선택해 예약한다.
+        """RETURN_HOME 전용. STANDBY_ZONE 중 BFS 비용이 가장 낮은 곳으로 경로를 예약한다.
+
+        도크는 예약하지 않는다. 도크 예약은 이후 DOCK_IN task 시작 시
+        reserve_dock_path() 로 별도 수행한다.
+
+        반환되는 PathResult.waypoints 의 마지막 zone 이 목적지 STANDBY_ZONE 이다.
+        """
+        best_path: list[str] | None = None
+        best_zone: str | None = None
+        best_cost = float('inf')
+
+        with self._lock:
+            blocked_nodes, blocked_edges = self._build_blocked_sets(robot_id)
+
+            for zone in STANDBY_ZONES:
+                path = self._bfs(source_zone, zone, blocked_nodes, blocked_edges)
+                if path is None:
+                    continue
+                cost = float(len(path) - 1)
+                if cost < best_cost:
+                    best_cost = cost
+                    best_zone = zone
+                    best_path = path
+
+            if best_path is not None:
+                self._robot_paths[robot_id] = best_path
+                self._robot_reservations[robot_id] = task_id
+
+        if best_path is None:
+            self._node.get_logger().warn(
+                f'[TrafficManager] {robot_id} task={task_id} 귀환 경로 없음'
+            )
+            return PathResult(ok=False, reason='no path to standby zone')
+
+        self._node.get_logger().info(
+            f'[TrafficManager] {robot_id} task={task_id} 귀환 예약: '
+            f'{best_zone}, 경로: {" -> ".join(best_path)}'
+        )
+        return PathResult(
+            ok=True,
+            waypoints=tuple(best_path),
+            cost=best_cost,
+        )
+
+    def reserve_dock_path(
+        self,
+        robot_id: str,
+        task_id: int,
+        source_zone: str,
+    ) -> PathResult:
+        """DOCK_IN 전용. 빈 충전 도크를 안쪽 우선으로 선택해 경로 + 도크를 예약한다.
 
         도크 선정과 경로/도크 예약을 단일 lock 안에서 원자적으로 수행하여
         두 로봇이 같은 도크를 동시에 비어있다고 판단하는 race 를 차단한다.
 
-        반환되는 PathResult.waypoints 의 마지막 zone 이 도착 STANDBY_ZONE 이다.
-        도킹 자체는 호출자(State Manager)가 별도로 수행한다.
+        반환되는 PathResult.waypoints 의 마지막 zone 이 목적지 CHARGING_DOCK 이다.
         """
         chosen_path: list[str] | None = None
         chosen_dock: str | None = None
@@ -348,10 +400,10 @@ class TrafficManager:
             occupied = {dock for dock in self._robot_dock.values() if dock is not None}
             blocked_nodes, blocked_edges = self._build_blocked_sets(robot_id)
 
-            for dock_name, standby_zone in DOCK_PRIORITY:
+            for dock_name, _standby in DOCK_PRIORITY:
                 if dock_name in occupied:
                     continue
-                path = self._bfs(source_zone, standby_zone, blocked_nodes, blocked_edges)
+                path = self._bfs(source_zone, dock_name, blocked_nodes, blocked_edges)
                 if path is None:
                     continue
                 self._robot_paths[robot_id] = path
@@ -363,12 +415,13 @@ class TrafficManager:
 
         if chosen_path is None:
             self._node.get_logger().warn(
-                f'[TrafficManager] {robot_id} task={task_id} 귀환 도크 없음'
+                f'[TrafficManager] {robot_id} task={task_id} 도크 예약 실패 — '
+                f'모두 점유 중이거나 경로 없음'
             )
             return PathResult(ok=False, reason='no available charging dock')
 
         self._node.get_logger().info(
-            f'[TrafficManager] {robot_id} task={task_id} 귀환 예약: '
+            f'[TrafficManager] {robot_id} task={task_id} 도크 예약: '
             f'dock={chosen_dock}, 경로: {" -> ".join(chosen_path)}'
         )
         return PathResult(

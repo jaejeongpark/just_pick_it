@@ -11,6 +11,7 @@ import pytest
 from fleet_manager.traffic_manager import (
     DOCK_PRIORITY,
     PathResult,
+    STANDBY_ZONES,
     TrafficManager,
     ZONE_GRAPH,
 )
@@ -189,42 +190,91 @@ class TestReserveNearestFrom:
 
 
 class TestReserveReturnHomePath:
-    def test_picks_inner_dock_first(self, traffic):
+    def test_goes_to_nearest_standby_zone(self, traffic):
         r = traffic.reserve_return_home_path('PICKY1', 1, 'TRAFFIC_T1')
         assert r.ok
-        # DOCK_PRIORITY[0] = (CHARGING_DOCK_1, STANDBY_ZONE_1)
-        assert r.waypoints[-1] == DOCK_PRIORITY[0][1]
+        assert r.waypoints[-1] in STANDBY_ZONES
+
+    def test_does_not_reserve_dock(self, traffic):
+        traffic.reserve_return_home_path('PICKY1', 1, 'TRAFFIC_T1')
+        assert traffic._robot_dock['PICKY1'] is None
+
+    def test_avoids_occupied_standby_zone(self, traffic):
+        # PICKY2 가 STANDBY_ZONE_2 를 점유 중이면 PICKY1 은 STANDBY_ZONE_1 로 간다.
+        _set_waiting(traffic, 'PICKY2', 'STANDBY_ZONE_2')
+        r = traffic.reserve_return_home_path('PICKY1', 1, 'TRAFFIC_T1')
+        assert r.ok
+        assert r.waypoints[-1] == 'STANDBY_ZONE_1'
+
+    def test_all_standby_zones_blocked_returns_failure(self, traffic):
+        # 두 standby zone 을 각각 다른 로봇이 점유
+        _set_waiting(traffic, 'PICKY2', 'STANDBY_ZONE_2')
+        traffic._robot_states['PICKY3'] = 'WAITING_FOR_COBOT'
+        traffic._robot_paths['PICKY3'] = ['STANDBY_ZONE_1']
+        traffic._robot_reservations['PICKY3'] = None
+        traffic._robot_dock['PICKY3'] = None
+
+        r = traffic.reserve_return_home_path('PICKY1', 1, 'TRAFFIC_T1')
+        assert not r.ok
+        assert r.reason == 'no path to standby zone'
+
+
+# ──────────────────────────────────────────────────────────────────────
+# reserve_dock_path
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestReserveDockPath:
+    def test_picks_inner_dock_first(self, traffic):
+        r = traffic.reserve_dock_path('PICKY1', 1, 'STANDBY_ZONE_1')
+        assert r.ok
+        assert r.waypoints[-1] == DOCK_PRIORITY[0][0]  # CHARGING_DOCK_1
         assert traffic._robot_dock['PICKY1'] == DOCK_PRIORITY[0][0]
 
-    def test_skips_occupied_dock(self, traffic):
-        # PICKY1 이 안쪽 도크 예약 후 도착하여 CHARGING 상태가 됨.
-        # CHARGING 진입 시 notify_state 의 안전망이 path 를 해제하지만
-        # 도크 점유는 유지된다.
-        traffic.reserve_return_home_path('PICKY1', 1, 'TRAFFIC_T1')
-        traffic.notify_state('PICKY1', 'CHARGING')
-
-        # PICKY2 귀환 시도: 안쪽 도크는 점유 중이므로 바깥쪽 선정.
-        r = traffic.reserve_return_home_path('PICKY2', 2, 'TRAFFIC_B1')
+    def test_skips_occupied_inner_dock(self, traffic):
+        # 안쪽 도크가 이미 점유 중이면 바깥쪽 도크를 선택한다.
+        traffic._robot_dock['PICKY2'] = DOCK_PRIORITY[0][0]  # CHARGING_DOCK_1 점유
+        r = traffic.reserve_dock_path('PICKY1', 1, 'STANDBY_ZONE_2')
         assert r.ok
-        assert r.waypoints[-1] == DOCK_PRIORITY[1][1]
-        assert traffic._robot_dock['PICKY2'] == DOCK_PRIORITY[1][0]
+        assert r.waypoints[-1] == DOCK_PRIORITY[1][0]  # CHARGING_DOCK_2
+        assert traffic._robot_dock['PICKY1'] == DOCK_PRIORITY[1][0]
 
     def test_all_docks_occupied_returns_failure(self, traffic):
-        # 두 로봇이 도착해서 두 도크 모두 점유 중 (CHARGING)
-        traffic.reserve_return_home_path('PICKY1', 1, 'TRAFFIC_T1')
-        traffic.notify_state('PICKY1', 'CHARGING')
-        traffic.reserve_return_home_path('PICKY2', 2, 'TRAFFIC_B1')
-        traffic.notify_state('PICKY2', 'CHARGING')
+        traffic._robot_dock['PICKY1'] = DOCK_PRIORITY[0][0]
+        traffic._robot_dock['PICKY2'] = DOCK_PRIORITY[1][0]
 
-        # 임의의 세 번째 로봇 ID 시뮬레이션
         traffic._robot_states['PICKY3'] = 'STANDBY'
         traffic._robot_paths['PICKY3'] = []
         traffic._robot_reservations['PICKY3'] = None
         traffic._robot_dock['PICKY3'] = None
 
-        r = traffic.reserve_return_home_path('PICKY3', 3, 'TRAFFIC_T1')
+        r = traffic.reserve_dock_path('PICKY3', 3, 'STANDBY_ZONE_2')
         assert not r.ok
         assert r.reason == 'no available charging dock'
+
+    def test_registers_path_and_task_id(self, traffic):
+        r = traffic.reserve_dock_path('PICKY1', 5, 'STANDBY_ZONE_1')
+        assert r.ok
+        assert traffic._robot_reservations['PICKY1'] == 5
+        assert traffic._robot_dock['PICKY1'] is not None
+        assert traffic._robot_paths['PICKY1'][-1] == traffic._robot_dock['PICKY1']
+
+    def test_concurrent_dock_reservation_no_double_booking(self, traffic):
+        """동시 DOCK_IN 은 lock 으로 직렬화되어 같은 도크가 중복 예약되지 않는다."""
+        results = []
+
+        def worker(rid, task_id, src):
+            results.append((rid, traffic.reserve_dock_path(rid, task_id, src)))
+
+        t1 = threading.Thread(target=worker, args=('PICKY1', 1, 'STANDBY_ZONE_1'))
+        t2 = threading.Thread(target=worker, args=('PICKY2', 2, 'STANDBY_ZONE_2'))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        occupied = [d for d in traffic._robot_dock.values() if d is not None]
+        assert len(occupied) == len(set(occupied))
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -449,12 +499,11 @@ class TestConcurrency:
         p2 = set(traffic._robot_paths['PICKY2'])
         assert p1.isdisjoint(p2)
 
-    def test_concurrent_dock_reservation_serializes(self, traffic):
-        """동시 RETURN_HOME 호출은 lock 으로 직렬화된다.
+    def test_concurrent_return_home_serializes(self, traffic):
+        """동시 RETURN_HOME 은 좌측 복도 공유로 인해 한 쪽만 성공한다. 도크 예약 없음.
 
-        새 맵에서는 좌측 수직 복도(TRAFFIC_L2)와 STANDBY_ZONE_2 가 두 path 의
-        공통 노드라 동시에 둘 다 잡을 수 없다. 한쪽만 성공하고 다른쪽은
-        path 차단으로 실패하는 것이 정확한 동작이다.
+        새 맵에서 TRAFFIC_T1, TRAFFIC_B1 양쪽 모두 STANDBY_ZONE 으로 가는 경로가
+        TRAFFIC_L2 를 공유하므로, 동시 호출 시 한 쪽의 path 예약이 다른 쪽을 차단한다.
         """
         results = []
 
@@ -470,8 +519,8 @@ class TestConcurrency:
 
         ok_count = sum(1 for _, r in results if r.ok)
         assert ok_count == 1
-        occupied_docks = {d for d in traffic._robot_dock.values() if d is not None}
-        assert len(occupied_docks) == 1
+        # 도크 예약 없음
+        assert all(d is None for d in traffic._robot_dock.values())
 
 
 # ──────────────────────────────────────────────────────────────────────
