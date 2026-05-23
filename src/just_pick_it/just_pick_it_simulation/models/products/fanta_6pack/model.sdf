@@ -1,0 +1,227 @@
+<?xml version="1.0"?>
+<sdf version="1.8">
+  <model name="fanta_6pack">
+    <!--
+      330ml 캔 6개 2x3 묶음 (실물 비율 198 x 132 x 115mm 유지)
+      scale=0.2525 적용해 최종 50 x 33 x 29mm (그리퍼 2~5cm 범위)
+
+      캔 (스케일 후): 지름 16.67mm  높이 29mm
+      배치: X축 3개 (-16.7, 0, +16.7mm), Y축 2개 (-8.35, +8.35mm)
+      각 캔은 오렌지 본체 + 상단 알루미늄 디스크로 구성
+      충돌은 단순 외접 박스 (물리 안정)
+    -->
+    <static>false</static>
+    <link name="link">
+      <inertial>
+        <mass>0.2</mass>
+        <inertia>
+          <ixx>0.000032</ixx>
+          <iyy>0.000056</iyy>
+          <izz>0.000060</izz>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyz>0</iyz>
+        </inertia>
+      </inertial>
+
+      <!-- 캔 본체 6개 (오렌지) -->
+      <visual name="can_body_1">
+        <pose>-0.0167 -0.00835 0 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.0083</radius>
+            <length>0.029</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>1.0 0.4 0.0 1</ambient>
+          <diffuse>1.0 0.4 0.0 1</diffuse>
+          <specular>0.2 0.2 0.2 1</specular>
+        </material>
+      </visual>
+
+      <visual name="can_body_2">
+        <pose>0.0 -0.00835 0 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.0083</radius>
+            <length>0.029</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>1.0 0.4 0.0 1</ambient>
+          <diffuse>1.0 0.4 0.0 1</diffuse>
+          <specular>0.2 0.2 0.2 1</specular>
+        </material>
+      </visual>
+
+      <visual name="can_body_3">
+        <pose>0.0167 -0.00835 0 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.0083</radius>
+            <length>0.029</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>1.0 0.4 0.0 1</ambient>
+          <diffuse>1.0 0.4 0.0 1</diffuse>
+          <specular>0.2 0.2 0.2 1</specular>
+        </material>
+      </visual>
+
+      <visual name="can_body_4">
+        <pose>-0.0167 0.00835 0 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.0083</radius>
+            <length>0.029</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>1.0 0.4 0.0 1</ambient>
+          <diffuse>1.0 0.4 0.0 1</diffuse>
+          <specular>0.2 0.2 0.2 1</specular>
+        </material>
+      </visual>
+
+      <visual name="can_body_5">
+        <pose>0.0 0.00835 0 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.0083</radius>
+            <length>0.029</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>1.0 0.4 0.0 1</ambient>
+          <diffuse>1.0 0.4 0.0 1</diffuse>
+          <specular>0.2 0.2 0.2 1</specular>
+        </material>
+      </visual>
+
+      <visual name="can_body_6">
+        <pose>0.0167 0.00835 0 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.0083</radius>
+            <length>0.029</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>1.0 0.4 0.0 1</ambient>
+          <diffuse>1.0 0.4 0.0 1</diffuse>
+          <specular>0.2 0.2 0.2 1</specular>
+        </material>
+      </visual>
+
+      <!-- 캔 상단 알루미늄 디스크 6개 (실버, pop-top 표현) -->
+      <visual name="can_top_1">
+        <pose>-0.0167 -0.00835 0.01425 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.0079</radius>
+            <length>0.0008</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.82 0.82 0.80 1</ambient>
+          <diffuse>0.85 0.85 0.83 1</diffuse>
+          <specular>0.6 0.6 0.6 1</specular>
+        </material>
+      </visual>
+
+      <visual name="can_top_2">
+        <pose>0.0 -0.00835 0.01425 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.0079</radius>
+            <length>0.0008</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.82 0.82 0.80 1</ambient>
+          <diffuse>0.85 0.85 0.83 1</diffuse>
+          <specular>0.6 0.6 0.6 1</specular>
+        </material>
+      </visual>
+
+      <visual name="can_top_3">
+        <pose>0.0167 -0.00835 0.01425 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.0079</radius>
+            <length>0.0008</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.82 0.82 0.80 1</ambient>
+          <diffuse>0.85 0.85 0.83 1</diffuse>
+          <specular>0.6 0.6 0.6 1</specular>
+        </material>
+      </visual>
+
+      <visual name="can_top_4">
+        <pose>-0.0167 0.00835 0.01425 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.0079</radius>
+            <length>0.0008</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.82 0.82 0.80 1</ambient>
+          <diffuse>0.85 0.85 0.83 1</diffuse>
+          <specular>0.6 0.6 0.6 1</specular>
+        </material>
+      </visual>
+
+      <visual name="can_top_5">
+        <pose>0.0 0.00835 0.01425 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.0079</radius>
+            <length>0.0008</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.82 0.82 0.80 1</ambient>
+          <diffuse>0.85 0.85 0.83 1</diffuse>
+          <specular>0.6 0.6 0.6 1</specular>
+        </material>
+      </visual>
+
+      <visual name="can_top_6">
+        <pose>0.0167 0.00835 0.01425 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.0079</radius>
+            <length>0.0008</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.82 0.82 0.80 1</ambient>
+          <diffuse>0.85 0.85 0.83 1</diffuse>
+          <specular>0.6 0.6 0.6 1</specular>
+        </material>
+      </visual>
+
+      <!-- 외접 충돌 박스 (캔 묶음 전체 bounding box) -->
+      <collision name="collision">
+        <geometry>
+          <box>
+            <size>0.050 0.0334 0.029</size>
+          </box>
+        </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>0.6</mu>
+              <mu2>0.6</mu2>
+            </ode>
+          </friction>
+        </surface>
+      </collision>
+    </link>
+  </model>
+</sdf>

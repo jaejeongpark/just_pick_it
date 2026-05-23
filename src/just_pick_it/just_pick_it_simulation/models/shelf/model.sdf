@@ -5,25 +5,32 @@
 
     <!--
       Origin: bottom-center of assembled shelf
-      X axis: length direction (left-right)   -0.12 to +0.12 m
-      Y axis: depth direction (front-back)    -0.05 to +0.05 m
-      Z axis: height direction (up)            0.00 to +0.105 m
+      현재 mesh pose: (0.1, 0, 0.1025) + yaw 1.57 rad (90도 회전)
+        회전 결과 link 좌표계에서 시각/충돌 영역:
+          link X: 0.000 ~ 0.100  (100mm, 앞뒤 깊이)
+          link Y: -0.120 ~ 0.120 (240mm, 좌우 폭)
+          link Z: 0.000 ~ 0.105  (105mm, 높이, 상면=0.105)
 
-      STL coordinate system (CATIA, mm):
-        X: -120 to +120
-        Y:    0 to +100
-        Z: -102.5 to +2.5  (bottom plate at Z -102.5 to -97.5, frame up to +2.5)
+      STL 원본 좌표계 (CATIA, mm):
+        X: -120 ~ +120  (장변 240mm)
+        Y:    0 ~ +100  (단변 100mm)
+        Z: -102.5 ~ +2.5  (높이 105mm)
+      Mesh transform (scale 0.001 + pose 0.1,0,0.1025 yaw=1.57):
+        STL X -> link Y (장변이 좌우폭으로 매핑)
+        STL Y -> link X 의 -방향 + 0.1 이동 (단변이 앞뒤 깊이)
+        STL Z -> link Z (그대로)
 
-      Mesh pose offset applied to each visual/collision:
-        z: +0.1025 m  (shifts STL bottom from Z=-102.5mm to Gazebo Z=0)
-        y: -0.05   m  (centers Y: STL 0-100mm to Gazebo -50 to +50mm)
-        scale: 0.001  (mm to m)
+      충돌: mesh 가 아니라 단순 box 사용
+        이유: mesh collision 은 회전+스케일과 결합될 때 물리엔진(특히
+              gz-sim 의 DART/Bullet)에서 가끔 부정확한 경계가 잡혀 위에
+              올린 물체가 보이지 않게 공중에서 멈추는 케이스가 있음.
+              상면이 평평한 단순 박스 형상이므로 box 1개로 충분.
     -->
 
     <link name="link">
 
       <visual name="top_visual">
-        <pose>0 -0.05 0.1025 0 0 0</pose>
+        <pose>0.1 0.0 0.1025 0 0 1.57</pose>
         <geometry>
           <mesh>
             <uri>model://shelf/meshes/ver2_top.stl</uri>
@@ -36,19 +43,9 @@
           <specular>0.05 0.05 0.05 1</specular>
         </material>
       </visual>
-
-      <collision name="top_collision">
-        <pose>0 -0.05 0.1025 0 0 0</pose>
-        <geometry>
-          <mesh>
-            <uri>model://shelf/meshes/ver2_top.stl</uri>
-            <scale>0.001 0.001 0.001</scale>
-          </mesh>
-        </geometry>
-      </collision>
 
       <visual name="bottom_visual">
-        <pose>0 -0.05 0.1025 0 0 0</pose>
+        <pose>0.1 0.0 0.1025 0 0 1.57</pose>
         <geometry>
           <mesh>
             <uri>model://shelf/meshes/ver2_bottom.stl</uri>
@@ -62,14 +59,32 @@
         </material>
       </visual>
 
-      <collision name="bottom_collision">
-        <pose>0 -0.05 0.1025 0 0 0</pose>
+      <!--
+        단순 box 충돌: 시각 mesh 가 차지하는 link 좌표 영역과 정확히 일치
+          중심 (0.05, 0, 0.0525), 크기 (0.100, 0.240, 0.105)
+          상면 z = 0.105 (시각 mesh 의 top board 상면과 일치)
+      -->
+      <collision name="shelf_collision">
+        <pose>0.05 0.0 0.0525 0 0 0</pose>
         <geometry>
-          <mesh>
-            <uri>model://shelf/meshes/ver2_bottom.stl</uri>
-            <scale>0.001 0.001 0.001</scale>
-          </mesh>
+          <box>
+            <size>0.100 0.240 0.105</size>
+          </box>
         </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>0.9</mu>
+              <mu2>0.9</mu2>
+            </ode>
+          </friction>
+          <contact>
+            <ode>
+              <kp>1e6</kp>
+              <kd>10</kd>
+            </ode>
+          </contact>
+        </surface>
       </collision>
 
     </link>
