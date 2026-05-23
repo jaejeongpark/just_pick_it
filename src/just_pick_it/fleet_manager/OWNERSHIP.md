@@ -38,7 +38,7 @@ FleetManagerNode  # 유일한 rclpy.Node
 - 충돌 회피 정책 (`MOVING_STATES`, `OCCUPYING_STATES`)
 - 도크 자원 선정 (`DOCK_PRIORITY`, `_robot_dock`)
 - 경로/예약 등록 상태 관리 (`_robot_paths`, `_robot_reservations`)
-- 외부 계약: `estimate_path` / `reserve_path` / `reserve_nearest_from` /
+- 외부 계약: `reserve_path` / `reserve_nearest_from` /
   `reserve_return_home_path` / `update_path_progress` / `release_path` /
   `notify_state` / `get_robot_state` / `get_all_states`
 - 도메인 제약 반영 (예: zone 단일 점유)
@@ -60,7 +60,8 @@ FleetManagerNode  # 유일한 rclpy.Node
 - 기존 task 있는 주문 skip (재시작 시 중복 생성 방지)
 - 다음 실행 가능한 task 선정 및 상태 전이
 - 이동 task 실행 시 TrafficManager 호출 (reserve_path 등)
-- 상품 후보 선정: 남은 상품 zone 리스트를 `reserve_nearest_from` 에 전달
+- 상품 후보 선정: 남은 상품을 `{zone_name: 수량}` dict 으로 집계해서
+  `reserve_nearest_from` 에 전달 (TrafficManager 가 cost 최소 zone 을 선정)
 - 선택된 zone → 상품 역매핑 (TaskManager 가 자체 보유)
 - `release_path` 호출 시점 관리 (SUCCESS/FAILED/CANCELLED/timeout)
 - task tick 재진입 방지 (`threading.Lock` 또는 `_ticking` 플래그)
@@ -96,7 +97,7 @@ FleetManagerNode  # 유일한 rclpy.Node
 | 모듈 | 위치 | 담당 |
 |---|---|---|
 | PICKY `state_manager.py` | `pinky_amr_1/` | **미정** |
-| PICKY `aruco_parking.py` | `pinky_amr_1/` | **박서우 담당** |
+| PICKY `reverse_docking.py` | `pinky_amr_1/` | **박서우 담당** |
 | PICKY `move_to_goal.py` | `pinky_amr_1/` | **이명제 담당** |
 | Control Server (FastAPI) | `web/` | **이명제 담당** |
 

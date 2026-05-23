@@ -11,6 +11,7 @@ import pytest
 from fleet_manager.traffic_manager import (
     DOCK_PRIORITY,
     PathResult,
+    STANDBY_ZONES,
     TrafficManager,
     ZONE_GRAPH,
 )
@@ -67,37 +68,6 @@ class TestPathResult:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# estimate_path
-# ──────────────────────────────────────────────────────────────────────
-
-
-class TestEstimatePath:
-    def test_returns_path_for_reachable_zones(self, traffic):
-        r = traffic.estimate_path('PICKY1', 'TRAFFIC_T1', 'TRAFFIC_T3')
-        assert r.ok
-        assert r.waypoints == ('TRAFFIC_T1', 'TRAFFIC_T2', 'TRAFFIC_T3')
-        assert r.cost == 2.0
-
-    def test_same_source_and_target(self, traffic):
-        r = traffic.estimate_path('PICKY1', 'TRAFFIC_T1', 'TRAFFIC_T1')
-        assert r.ok
-        assert r.waypoints == ('TRAFFIC_T1',)
-        assert r.cost == 0.0
-
-    def test_does_not_register_reservation(self, traffic):
-        traffic.estimate_path('PICKY1', 'TRAFFIC_T1', 'TRAFFIC_T3')
-        assert traffic._robot_paths['PICKY1'] == []
-        assert traffic._robot_reservations['PICKY1'] is None
-
-    def test_unreachable_target_returns_failure(self, traffic):
-        r = traffic.estimate_path('PICKY1', 'TRAFFIC_T1', 'NO_SUCH_ZONE')
-        assert not r.ok
-        assert r.reason is not None
-        assert r.waypoints == ()
-        assert r.cost is None
-
-
-# ──────────────────────────────────────────────────────────────────────
 # reserve_path
 # ──────────────────────────────────────────────────────────────────────
 
@@ -140,15 +110,16 @@ class TestReservePath:
         """
         _set_waiting(traffic, 'PICKY2', 'PRODUCT_ZONE_3')
 
-        r = traffic.estimate_path('PICKY1', 'TRAFFIC_T3', 'PRODUCT_ZONE_3')
+        r = traffic.reserve_path('PICKY1', 1, 'TRAFFIC_T3', 'PRODUCT_ZONE_3')
         assert not r.ok
         assert r.reason is not None
+        assert traffic._robot_reservations['PICKY1'] is None
 
     def test_target_node_in_moving_path_is_unreachable(self, traffic):
         """다른 로봇이 이동 중에 통과할 노드도 도달 불가."""
         _set_moving(traffic, 'PICKY2', ['PRODUCT_ZONE_3', 'PRODUCT_ZONE_6'])
 
-        r = traffic.estimate_path('PICKY1', 'TRAFFIC_T3', 'PRODUCT_ZONE_3')
+        r = traffic.reserve_path('PICKY1', 1, 'TRAFFIC_T3', 'PRODUCT_ZONE_3')
         assert not r.ok
 
 
@@ -162,7 +133,7 @@ class TestReserveNearestFrom:
         # TRAFFIC_T1 기준
         # PRODUCT_ZONE_1: hop 1
         # PRODUCT_ZONE_3: hop 3 (T1 -> T2 -> T3 -> PZ3)
-        candidates = ['PRODUCT_ZONE_3', 'PRODUCT_ZONE_1']
+        candidates = {'PRODUCT_ZONE_3': 1, 'PRODUCT_ZONE_1': 2}
         r = traffic.reserve_nearest_from('PICKY1', 1, 'TRAFFIC_T1', candidates)
         assert r.ok
         assert r.waypoints[-1] == 'PRODUCT_ZONE_1'
@@ -170,7 +141,8 @@ class TestReserveNearestFrom:
 
     def test_registers_chosen_path(self, traffic):
         r = traffic.reserve_nearest_from(
-            'PICKY1', 7, 'TRAFFIC_T1', ['PRODUCT_ZONE_1', 'PRODUCT_ZONE_2'],
+            'PICKY1', 7, 'TRAFFIC_T1',
+            {'PRODUCT_ZONE_1': 1, 'PRODUCT_ZONE_2': 1},
         )
         assert r.ok
         assert traffic._robot_reservations['PICKY1'] == 7
@@ -192,7 +164,7 @@ class TestReserveNearestFrom:
 
         r = traffic.reserve_nearest_from(
             'PICKY1', 1, 'TRAFFIC_T1',
-            ['PRODUCT_ZONE_4', 'PRODUCT_ZONE_2'],
+            {'PRODUCT_ZONE_4': 1, 'PRODUCT_ZONE_2': 1},
         )
         assert r.ok
         # PRODUCT_ZONE_4 는 차단된 PRODUCT_ZONE_1 을 거치려다 우회 필요 → cost 증가
@@ -201,14 +173,14 @@ class TestReserveNearestFrom:
 
     def test_all_blocked_returns_failure(self, traffic):
         r = traffic.reserve_nearest_from(
-            'PICKY1', 1, 'TRAFFIC_T1', ['NO_SUCH', 'ALSO_NO_SUCH'],
+            'PICKY1', 1, 'TRAFFIC_T1', {'NO_SUCH': 1, 'ALSO_NO_SUCH': 1},
         )
         assert not r.ok
         assert r.reason == 'all candidates blocked'
         assert traffic._robot_reservations['PICKY1'] is None
 
     def test_empty_candidates(self, traffic):
-        r = traffic.reserve_nearest_from('PICKY1', 1, 'TRAFFIC_T1', [])
+        r = traffic.reserve_nearest_from('PICKY1', 1, 'TRAFFIC_T1', {})
         assert not r.ok
 
 
@@ -218,36 +190,91 @@ class TestReserveNearestFrom:
 
 
 class TestReserveReturnHomePath:
-    def test_picks_inner_dock_first(self, traffic):
+    def test_goes_to_nearest_standby_zone(self, traffic):
         r = traffic.reserve_return_home_path('PICKY1', 1, 'TRAFFIC_T1')
         assert r.ok
-        # DOCK_PRIORITY[0] = (CHARGING_DOCK_1, STANDBY_ZONE_1)
-        assert r.waypoints[-1] == DOCK_PRIORITY[0][1]
+        assert r.waypoints[-1] in STANDBY_ZONES
+
+    def test_does_not_reserve_dock(self, traffic):
+        traffic.reserve_return_home_path('PICKY1', 1, 'TRAFFIC_T1')
+        assert traffic._robot_dock['PICKY1'] is None
+
+    def test_avoids_occupied_standby_zone(self, traffic):
+        # PICKY2 가 STANDBY_ZONE_2 를 점유 중이면 PICKY1 은 STANDBY_ZONE_1 로 간다.
+        _set_waiting(traffic, 'PICKY2', 'STANDBY_ZONE_2')
+        r = traffic.reserve_return_home_path('PICKY1', 1, 'TRAFFIC_T1')
+        assert r.ok
+        assert r.waypoints[-1] == 'STANDBY_ZONE_1'
+
+    def test_all_standby_zones_blocked_returns_failure(self, traffic):
+        # 두 standby zone 을 각각 다른 로봇이 점유
+        _set_waiting(traffic, 'PICKY2', 'STANDBY_ZONE_2')
+        traffic._robot_states['PICKY3'] = 'WAITING_FOR_COBOT'
+        traffic._robot_paths['PICKY3'] = ['STANDBY_ZONE_1']
+        traffic._robot_reservations['PICKY3'] = None
+        traffic._robot_dock['PICKY3'] = None
+
+        r = traffic.reserve_return_home_path('PICKY1', 1, 'TRAFFIC_T1')
+        assert not r.ok
+        assert r.reason == 'no path to standby zone'
+
+
+# ──────────────────────────────────────────────────────────────────────
+# reserve_dock_path
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestReserveDockPath:
+    def test_picks_inner_dock_first(self, traffic):
+        r = traffic.reserve_dock_path('PICKY1', 1, 'STANDBY_ZONE_1')
+        assert r.ok
+        assert r.waypoints[-1] == DOCK_PRIORITY[0][0]  # CHARGING_DOCK_1
         assert traffic._robot_dock['PICKY1'] == DOCK_PRIORITY[0][0]
 
-    def test_skips_occupied_dock(self, traffic):
-        # PICKY1 이 안쪽 도크 예약
-        traffic.reserve_return_home_path('PICKY1', 1, 'TRAFFIC_T1')
-        # PICKY2 가 같은 시점에 귀환 시도
-        r = traffic.reserve_return_home_path('PICKY2', 2, 'TRAFFIC_B1')
+    def test_skips_occupied_inner_dock(self, traffic):
+        # 안쪽 도크가 이미 점유 중이면 바깥쪽 도크를 선택한다.
+        traffic._robot_dock['PICKY2'] = DOCK_PRIORITY[0][0]  # CHARGING_DOCK_1 점유
+        r = traffic.reserve_dock_path('PICKY1', 1, 'STANDBY_ZONE_2')
         assert r.ok
-        assert r.waypoints[-1] == DOCK_PRIORITY[1][1]
-        assert traffic._robot_dock['PICKY2'] == DOCK_PRIORITY[1][0]
+        assert r.waypoints[-1] == DOCK_PRIORITY[1][0]  # CHARGING_DOCK_2
+        assert traffic._robot_dock['PICKY1'] == DOCK_PRIORITY[1][0]
 
     def test_all_docks_occupied_returns_failure(self, traffic):
-        # 두 도크 모두 점유
-        traffic.reserve_return_home_path('PICKY1', 1, 'TRAFFIC_T1')
-        traffic.reserve_return_home_path('PICKY2', 2, 'TRAFFIC_B1')
+        traffic._robot_dock['PICKY1'] = DOCK_PRIORITY[0][0]
+        traffic._robot_dock['PICKY2'] = DOCK_PRIORITY[1][0]
 
-        # 임의의 세 번째 로봇 ID 시뮬레이션
         traffic._robot_states['PICKY3'] = 'STANDBY'
         traffic._robot_paths['PICKY3'] = []
         traffic._robot_reservations['PICKY3'] = None
         traffic._robot_dock['PICKY3'] = None
 
-        r = traffic.reserve_return_home_path('PICKY3', 3, 'TRAFFIC_T1')
+        r = traffic.reserve_dock_path('PICKY3', 3, 'STANDBY_ZONE_2')
         assert not r.ok
         assert r.reason == 'no available charging dock'
+
+    def test_registers_path_and_task_id(self, traffic):
+        r = traffic.reserve_dock_path('PICKY1', 5, 'STANDBY_ZONE_1')
+        assert r.ok
+        assert traffic._robot_reservations['PICKY1'] == 5
+        assert traffic._robot_dock['PICKY1'] is not None
+        assert traffic._robot_paths['PICKY1'][-1] == traffic._robot_dock['PICKY1']
+
+    def test_concurrent_dock_reservation_no_double_booking(self, traffic):
+        """동시 DOCK_IN 은 lock 으로 직렬화되어 같은 도크가 중복 예약되지 않는다."""
+        results = []
+
+        def worker(rid, task_id, src):
+            results.append((rid, traffic.reserve_dock_path(rid, task_id, src)))
+
+        t1 = threading.Thread(target=worker, args=('PICKY1', 1, 'STANDBY_ZONE_1'))
+        t2 = threading.Thread(target=worker, args=('PICKY2', 2, 'STANDBY_ZONE_2'))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        occupied = [d for d in traffic._robot_dock.values() if d is not None]
+        assert len(occupied) == len(set(occupied))
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -304,6 +331,106 @@ class TestReleasePath:
         # 아무 예약 없는 상태에서 호출
         traffic.release_path('PICKY1', 1)
         assert traffic._robot_paths['PICKY1'] == []
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Optional task_id + attach_task_id (MOVE_TO_PRODUCT 흐름)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestOptionalTaskId:
+    """task_id 가 task INSERT 후에 발행되는 흐름. reserve 시점에 None 허용."""
+
+    def test_reserve_nearest_from_accepts_none_task_id(self, traffic):
+        r = traffic.reserve_nearest_from(
+            'PICKY1', None, 'TRAFFIC_T1', {'PRODUCT_ZONE_1': 1},
+        )
+        assert r.ok
+        assert traffic._robot_paths['PICKY1'] == ['TRAFFIC_T1', 'PRODUCT_ZONE_1']
+        # task_id 미배정 상태로 기록
+        assert traffic._robot_reservations['PICKY1'] is None
+
+    def test_attach_task_id_links_after_temp_reserve(self, traffic):
+        traffic.reserve_nearest_from(
+            'PICKY1', None, 'TRAFFIC_T1', {'PRODUCT_ZONE_1': 1},
+        )
+        ok = traffic.attach_task_id('PICKY1', 42)
+        assert ok is True
+        assert traffic._robot_reservations['PICKY1'] == 42
+
+    def test_attach_task_id_fails_without_temp_reserve(self, traffic):
+        # 임시 예약 path 자체가 없는 상태에서 호출
+        ok = traffic.attach_task_id('PICKY1', 42)
+        assert ok is False
+        assert traffic._robot_reservations['PICKY1'] is None
+
+    def test_attach_task_id_fails_when_already_linked(self, traffic):
+        # 이미 task_id 가 연결된 정상 예약 위에는 덮어쓰지 않는다
+        traffic.reserve_path('PICKY1', 7, 'TRAFFIC_T1', 'TRAFFIC_T2')
+        ok = traffic.attach_task_id('PICKY1', 42)
+        assert ok is False
+        assert traffic._robot_reservations['PICKY1'] == 7
+
+    def test_release_path_none_releases_temp_reservation(self, traffic):
+        traffic.reserve_nearest_from(
+            'PICKY1', None, 'TRAFFIC_T1', {'PRODUCT_ZONE_1': 1},
+        )
+        traffic.release_path('PICKY1', None)
+        assert traffic._robot_paths['PICKY1'] == []
+        assert traffic._robot_reservations['PICKY1'] is None
+
+    def test_release_path_none_no_op_when_task_id_attached(self, traffic):
+        # 정상 reserve 로 task_id 가 연결된 상태에선 None release 가 무시된다
+        traffic.reserve_path('PICKY1', 42, 'TRAFFIC_T1', 'TRAFFIC_T2')
+        traffic.release_path('PICKY1', None)
+        assert traffic._robot_reservations['PICKY1'] == 42
+        assert traffic._robot_paths['PICKY1'] != []
+
+    def test_full_move_to_product_flow(self, traffic):
+        """MOVE_TO_PRODUCT 의 전형적 흐름: None reserve -> attach -> release."""
+        r = traffic.reserve_nearest_from(
+            'PICKY1', None, 'TRAFFIC_T1',
+            {'PRODUCT_ZONE_1': 2, 'PRODUCT_ZONE_2': 1},
+        )
+        assert r.ok
+        # 가장 가까운 PRODUCT_ZONE_1 선정
+        assert r.waypoints[-1] == 'PRODUCT_ZONE_1'
+
+        # task INSERT 결과 task_id=99 발행
+        assert traffic.attach_task_id('PICKY1', 99) is True
+
+        # 정상 release (matching task_id)
+        traffic.release_path('PICKY1', 99)
+        assert traffic._robot_paths['PICKY1'] == []
+        assert traffic._robot_reservations['PICKY1'] is None
+
+
+# ──────────────────────────────────────────────────────────────────────
+# race window 닫힘 (path 가 등록되면 state 무관하게 차단)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestRaceWindowClosed:
+    """reserve 직후 picky_state 가 MOVING 으로 갱신되기 전에도 path 가 차단되는지."""
+
+    def test_reserved_path_blocks_others_in_standby_state(self, traffic):
+        # PICKY1 reserve 직후, state 는 default 'STANDBY' (notify_state 아직 안 옴)
+        traffic.reserve_path('PICKY1', 1, 'TRAFFIC_T1', 'TRAFFIC_T3')
+        assert traffic._robot_states['PICKY1'] == 'STANDBY'
+
+        # PICKY2 가 T2 를 통과하려 시도. T2 는 PICKY1 path 의 경유 노드이므로
+        # 차단되어야 함 (state 가 MOVING 으로 갱신되지 않아도).
+        r = traffic.reserve_path('PICKY2', 2, 'PRODUCT_ZONE_2', 'TRAFFIC_T2')
+        assert not r.ok
+
+    def test_temp_reservation_also_blocks_others(self, traffic):
+        # task_id None 임시 예약도 동일하게 path 차단 효과를 가진다.
+        traffic.reserve_nearest_from(
+            'PICKY1', None, 'TRAFFIC_T1', {'PRODUCT_ZONE_1': 1},
+        )
+        # PICKY2 가 PRODUCT_ZONE_1 로 가려 시도 → 차단
+        r = traffic.reserve_path('PICKY2', 2, 'TRAFFIC_T2', 'PRODUCT_ZONE_1')
+        assert not r.ok
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -372,8 +499,12 @@ class TestConcurrency:
         p2 = set(traffic._robot_paths['PICKY2'])
         assert p1.isdisjoint(p2)
 
-    def test_concurrent_dock_reservation_serializes(self, traffic):
-        """두 로봇이 동시에 reserve_return_home_path 호출 시 서로 다른 도크 할당."""
+    def test_concurrent_return_home_serializes(self, traffic):
+        """동시 RETURN_HOME 은 좌측 복도 공유로 인해 한 쪽만 성공한다. 도크 예약 없음.
+
+        새 맵에서 TRAFFIC_T1, TRAFFIC_B1 양쪽 모두 STANDBY_ZONE 으로 가는 경로가
+        TRAFFIC_L2 를 공유하므로, 동시 호출 시 한 쪽의 path 예약이 다른 쪽을 차단한다.
+        """
         results = []
 
         def worker(rid, task_id, src):
@@ -386,11 +517,10 @@ class TestConcurrency:
         t1.join()
         t2.join()
 
-        # 둘 다 성공
-        assert all(r.ok for _, r in results)
-        docks = {traffic._robot_dock['PICKY1'], traffic._robot_dock['PICKY2']}
-        # 서로 다른 도크
-        assert docks == {DOCK_PRIORITY[0][0], DOCK_PRIORITY[1][0]}
+        ok_count = sum(1 for _, r in results if r.ok)
+        assert ok_count == 1
+        # 도크 예약 없음
+        assert all(d is None for d in traffic._robot_dock.values())
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -441,3 +571,51 @@ class TestZoneGraphIntegrity:
             assert dock in ZONE_GRAPH[standby], (
                 f'도크 {dock} 가 standby {standby} 의 인접 노드가 아님'
             )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 새 맵 토폴로지 (docs/Traffic_node_graph.jpg)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestNewMapTopology:
+    """좌측 수직 복도 도입과 우측 복도 제거 같은 새 맵 구조의 회귀 방지."""
+
+    def test_stock_zone_exits_through_left_corridor(self, traffic):
+        # STOCK_ZONE 은 TRAFFIC_L1 으로만 진출. 기존엔 TRAFFIC_T1 직접 인접이었음.
+        r = traffic.reserve_path('PICKY1', 1, 'STOCK_ZONE', 'TRAFFIC_T1')
+        assert r.ok
+        assert r.waypoints == ('STOCK_ZONE', 'TRAFFIC_L1', 'TRAFFIC_T1')
+
+    def test_standby_to_product_via_left_corridor(self, traffic):
+        # 기존엔 STANDBY_ZONE_2 와 PRODUCT_ZONE_1 이 직접 인접 (hop 1) 했지만
+        # 새 맵에서는 TRAFFIC_L2 가 끼어 hop 2 가 된다.
+        r = traffic.reserve_path('PICKY1', 1, 'STANDBY_ZONE_2', 'PRODUCT_ZONE_1')
+        assert r.ok
+        assert r.waypoints == ('STANDBY_ZONE_2', 'TRAFFIC_L2', 'PRODUCT_ZONE_1')
+
+    def test_pickup_zone_adjacent_to_corridor_end(self, traffic):
+        # PICKUP_ZONE_1 은 TRAFFIC_T3, PICKUP_ZONE_2 는 TRAFFIC_B3 와 직접 인접.
+        r1 = traffic.reserve_path('PICKY1', 1, 'TRAFFIC_T3', 'PICKUP_ZONE_1')
+        assert r1.ok and r1.waypoints == ('TRAFFIC_T3', 'PICKUP_ZONE_1')
+
+        r2 = traffic.reserve_path('PICKY2', 2, 'TRAFFIC_B3', 'PICKUP_ZONE_2')
+        assert r2.ok and r2.waypoints == ('TRAFFIC_B3', 'PICKUP_ZONE_2')
+
+    def test_removed_nodes_are_unreachable(self, traffic):
+        # 옛 우측 복도(TRAFFIC_R1~R4) 와 PICKUP_ZONE_3/_4 는 새 맵에 존재하지 않음.
+        for removed in (
+            'TRAFFIC_R1', 'TRAFFIC_R2', 'TRAFFIC_R3', 'TRAFFIC_R4',
+            'PICKUP_ZONE_3', 'PICKUP_ZONE_4',
+        ):
+            assert removed not in ZONE_GRAPH, f'{removed} 가 새 그래프에 남아 있음'
+
+    def test_left_corridor_connects_stock_to_bottom(self, traffic):
+        # TRAFFIC_L1, L2, L3 가 좌측 수직 복도로 연결되어 있어
+        # STOCK_ZONE 에서 TB1 까지 좌측 한 줄로 갈 수 있다.
+        r = traffic.reserve_path('PICKY1', 1, 'STOCK_ZONE', 'TRAFFIC_B1')
+        assert r.ok
+        assert r.waypoints == (
+            'STOCK_ZONE', 'TRAFFIC_L1', 'TRAFFIC_L2',
+            'TRAFFIC_L3', 'TRAFFIC_B1',
+        )
