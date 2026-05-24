@@ -76,6 +76,7 @@ CREATE TYPE task_type AS ENUM (
     'MOVE_TO_STORAGE',
     'STOCKING_PLACE',
     'RETURN_HOME',
+    'DOCK_IN',
     'CHARGE'
 );
 

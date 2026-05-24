@@ -21,12 +21,8 @@ INSERT INTO zone (zone_name, zone_type, pos_x, pos_y, pos_z, pos_theta) VALUES
     ('PRODUCT_SLOT_6', 'PRODUCT_SLOT', 0.80, 0.92, 0.35, 0.00),
     ('PICKUP_ZONE_1', 'PICKUP', 1.70, 0.75, 0.00, 3.14),
     ('PICKUP_ZONE_2', 'PICKUP', 1.70, 0.55, 0.00, 3.14),
-    ('PICKUP_ZONE_3', 'PICKUP', 1.70, 0.35, 0.00, 3.14),
-    ('PICKUP_ZONE_4', 'PICKUP', 1.70, 0.15, 0.00, 3.14),
     ('PICKUP_SLOT_1', 'PICKUP_SLOT', 1.88, 0.75, 0.35, 3.14),
-    ('PICKUP_SLOT_2', 'PICKUP_SLOT', 1.88, 0.55, 0.35, 3.14),
-    ('PICKUP_SLOT_3', 'PICKUP_SLOT', 1.88, 0.35, 0.35, 3.14),
-    ('PICKUP_SLOT_4', 'PICKUP_SLOT', 1.88, 0.15, 0.35, 3.14);
+    ('PICKUP_SLOT_2', 'PICKUP_SLOT', 1.88, 0.55, 0.35, 3.14);
 
 INSERT INTO product (name, image_url, stock_qty, storage_zone_id) VALUES
     ('우유', '/static/img/milk.png', 2, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_1')),
@@ -37,10 +33,8 @@ INSERT INTO product (name, image_url, stock_qty, storage_zone_id) VALUES
     ('바나나', '/static/img/banana.png', 2, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_6'));
 
 INSERT INTO pickup_slot (slot_name, status) VALUES
-    ('Pickup_slot_1', 'EMPTY'),
-    ('Pickup_slot_2', 'EMPTY'),
-    ('Pickup_slot_3', 'EMPTY'),
-    ('Pickup_slot_4', 'EMPTY');
+    ('PICKUP_SLOT_1', 'EMPTY'),
+    ('PICKUP_SLOT_2', 'EMPTY');
 
 INSERT INTO robot_unit (unit_name, description) VALUES
     ('PICKY_UNIT_1', 'PICKY1 and COBOT1 pair'),

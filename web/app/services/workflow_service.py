@@ -21,6 +21,7 @@ PICKY_STATE_BY_TASK = {
     "MOVE_TO_STOCK": "MOVING_TO_STOCK",
     "MOVE_TO_STORAGE": "MOVING_TO_STORAGE",
     "RETURN_HOME": "RETURNING",
+    "DOCK_IN": "DOCKING",
     "CHARGE": "CHARGING",
 }
 
@@ -31,6 +32,8 @@ COBOT_STATE_BY_TASK = {
     "STOCKING_PICK": "STOCKING_SORTING",
     "STOCKING_PLACE": "STOCKING_PLACING",
 }
+
+COBOT_TASKS_REQUIRING_PICKY_WAIT = frozenset(COBOT_STATE_BY_TASK)
 
 
 def create_order_workflow(_db: Session, order: Order) -> None:
@@ -64,6 +67,7 @@ def apply_task_runtime_state(db: Session, task: Task, previous_status: str | Non
     elif task.status in ("FAILED", "CANCELLED"):
         update_stocking_item_status(db, task, "FAILED" if task.status == "FAILED" else "CANCELLED")
         clear_robot_task(db, task)
+        clear_companion_picky_waiting(db, task)
         if task.status == "FAILED" and task.order_id:
             order = db.get(Order, task.order_id)
             if order:
@@ -78,6 +82,7 @@ def start_runtime_task(db: Session, task: Task) -> None:
         robot.current_task_id = task.task_id
         robot.robot_status = "CHARGING" if task.task_type == "CHARGE" else "BUSY"
         apply_robot_state_for_task(robot, task.task_type)
+        mark_companion_picky_waiting(db, task, robot)
 
     update_stocking_item_status(db, task, "IN_PROGRESS")
 
@@ -95,9 +100,12 @@ def finish_runtime_task(
 ) -> None:
     order = db.get(Order, task.order_id) if task.order_id else None
     clear_robot_task(db, task)
+    clear_companion_picky_waiting(db, task)
 
     if task.task_type == "STOCKING_PLACE":
         apply_stocking_success(db, task, previous_status)
+
+    mark_picky_waiting_for_next_cobot_task(db, task)
 
     if not order:
         return
@@ -140,6 +148,98 @@ def clear_robot_task(db: Session, task: Task) -> None:
         robot.picky_state = "STANDBY"
     elif robot.robot_type == "COBOT":
         robot.cobot_state = "STANDBY"
+
+
+def mark_companion_picky_waiting(db: Session, task: Task, robot: Robot) -> None:
+    """COBOT 작업 중 같은 unit의 PICKY를 대기 중으로 표시한다."""
+    if robot.robot_type != "COBOT":
+        return
+    if task.task_type not in COBOT_TASKS_REQUIRING_PICKY_WAIT:
+        return
+
+    picky = find_unit_robot(db, robot.unit_id, "PICKY")
+    if not picky:
+        return
+
+    picky.current_task_id = task.task_id
+    if picky.robot_status not in UNAVAILABLE_ROBOT_STATUSES:
+        picky.robot_status = "BUSY"
+    picky.picky_state = "WAITING_FOR_COBOT"
+
+
+def clear_companion_picky_waiting(db: Session, task: Task) -> None:
+    """COBOT 작업 종료 시 같은 unit의 PICKY 대기 상태를 해제한다."""
+    if task.task_type not in COBOT_TASKS_REQUIRING_PICKY_WAIT:
+        return
+
+    cobot = db.get(Robot, task.assigned_robot_id) if task.assigned_robot_id else None
+    if not cobot or cobot.robot_type != "COBOT":
+        return
+
+    picky = find_unit_robot(db, cobot.unit_id, "PICKY")
+    if not picky or picky.current_task_id != task.task_id:
+        return
+
+    picky.current_task_id = None
+    if picky.robot_status not in UNAVAILABLE_ROBOT_STATUSES:
+        picky.robot_status = "IDLE"
+    picky.picky_state = "STANDBY"
+
+
+def mark_picky_waiting_for_next_cobot_task(db: Session, finished_task: Task) -> None:
+    """PICKY 이동 직후 또는 연속 COBOT 작업 사이에 PICKY 대기 상태를 유지한다."""
+    next_task = find_next_open_task(db, finished_task)
+    if not next_task or next_task.task_type not in COBOT_TASKS_REQUIRING_PICKY_WAIT:
+        return
+
+    next_robot = db.get(Robot, next_task.assigned_robot_id) if next_task.assigned_robot_id else None
+    if not next_robot or next_robot.robot_type != "COBOT":
+        return
+
+    current_robot = db.get(Robot, finished_task.assigned_robot_id) if finished_task.assigned_robot_id else None
+    if current_robot and current_robot.robot_type == "PICKY":
+        picky = current_robot
+    else:
+        picky = find_unit_robot(db, next_robot.unit_id, "PICKY")
+
+    if not picky:
+        return
+
+    picky.current_task_id = next_task.task_id
+    if picky.robot_status not in UNAVAILABLE_ROBOT_STATUSES:
+        picky.robot_status = "BUSY"
+    picky.picky_state = "WAITING_FOR_COBOT"
+
+
+def find_next_open_task(db: Session, task: Task) -> Task | None:
+    """같은 주문/입고 흐름에서 현재 task 다음 미완료 task를 찾는다."""
+    query = db.query(Task).filter(Task.sequence_no > task.sequence_no)
+
+    if task.order_id is not None:
+        query = query.filter(Task.order_id == task.order_id)
+    elif task.stocking_item_id is not None:
+        query = query.filter(Task.stocking_item_id == task.stocking_item_id)
+    else:
+        return None
+
+    return (
+        query
+        .filter(Task.status.notin_(FINAL_TASK_STATUSES))
+        .order_by(Task.sequence_no, Task.task_id)
+        .first()
+    )
+
+
+def find_unit_robot(db: Session, unit_id: int | None, robot_type: str) -> Robot | None:
+    """robot_unit 안에서 타입에 맞는 로봇을 찾는다."""
+    if unit_id is None:
+        return None
+
+    return (
+        db.query(Robot)
+        .filter(Robot.unit_id == unit_id, Robot.robot_type == robot_type)
+        .one_or_none()
+    )
 
 
 def reserve_pickup_slot(db: Session, order: Order) -> bool:

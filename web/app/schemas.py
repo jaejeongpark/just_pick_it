@@ -263,7 +263,7 @@ class FleetTaskCreate(BaseModel):
     order_id: int | None = None
     order_item_id: int | None = None
     stocking_item_id: int | None = None
-    sequence_no: int = Field(ge=1)
+    sequence_no: int | None = Field(default=None, ge=1)
     assigned_robot_id: int | str | None = None
     assigned_robot_name: str | None = None
     task_type: TaskType

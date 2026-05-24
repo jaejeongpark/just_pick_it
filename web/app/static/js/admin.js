@@ -35,6 +35,7 @@ const pickupSlotManageButton = document.querySelector(
 const inventoryManageButton = document.querySelector(
   "#inventory-manage-button",
 );
+const taskCreateButton = document.querySelector("#task-create-button");
 const taskViewButton = document.querySelector("#task-view-button");
 const modalBackdrop = document.querySelector("#modal-backdrop");
 const modalPanel = document.querySelector(".modal-panel");
@@ -58,6 +59,7 @@ let latestAdminStatus = null;
 let selectedRobotId = null;
 let selectedOrderId = null;
 let selectedTaskId = null;
+let zoneOptionsCache = null;
 const STOCK_LEVELS = new Set(["low", "warning", "normal"]);
 const ORDER_STATUSES = [
   "ORDER_RECEIVED",
@@ -89,6 +91,7 @@ const TASK_TYPE_SEQUENCE = [
   "MOVE_TO_STORAGE",
   "STOCKING_PLACE",
   "RETURN_HOME",
+  "DOCK_IN",
   "CHARGE",
 ];
 const ROBOT_DISPLAY_NAMES = {
@@ -155,6 +158,7 @@ const statusText = {
   STOCKING_PICK: "입고 선별/상차",
   MOVE_TO_STORAGE: "적재 위치 이동",
   STOCKING_PLACE: "입고상품 적재",
+  DOCK_IN: "도킹",
   CHARGE: "충전",
   RETURN_HOME: "복귀",
   DELIVERING: "운반 중",
@@ -512,6 +516,26 @@ function renderPickupSlotOptions(selectedSlotId) {
         (slot) => `
         <option value="${slot.slot_id}" ${sameId(slot.slot_id, selectedSlotId) ? "selected" : ""}>
           ${formatSlotName(slot.slot_name)} · ${label(slot.status)}
+        </option>
+      `,
+      )
+      .join("")}
+  `;
+}
+
+function renderZoneOptions(zones, selectedZoneId, emptyLabel = "미지정") {
+  const emptySelected =
+    selectedZoneId === null ||
+    selectedZoneId === undefined ||
+    selectedZoneId === "";
+
+  return `
+    <option value="" ${emptySelected ? "selected" : ""}>${emptyLabel}</option>
+    ${zones
+      .map(
+        (zone) => `
+        <option value="${zone.zone_id}" ${sameId(zone.zone_id, selectedZoneId) ? "selected" : ""}>
+          ${zone.zone_name} · ${label(zone.zone_type)}
         </option>
       `,
       )
@@ -1869,6 +1893,8 @@ function openPickupSlotManager() {
 }
 
 function renderTaskDetail(task) {
+  const deleteBlocked = ["RUNNING", "PAUSED"].includes(task.status);
+
   return `
     <div class="modal-summary">
       <div>
@@ -1909,11 +1935,73 @@ function renderTaskDetail(task) {
       </div>
       <button class="small-action-button" type="button" data-save-task-state="${task.task_id}">상태 저장</button>
     </div>
+    <div class="modal-actions">
+      <button
+        class="danger-button"
+        type="button"
+        data-delete-task="${task.task_id}"
+        ${deleteBlocked ? "disabled" : ""}
+      >
+        작업 삭제
+      </button>
+      ${deleteBlocked ? '<span class="muted">RUNNING/PAUSED 작업은 먼저 상태를 바꾼 뒤 삭제합니다.</span>' : ""}
+    </div>
+  `;
+}
+
+function renderTaskCreateForm(zones) {
+  return `
+    <div class="state-editor-form task-create-form">
+      <div>
+        <label for="new-task-type">작업 유형</label>
+        <select id="new-task-type">${renderOptions(TASK_TYPE_SEQUENCE, "MOVE_TO_PRODUCT")}</select>
+      </div>
+      <div>
+        <label for="new-task-status">작업 상태</label>
+        <select id="new-task-status">${renderOptions(TASK_STATUSES, "ASSIGNED")}</select>
+      </div>
+      <div>
+        <label for="new-task-robot-select">할당 로봇</label>
+        <select id="new-task-robot-select">${renderRobotOptions(null)}</select>
+      </div>
+      <div>
+        <label for="new-task-order-id">order_id</label>
+        <input id="new-task-order-id" type="number" min="1" placeholder="없으면 비움">
+      </div>
+      <div>
+        <label for="new-task-order-item-id">order_item_id</label>
+        <input id="new-task-order-item-id" type="number" min="1" placeholder="없으면 비움">
+      </div>
+      <div>
+        <label for="new-task-stocking-item-id">stocking_item_id</label>
+        <input id="new-task-stocking-item-id" type="number" min="1" placeholder="없으면 비움">
+      </div>
+      <div>
+        <label for="new-task-priority">priority</label>
+        <input id="new-task-priority" type="number" min="1" value="2">
+      </div>
+      <div>
+        <label for="new-task-source-zone-id">출발 zone</label>
+        <select id="new-task-source-zone-id">${renderZoneOptions(zones, null)}</select>
+      </div>
+      <div>
+        <label for="new-task-target-zone-id">목표 zone</label>
+        <select id="new-task-target-zone-id">${renderZoneOptions(zones, null)}</select>
+      </div>
+      <div class="state-editor-wide">
+        <label for="new-task-result-message">결과 메시지</label>
+        <input id="new-task-result-message" type="text" placeholder="선택 입력">
+      </div>
+      <button class="small-action-button" type="button" data-create-task>작업 생성</button>
+    </div>
   `;
 }
 
 function renderTaskManager(tasks) {
   return `
+    <div class="modal-actions">
+      <button class="small-action-button" type="button" data-open-task-create>작업 생성</button>
+    </div>
     <div class="task-queue-list">
       ${
         !tasks || tasks.length === 0
@@ -1951,6 +2039,11 @@ function openTaskManager() {
     "Task Management",
     renderTaskManager(latestAdminStatus.tasks || []),
   );
+}
+
+async function openTaskCreate() {
+  const zones = await loadZoneOptions();
+  openModal("Task 생성", renderTaskCreateForm(zones));
 }
 
 function openTaskDetail(taskId) {
@@ -2289,6 +2382,43 @@ async function postAdminAction(path) {
   await loadAdminStatus();
 }
 
+async function errorFromResponse(response, fallbackMessage) {
+  try {
+    const body = await response.json();
+    const detail = body.detail;
+
+    if (typeof detail === "string") {
+      return new Error(detail);
+    }
+
+    if (detail?.message) {
+      return new Error(detail.message);
+    }
+  } catch (error) {
+    // JSON body가 없는 응답이면 기본 메시지를 사용한다.
+  }
+
+  return new Error(fallbackMessage);
+}
+
+async function postJson(path, body) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    throw await errorFromResponse(response, "create request failed");
+  }
+
+  const data = await response.json();
+  await loadAdminStatus();
+  return data;
+}
+
 async function patchJson(path, body) {
   const response = await fetch(path, {
     method: "PATCH",
@@ -2299,10 +2429,35 @@ async function patchJson(path, body) {
   });
 
   if (!response.ok) {
-    throw new Error("state update failed");
+    throw await errorFromResponse(response, "state update failed");
   }
 
   await loadAdminStatus();
+}
+
+async function deleteJson(path) {
+  const response = await fetch(path, { method: "DELETE" });
+
+  if (!response.ok) {
+    throw await errorFromResponse(response, "delete request failed");
+  }
+
+  await loadAdminStatus();
+}
+
+async function loadZoneOptions() {
+  if (zoneOptionsCache) {
+    return zoneOptionsCache;
+  }
+
+  const response = await fetch("/api/fleet/zones?zone_type=ALL");
+
+  if (!response.ok) {
+    throw await errorFromResponse(response, "zone list load failed");
+  }
+
+  zoneOptionsCache = await response.json();
+  return zoneOptionsCache;
 }
 
 function selectNumberOrNull(selector) {
@@ -2313,6 +2468,71 @@ function selectNumberOrNull(selector) {
 function inputNumberOrNull(selector) {
   const value = modalBody.querySelector(selector)?.value;
   return value === "" || value === undefined ? null : Number(value);
+}
+
+function taskIntegerOrNull(selector, fieldName, { required = false, min = null } = {}) {
+  const rawValue = modalBody.querySelector(selector)?.value.trim() || "";
+
+  if (!rawValue) {
+    if (required) {
+      throw new Error(`${fieldName} 값을 입력해주세요.`);
+    }
+
+    return null;
+  }
+
+  const value = Number(rawValue);
+
+  if (!Number.isInteger(value) || (min !== null && value < min)) {
+    throw new Error(`${fieldName} 값이 올바르지 않습니다.`);
+  }
+
+  return value;
+}
+
+async function createTask() {
+  const resultMessage = modalBody
+    .querySelector("#new-task-result-message")
+    ?.value.trim();
+  const task = {
+    task_type: modalBody.querySelector("#new-task-type")?.value,
+    status: modalBody.querySelector("#new-task-status")?.value,
+    assigned_robot_id: selectNumberOrNull("#new-task-robot-select"),
+    order_id: taskIntegerOrNull("#new-task-order-id", "order_id", { min: 1 }),
+    order_item_id: taskIntegerOrNull("#new-task-order-item-id", "order_item_id", { min: 1 }),
+    stocking_item_id: taskIntegerOrNull("#new-task-stocking-item-id", "stocking_item_id", { min: 1 }),
+    priority: taskIntegerOrNull("#new-task-priority", "priority", {
+      required: true,
+      min: 1,
+    }),
+    source_zone_id: selectNumberOrNull("#new-task-source-zone-id"),
+    target_zone_id: selectNumberOrNull("#new-task-target-zone-id"),
+    result_message: resultMessage || null,
+  };
+
+  if (task.stocking_item_id && (task.order_id || task.order_item_id)) {
+    throw new Error("입고 작업은 order_id/order_item_id와 같이 만들 수 없습니다.");
+  }
+
+  await postJson("/api/fleet/tasks/bulk", { tasks: [task] });
+  openTaskManager();
+}
+
+async function deleteTask(taskId) {
+  const task = findTask(taskId);
+
+  if (!task) {
+    return false;
+  }
+
+  if (!confirm(`Task #${task.task_id} ${taskDisplayTitle(task)} 작업을 삭제할까요?`)) {
+    return false;
+  }
+
+  await deleteJson(`/api/fleet/tasks/${taskId}`);
+  selectedTaskId = null;
+  openTaskManager();
+  return true;
 }
 
 async function updateOrderState(orderId) {
@@ -2805,6 +3025,11 @@ exceptionHistoryButton?.addEventListener("click", openExceptionHistory);
 robotManageButton?.addEventListener("click", openRobotManager);
 pickupSlotManageButton?.addEventListener("click", openPickupSlotManager);
 inventoryManageButton?.addEventListener("click", openInventoryManager);
+taskCreateButton?.addEventListener("click", () => {
+  openTaskCreate().catch((error) => {
+    alert(error.message);
+  });
+});
 taskViewButton?.addEventListener("click", openTaskManager);
 llmOpenButton?.addEventListener("click", () => {
   if (llmPanel) {
@@ -2896,6 +3121,43 @@ modalBody?.addEventListener("click", (event) => {
       alert(error.message);
       createPickupSlotButton.disabled = false;
     });
+    return;
+  }
+
+  const openTaskCreateButton = event.target.closest("button[data-open-task-create]");
+
+  if (openTaskCreateButton) {
+    openTaskCreate().catch((error) => {
+      alert(error.message);
+    });
+    return;
+  }
+
+  const createTaskButton = event.target.closest("button[data-create-task]");
+
+  if (createTaskButton) {
+    createTaskButton.disabled = true;
+    createTask().catch((error) => {
+      alert(error.message);
+      createTaskButton.disabled = false;
+    });
+    return;
+  }
+
+  const deleteTaskButton = event.target.closest("button[data-delete-task]");
+
+  if (deleteTaskButton) {
+    deleteTaskButton.disabled = true;
+    deleteTask(Number(deleteTaskButton.dataset.deleteTask))
+      .then((deleted) => {
+        if (!deleted) {
+          deleteTaskButton.disabled = false;
+        }
+      })
+      .catch((error) => {
+        alert(error.message);
+        deleteTaskButton.disabled = false;
+      });
     return;
   }
 

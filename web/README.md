@@ -51,6 +51,15 @@ cd ~/just_pick_it
 web/scripts/setup.sh
 ```
 
+`setup.sh`는 Python 3.12로 `web/.venv`를 만듭니다.
+Ubuntu 22.04처럼 기본 apt 저장소에 `python3.12`가 없으면 deadsnakes PPA를 추가한 뒤 apt로 설치합니다.
+이미 다른 Python 버전으로 만들어진 venv가 있으면 다음처럼 재생성합니다.
+
+```bash
+cd ~/just_pick_it
+RESET_VENV=1 web/scripts/setup.sh
+```
+
 서버 실행:
 
 ```bash
@@ -160,7 +169,7 @@ web/
 
 ```bash
 cd ~/just_pick_it/web
-python3 -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
@@ -190,9 +199,10 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 다음을 자동으로 처리합니다.
 
 ```text
-- Python venv 생성
+- Python 3.12 venv 생성
 - requirements 설치
 - web/.env 생성
+- Ubuntu 22.04에서 Python 3.12가 없으면 deadsnakes PPA 추가 후 설치
 - PostgreSQL 설치 시도(Ubuntu/apt 환경)
 - PostgreSQL 실행 확인
 - just_pick_it DB/user 생성
@@ -202,12 +212,14 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 이미 DB schema가 있으면 schema/seed 적용은 건너뜁니다.
 테이블 구조, enum, index까지 다시 만들고 싶으면 `RESET_DB=1 web/scripts/setup.sh`를 사용합니다.
+기존 `web/.venv`를 Python 3.12로 다시 만들고 싶으면 `RESET_VENV=1 web/scripts/setup.sh`를 사용합니다.
 기본 로컬 DB(`just_pick_it_user` / `just_pick_it`) 기준으로 DB/user를 만들고, `web/.env`의 `DATABASE_URL`로 schema/seed를 적용합니다.
 스크립트 내부에 각 단계별 한글 주석을 달아두었으므로, 동작이 궁금하면 파일을 직접 열어 확인합니다.
 
 ### `web/scripts/run.sh`
 
-`.env`의 `APP_HOST`, `APP_PORT`를 읽고, `web/.venv`를 활성화한 뒤 uvicorn 서버를 실행합니다.
+`.env`의 `DATABASE_URL`, `APP_HOST`, `APP_PORT`를 읽습니다.
+PostgreSQL이 꺼져 있으면 먼저 로컬 DB 서버를 시작하고, DB schema가 준비되어 있는지 확인한 뒤 `web/.venv`를 활성화해 uvicorn 서버를 실행합니다.
 이 스크립트도 실행 목적과 중지 방법을 한글 주석으로 적어두었습니다.
 
 ### `web/scripts/reset_demo_data.sh`
@@ -272,7 +284,7 @@ web/.env
 - web/scripts/setup.sh
   - DATABASE_URL을 읽어 schema/seed 적용 대상 DB를 결정
 - web/scripts/run.sh
-  - APP_HOST, APP_PORT를 읽고 web/.venv를 활성화해서 uvicorn 실행
+  - DATABASE_URL, APP_HOST, APP_PORT를 읽고 PostgreSQL 시작 확인 후 uvicorn 실행
 - web/scripts/reset_demo_data.sh
   - DATABASE_URL을 읽어서 초기화 대상 DB 결정
 ```

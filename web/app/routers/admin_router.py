@@ -1,8 +1,10 @@
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import ExceptionLog, PickupSlot, Product, Robot, Zone
+from app.models import ExceptionLog, PickupSlot, Product, Robot, Task, TaskEvent, Zone
 from app.schemas import (
     AdminLlmMessageCreate,
     AdminLlmMessageRead,
@@ -21,6 +23,7 @@ from app.services.realtime import (
 )
 from app.services.status_service import build_admin_status, build_product_summary
 from app.services.stocking_service import create_stocking_item_record
+from app.services.workflow_service import apply_task_runtime_state
 
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -75,13 +78,32 @@ def emergency_stop(
     db: Session = Depends(get_db),
 ):
     robots = db.query(Robot).all()
+    running_tasks = db.query(Task).filter(Task.status == "RUNNING").all()
 
     for robot in robots:
         robot.robot_status = "EMERGENCY_STOP"
 
+    for task in running_tasks:
+        db.add(
+            TaskEvent(
+                task_id=task.task_id,
+                robot_id=task.assigned_robot_id,
+                from_status="RUNNING",
+                to_status="PAUSED",
+                event_name="EMERGENCY_STOP",
+                reason="Admin emergency stop",
+                created_at=datetime.now(UTC),
+            )
+        )
+        task.status = "PAUSED"
+
     db.commit()
     background_tasks.add_task(broadcast_all_status)
-    return {"status": "ok"}
+    background_tasks.add_task(
+        broadcast_fleet_event,
+        {"event": "EMERGENCY_STOP", "paused_task_ids": [task.task_id for task in running_tasks]},
+    )
+    return {"status": "ok", "paused_task_ids": [task.task_id for task in running_tasks]}
 
 
 @router.post("/resume")
@@ -90,13 +112,36 @@ def resume_system(
     db: Session = Depends(get_db),
 ):
     robots = db.query(Robot).filter(Robot.robot_status == "EMERGENCY_STOP").all()
+    resumed_task_ids = []
 
     for robot in robots:
-        robot.robot_status = "IDLE"
+        task = db.get(Task, robot.current_task_id) if robot.current_task_id else None
+
+        if task and task.status == "PAUSED":
+            task.status = "RUNNING"
+            db.add(
+                TaskEvent(
+                    task_id=task.task_id,
+                    robot_id=robot.robot_id,
+                    from_status="PAUSED",
+                    to_status="RUNNING",
+                    event_name="RESUME",
+                    reason="Admin resume",
+                    created_at=datetime.now(UTC),
+                )
+            )
+            apply_task_runtime_state(db, task, previous_status="PAUSED")
+            resumed_task_ids.append(task.task_id)
+        else:
+            robot.robot_status = "IDLE"
 
     db.commit()
     background_tasks.add_task(broadcast_all_status)
-    return {"status": "ok"}
+    background_tasks.add_task(
+        broadcast_fleet_event,
+        {"event": "RESUME", "resumed_task_ids": resumed_task_ids},
+    )
+    return {"status": "ok", "resumed_task_ids": resumed_task_ids}
 
 
 @router.post("/products", response_model=ProductRead, status_code=201)
