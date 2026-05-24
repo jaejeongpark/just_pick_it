@@ -8,7 +8,7 @@ Reverse Docking - ArUco 시각 서보 후진 도킹
   2단계: tvec + rvec PID 후진 (부호 반전), tvec[2] <= dock_switch_distance 시 종료
   3단계: 노란 주차라인 중심 추종 후진 + 파란 정지선 감지 시 정지
 
-dock(marker_id, dock_map_x, dock_map_y, dock_map_yaw) 를 state_manager 가 호출.
+reverse_dock(marker_id, dock_map_x, dock_map_y, dock_map_yaw) 를 state_manager 가 호출.
 """
 
 import math
@@ -99,7 +99,7 @@ class ReverseDocking(Node):
         # 공통
         self.declare_parameter("max_angular_vel", 0.4)
         self.declare_parameter("aruco_timeout_sec", 30.0)
-        self.declare_parameter("camera_topic", "/camera/image_raw")
+        self.declare_parameter("camera_topic", "camera/image_raw")
 
         # 파라미터 로드
         dict_id = self.get_parameter("aruco_marker_dict").value
@@ -163,10 +163,11 @@ class ReverseDocking(Node):
         cam_topic = self.get_parameter("camera_topic").value
         self.create_subscription(Image, cam_topic, self._image_cb, 10)
 
-        # 퍼블리셔
+        # 퍼블리셔. 노드 namespace 가 'picky1' 이면 자동으로 /picky1/cmd_vel,
+        # /picky1/initialpose 가 된다 (AMCL 도 같은 namespace 안에서 띄운다는 가정).
         self._cmd_pub = self.create_publisher(Twist, "cmd_vel", 10)
         self._init_pose_pub = self.create_publisher(
-            PoseWithCovarianceStamped, "/initialpose", 10
+            PoseWithCovarianceStamped, "initialpose", 10
         )
 
         self.get_logger().info("ReverseDocking ready.")
@@ -175,7 +176,7 @@ class ReverseDocking(Node):
     # 외부 인터페이스
     # ------------------------------------------------------------------ #
 
-    def dock(
+    def reverse_dock(
         self,
         marker_id: int,
         dock_map_x: float,
@@ -184,7 +185,7 @@ class ReverseDocking(Node):
     ) -> bool:
         """ArUco 기반 4단계 후진 도킹. 성공 시 True."""
         self.get_logger().info(
-            f"dock: marker={marker_id}, "
+            f"reverse_dock: marker={marker_id}, "
             f"target=({dock_map_x:.3f}, {dock_map_y:.3f}, "
             f"{math.degrees(dock_map_yaw):.1f}deg)"
         )
@@ -201,11 +202,11 @@ class ReverseDocking(Node):
         for name, fn in phases:
             if not fn():
                 self._stop()
-                self.get_logger().error(f"dock: FAILED at {name}")
+                self.get_logger().error(f"reverse_dock: FAILED at {name}")
                 return False
 
         self._stop()
-        self.get_logger().info("dock: SUCCESS")
+        self.get_logger().info("reverse_dock: SUCCESS")
         self._publish_pose_correction(dock_map_x, dock_map_y, dock_map_yaw)
         return True
 
