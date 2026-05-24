@@ -1,5 +1,5 @@
 """
-AMR2 scan 디버깅 노드.
+PICKY2 scan 디버깅 노드.
 
 이 파일은 LaserScan 메시지를 읽는 연습용 노드다.
 LiDAR가 publish하는 scan 토픽을 받아 전체 최소 거리와 전방 최소 거리를 로그로 출력한다.
@@ -15,9 +15,9 @@ from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 
 
-class Amr2ScanLogger(Node):
+class Picky2ScanLogger(Node):
     """
-    AMR2 LaserScan 디버깅 노드.
+    PICKY2 LaserScan 디버깅 노드.
 
     LaserScan 메시지의 ranges에는 각도별 거리값이 배열로 들어온다.
     이 노드는 그중 유효한 거리만 골라서 다음 두 값을 출력한다.
@@ -33,7 +33,7 @@ class Amr2ScanLogger(Node):
     def __init__(self):
         """노드 parameter를 선언하고 scan subscriber를 등록한다."""
 
-        super().__init__("amr2_scan_logger")
+        super().__init__("picky2_scan_logger")
 
         # declare_parameter는 이 노드가 받을 수 있는 설정값을 등록한다.
         # launch 파일이나 YAML에서 같은 이름의 parameter를 넘기면 그 값으로 바뀐다.
@@ -45,7 +45,7 @@ class Amr2ScanLogger(Node):
             .double_value
         )
 
-        # 실제 실행 토픽은 launch namespace 때문에 /amr2/scan이 된다.
+        # 실제 실행 토픽은 launch namespace 때문에 /picky2/scan이 된다.
         self.scan_sub = self.create_subscription(
             LaserScan,
             "scan",
@@ -129,7 +129,7 @@ def main(args=None):
 
     rclpy.init(args=args)
 
-    node = Amr2ScanLogger()
+    node = Picky2ScanLogger()
 
     try:
         rclpy.spin(node)

@@ -8,8 +8,8 @@ def generate_launch_description():
             Node(
                 package="pinky_amr_2",
                 executable="scan_logger",
-                namespace="amr2",
-                name="amr2_scan_logger",
+                namespace="picky2",
+                name="picky2_scan_logger",
                 output="screen",
                 parameters=[
                     {

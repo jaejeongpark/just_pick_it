@@ -1,0 +1,35 @@
+"""PICKY2용 Pinky bringup launch wrapper.
+
+원본 `pinky_bringup` launch 파일은 수정하지 않는다. 대신 원본 bringup이
+사용하는 전역 토픽을 `/picky2/...` 토픽으로 remap해서 PICKY1/PICKY2가 같은
+ROS_DOMAIN_ID에서 실행될 때 `/odom`, `/cmd_vel`, `/scan` 같은 전역 토픽이
+충돌하지 않도록 한다.
+"""
+
+from launch import LaunchDescription
+from launch.actions import GroupAction, IncludeLaunchDescription
+from launch.launch_description_sources import AnyLaunchDescriptionSource
+from launch.substitutions import PathJoinSubstitution
+from launch_ros.actions import SetRemap
+from launch_ros.substitutions import FindPackageShare
+
+
+def generate_launch_description():
+    """원본 `pinky_bringup`을 PICKY2 namespace/remap 기준으로 실행한다."""
+    pinky_bringup_launch = PathJoinSubstitution(
+        [FindPackageShare("pinky_bringup"), "launch", "bringup_robot.launch.xml"]
+    )
+
+    picky2_bringup = GroupAction(
+        [
+            SetRemap(src="/cmd_vel", dst="/picky2/cmd_vel"),
+            SetRemap(src="/odom", dst="/picky2/odom"),
+            SetRemap(src="/scan", dst="/picky2/scan"),
+            SetRemap(src="/joint_states", dst="/picky2/joint_states"),
+            SetRemap(src="/battery/percent", dst="/picky2/battery/percent"),
+            SetRemap(src="/battery/voltage", dst="/picky2/battery/voltage"),
+            IncludeLaunchDescription(AnyLaunchDescriptionSource(pinky_bringup_launch)),
+        ]
+    )
+
+    return LaunchDescription([picky2_bringup])

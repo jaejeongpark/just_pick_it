@@ -8,8 +8,8 @@ def generate_launch_description():
             Node(
                 package="pinky_amr_2",
                 executable="obstacle_stop",
-                namespace="amr2",
-                name="amr2_obstacle_stop",
+                namespace="picky2",
+                name="picky2_obstacle_stop",
                 output="screen",
                 parameters=[
                     {
