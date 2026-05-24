@@ -97,6 +97,7 @@ task_type_enum = ENUM(
     "MOVE_TO_STORAGE",
     "STOCKING_PLACE",
     "RETURN_HOME",
+    "DOCK_IN",
     "CHARGE",
     name="task_type",
     create_type=False,

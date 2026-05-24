@@ -65,6 +65,13 @@ body {
   gap: 10px;
 }
 
+.horizontal-command-stack {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
 .nav-link,
 .primary-button,
 .ghost-button,
@@ -922,6 +929,14 @@ body {
 
 .state-editor-wide {
   grid-column: span 2;
+}
+
+.task-create-form {
+  grid-template-columns: repeat(3, minmax(120px, 1fr));
+}
+
+.task-create-form > button {
+  align-self: end;
 }
 
 .state-editor-form label {
