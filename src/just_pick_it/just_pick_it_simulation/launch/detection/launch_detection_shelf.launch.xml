@@ -1,0 +1,100 @@
+<?xml version='1.0' ?>
+<!--
+  Detection 시뮬레이션 환경
+  MyCobot280 arm + 소형 2단 선반 + 제품 박스 + AprilTag
+
+  좌표 설계:
+    arm base       (0.00,  0.00, 0.05)  mycobot.gazebo.launch.py 기본값
+    shelf origin   (0.38,  0.00, 0.00)  선반 앞면 x=0.38, 팔 base와 0.30m 이상 간격
+    lower board top  z=0.15  제품 중심 z=0.20
+    upper board top  z=0.35  제품 중심 z=0.40
+
+  카메라 토픽: /camera_head/color/image_raw  (mycobot_gazebo image_bridge)
+-->
+<launch>
+    <arg name="world_file" default="empty.world"/>
+
+    <!-- GZ_SIM_RESOURCE_PATH: mycobot + just_pick_it models -->
+    <set_env name="GZ_SIM_RESOURCE_PATH"
+             value="$(find-pkg-share mycobot_gazebo)/models:$(find-pkg-share just_pick_it_simulation)/models:$(env HOME)/.gazebo/models"/>
+
+    <!--
+      MyCobot Gazebo 환경 (arm + world + bridge + image)
+
+      use_camera=true   : URDF에 RealSense D435 카메라 포함
+                          카메라는 arm end-effector가 아닌 별도 torso stand에 고정됨
+                          위치: base_link+(0.22,-0.30,0) -> torso_link+(0,0.01,0.50)
+                          frame: camera_head_link
+                          해상도: 424x240, 5Hz, tilt: 25deg down
+      use_gazebo=true   : gz_ros2_control 플러그인 활성화 (joint states 소스)
+      load_controllers=true : joint_state_broadcaster + arm_controller 기동
+                          없으면 /joint_states 미발행 -> robot_state_publisher TF 불완전
+      use_sim_time=true : 시뮬레이션 clock 사용
+    -->
+    <include file="$(find-pkg-share mycobot_gazebo)/launch/mycobot.gazebo.launch.py">
+        <arg name="world_file"       value="$(var world_file)"/>
+        <arg name="use_rviz"         value="false"/>
+        <arg name="use_camera"       value="true"/>
+        <arg name="use_gazebo"       value="true"/>
+        <arg name="load_controllers" value="true"/>
+        <arg name="use_sim_time"     value="true"/>
+        <arg name="x"                value="0.0"/>
+        <arg name="y"                value="0.0"/>
+        <arg name="z"                value="0.05"/>
+    </include>
+
+    <!-- 소형 2단 선반: 앞면 x=0.38, 폭 0.40m, 깊이 0.20m, 높이 0.50m -->
+    <node pkg="ros_gz_sim" exec="create" name="spawn_shelf" output="screen"
+          args="-name shelf_small -file $(find-pkg-share just_pick_it_simulation)/models/shelf_small/model.sdf -x 0.38 -y 0.0 -z 0.0">
+        <param name="use_sim_time" value="true"/>
+    </node>
+
+    <!-- 1단 제품 (빨간 박스, 60x60x100mm): 선반 깊이 중심 x=0.47, z=0.20 -->
+    <node pkg="ros_gz_sim" exec="create" name="spawn_box_red_1" output="screen"
+          args="-name product_box_red_1 -file $(find-pkg-share just_pick_it_simulation)/models/products/product_box_red/model.sdf -x 0.47 -y -0.135 -z 0.20">
+        <param name="use_sim_time" value="true"/>
+    </node>
+    <node pkg="ros_gz_sim" exec="create" name="spawn_box_red_2" output="screen"
+          args="-name product_box_red_2 -file $(find-pkg-share just_pick_it_simulation)/models/products/product_box_red/model.sdf -x 0.47 -y -0.045 -z 0.20">
+        <param name="use_sim_time" value="true"/>
+    </node>
+    <node pkg="ros_gz_sim" exec="create" name="spawn_box_red_3" output="screen"
+          args="-name product_box_red_3 -file $(find-pkg-share just_pick_it_simulation)/models/products/product_box_red/model.sdf -x 0.47 -y  0.045 -z 0.20">
+        <param name="use_sim_time" value="true"/>
+    </node>
+    <node pkg="ros_gz_sim" exec="create" name="spawn_box_red_4" output="screen"
+          args="-name product_box_red_4 -file $(find-pkg-share just_pick_it_simulation)/models/products/product_box_red/model.sdf -x 0.47 -y  0.135 -z 0.20">
+        <param name="use_sim_time" value="true"/>
+    </node>
+
+    <!-- 2단 제품 (파란 박스, 60x60x100mm): 선반 깊이 중심 x=0.47, z=0.40 -->
+    <node pkg="ros_gz_sim" exec="create" name="spawn_box_blue_1" output="screen"
+          args="-name product_box_blue_1 -file $(find-pkg-share just_pick_it_simulation)/models/products/product_box_blue/model.sdf -x 0.47 -y -0.135 -z 0.40">
+        <param name="use_sim_time" value="true"/>
+    </node>
+    <node pkg="ros_gz_sim" exec="create" name="spawn_box_blue_2" output="screen"
+          args="-name product_box_blue_2 -file $(find-pkg-share just_pick_it_simulation)/models/products/product_box_blue/model.sdf -x 0.47 -y -0.045 -z 0.40">
+        <param name="use_sim_time" value="true"/>
+    </node>
+    <node pkg="ros_gz_sim" exec="create" name="spawn_box_blue_3" output="screen"
+          args="-name product_box_blue_3 -file $(find-pkg-share just_pick_it_simulation)/models/products/product_box_blue/model.sdf -x 0.47 -y  0.045 -z 0.40">
+        <param name="use_sim_time" value="true"/>
+    </node>
+    <node pkg="ros_gz_sim" exec="create" name="spawn_box_blue_4" output="screen"
+          args="-name product_box_blue_4 -file $(find-pkg-share just_pick_it_simulation)/models/products/product_box_blue/model.sdf -x 0.47 -y  0.135 -z 0.40">
+        <param name="use_sim_time" value="true"/>
+    </node>
+
+    <!-- AprilTag ID0: 카테고리A(빨간) 섹션 — 선반 앞면(x=0.38), 1단 중간 높이 -->
+    <node pkg="ros_gz_sim" exec="create" name="spawn_tag_id0" output="screen"
+          args="-name apriltag_36h11_id0 -file $(find-pkg-share just_pick_it_simulation)/models/markers/apriltag_36h11_id0/model.sdf -x 0.379 -y -0.20 -z 0.22 -R 0.0 -P 0.0 -Y 0.0">
+        <param name="use_sim_time" value="true"/>
+    </node>
+
+    <!-- AprilTag ID1: 카테고리B(파란) 섹션 — 선반 앞면(x=0.38), 2단 중간 높이 -->
+    <node pkg="ros_gz_sim" exec="create" name="spawn_tag_id1" output="screen"
+          args="-name apriltag_36h11_id1 -file $(find-pkg-share just_pick_it_simulation)/models/markers/apriltag_36h11_id1/model.sdf -x 0.379 -y  0.20 -z 0.42 -R 0.0 -P 0.0 -Y 0.0">
+        <param name="use_sim_time" value="true"/>
+    </node>
+
+</launch>

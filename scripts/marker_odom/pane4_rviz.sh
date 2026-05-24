@@ -5,7 +5,7 @@ source /opt/ros/jazzy/setup.bash
 source "$WS_ROOT/install/local_setup.bash"
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID}"
 
-RVIZ_CONFIG="${RVIZ_CONFIG:-$WS_ROOT/src/just_pick_it/just_pick_it_simulation/params/vision/aruco_odom.yaml.rviz}"
+RVIZ_CONFIG="${RVIZ_CONFIG:-$WS_ROOT/src/just_pick_it/just_pick_it_simulation/params/vision/checkerboard_calibration.yaml.rviz}"
 
 echo "=== [4] RViz - Gazebo /clock 대기 중 ==="
 until ros2 topic list 2>/dev/null | grep -q '/clock'; do

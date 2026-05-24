@@ -1,10 +1,10 @@
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import ExceptionLog, Order, PickupSlot, Robot, Task, TaskEvent
+from app.models import ExceptionLog, Order, OrderItem, PickupSlot, Product, Robot, RobotUnit, StockingItem, Task, TaskEvent, Zone
 from app.schemas import (
     FleetExceptionCreate,
     FleetExceptionRead,
@@ -17,33 +17,85 @@ from app.schemas import (
     FleetRobotRunningTaskRead,
     FleetRobotStateUpdate,
     FleetStateUpdateRead,
+    FleetStockingComplete,
+    FleetStockingItemCreate,
+    FleetStockingItemRead,
+    FleetStockingItemUpdate,
+    FleetTaskBulkCreate,
+    FleetTaskBulkCreateRead,
     FleetTaskEventCreate,
     FleetTaskEventRead,
     FleetTaskStateUpdate,
     FleetTaskSummaryRead,
+    FleetZoneRead,
     OrderStatus,
     PickupSlotStatus,
+    StockingItemStatus,
     TaskStatus,
     TaskType,
 )
-from app.services.robot_runtime_policy import FINAL_TASK_STATUSES
-from app.services.workflow_service import (
-    ACTIVE_RUNTIME_TASK_STATUSES,
-    apply_task_runtime_state,
-    assign_ready_tasks,
+from app.services.realtime import broadcast_all_status, broadcast_fleet_event, fleet_event_websockets
+from app.services.robot_runtime_policy import FINAL_TASK_STATUSES, TASK_ROBOT_TYPE
+from app.services.status_service import build_admin_status, build_robot_summary, build_task_summary, build_zone_pose
+from app.services.stocking_service import (
+    build_stocking_item_summary,
+    create_stocking_item_record,
+    resolve_stocking_policy,
 )
-from app.services.realtime import broadcast_all_status
-from app.services.status_service import build_task_summary
+from app.services.workflow_service import apply_task_runtime_state
 
 
-router = APIRouter(prefix="/api/fleet", tags=["robot-runtime"])
+router = APIRouter(prefix="/api/fleet", tags=["fleet-manager"])
 
 
-def build_task_event_response(task_event: TaskEvent) -> dict:
+def get_robot_by_identifier(db: Session, robot_identifier: int | str | None) -> Robot | None:
+    if robot_identifier is None:
+        return None
+
+    if isinstance(robot_identifier, int):
+        return db.get(Robot, robot_identifier)
+
+    if robot_identifier.isdigit():
+        robot = db.get(Robot, int(robot_identifier))
+
+        if robot:
+            return robot
+
+    return db.query(Robot).filter(Robot.robot_name == robot_identifier).first()
+
+
+def get_robot_from_payload(
+    db: Session,
+    robot_id: int | str | None = None,
+    robot_name: str | None = None,
+) -> Robot | None:
+    if robot_id is not None:
+        robot = get_robot_by_identifier(db, robot_id)
+
+        if not robot:
+            raise HTTPException(status_code=404, detail="robot not found")
+
+        return robot
+
+    if robot_name is not None:
+        robot = db.query(Robot).filter(Robot.robot_name == robot_name).first()
+
+        if not robot:
+            raise HTTPException(status_code=404, detail="robot not found")
+
+        return robot
+
+    return None
+
+
+def build_task_event_response(db: Session, task_event: TaskEvent) -> dict:
+    robot = db.get(Robot, task_event.robot_id) if task_event.robot_id else None
+
     return {
         "event_id": task_event.event_id,
         "task_id": task_event.task_id,
         "robot_id": task_event.robot_id,
+        "robot_name": robot.robot_name if robot else None,
         "from_status": task_event.from_status,
         "to_status": task_event.to_status,
         "event_name": task_event.event_name,
@@ -60,9 +112,10 @@ def build_order_summary_response(db: Session, order: Order) -> dict:
             Task.order_id == order.order_id,
             Task.status.notin_(FINAL_TASK_STATUSES),
         )
-        .order_by(Task.task_id)
+        .order_by(Task.sequence_no, Task.task_id)
         .first()
     )
+    robot = db.get(Robot, current_task.assigned_robot_id) if current_task and current_task.assigned_robot_id else None
 
     return {
         "order_id": order.order_id,
@@ -71,45 +124,12 @@ def build_order_summary_response(db: Session, order: Order) -> dict:
         "priority": order.priority,
         "pickup_slot_id": order.pickup_slot_id,
         "pickup_slot_name": pickup_slot.slot_name if pickup_slot else None,
+        "assigned_unit_id": order.assigned_unit_id,
         "current_task_id": current_task.task_id if current_task else None,
         "current_task_type": current_task.task_type if current_task else None,
         "current_task_status": current_task.status if current_task else None,
         "assigned_robot_id": current_task.assigned_robot_id if current_task else None,
-    }
-
-
-def find_robot_runtime_task(db: Session, robot: Robot) -> Task | None:
-    if robot.current_task_id is not None:
-        current_task = db.get(Task, robot.current_task_id)
-
-        if current_task and current_task.status in ACTIVE_RUNTIME_TASK_STATUSES:
-            return current_task
-
-    return (
-        db.query(Task)
-        .filter(
-            Task.assigned_robot_id == robot.robot_id,
-            Task.status.in_(ACTIVE_RUNTIME_TASK_STATUSES),
-        )
-        .order_by(Task.task_id.desc())
-        .first()
-    )
-
-
-def build_robot_runtime_response(db: Session, robot: Robot) -> dict:
-    current_task = find_robot_runtime_task(db, robot)
-
-    return {
-        "robot_id": robot.robot_id,
-        "status": robot.status,
-        "battery_level": robot.battery_level,
-        "current_task_id": robot.current_task_id,
-        "current_task_type": current_task.task_type if current_task else None,
-        "current_task_status": current_task.status if current_task else None,
-        "current_task": build_task_summary(db, current_task) if current_task else None,
-        "pos_x": robot.pos_x,
-        "pos_y": robot.pos_y,
-        "pos_theta": robot.pos_theta,
+        "assigned_robot_name": robot.robot_name if robot else None,
     }
 
 
@@ -157,7 +177,7 @@ def build_pickup_slot_response(db: Session, pickup_slot: PickupSlot) -> dict:
     }
 
 
-def build_pickup_slot_assignment_response(order: Order, pickup_slot: PickupSlot) -> dict:
+def build_pickup_slot_assignment_response(db: Session, order: Order, pickup_slot: PickupSlot) -> dict:
     return {
         "status": "ok",
         "order_id": order.order_id,
@@ -209,9 +229,299 @@ def sync_order_pickup_slot(db: Session, order: Order, previous_slot_id: int | No
         pickup_slot.status = "RESERVED"
 
 
+def resolve_stocking_policy_or_400(
+    requested_quantity: int | None,
+    stocking_policy: str | None,
+) -> str:
+    try:
+        return resolve_stocking_policy(requested_quantity, stocking_policy)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def validate_robot_unit(db: Session, unit_id: int | None) -> None:
+    if unit_id is not None and not db.get(RobotUnit, unit_id):
+        raise HTTPException(status_code=404, detail="robot unit not found")
+
+
+def validate_task_robot_type(robot: Robot | None, task_type: str) -> None:
+    if robot is None:
+        return
+
+    expected_robot_type = TASK_ROBOT_TYPE.get(task_type)
+
+    if expected_robot_type and robot.robot_type != expected_robot_type:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{task_type} task must be assigned to {expected_robot_type}",
+        )
+
+
+def validate_task_refs(db: Session, task_create) -> Robot | None:
+    if task_create.stocking_item_id is not None:
+        if task_create.order_id is not None or task_create.order_item_id is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="stocking task cannot reference order or order_item",
+            )
+
+        if not db.get(StockingItem, task_create.stocking_item_id):
+            raise HTTPException(status_code=404, detail="stocking item not found")
+
+    if task_create.order_id is not None and not db.get(Order, task_create.order_id):
+        raise HTTPException(status_code=404, detail="order not found")
+
+    order_item = (
+        db.get(OrderItem, task_create.order_item_id)
+        if task_create.order_item_id is not None
+        else None
+    )
+
+    if task_create.order_item_id is not None and not order_item:
+        raise HTTPException(status_code=404, detail="order item not found")
+
+    if (
+        order_item
+        and task_create.order_id is not None
+        and order_item.order_id != task_create.order_id
+    ):
+        raise HTTPException(status_code=400, detail="order item does not belong to order")
+
+    if task_create.source_zone_id is not None and not db.get(Zone, task_create.source_zone_id):
+        raise HTTPException(status_code=404, detail="source zone not found")
+
+    if task_create.target_zone_id is not None and not db.get(Zone, task_create.target_zone_id):
+        raise HTTPException(status_code=404, detail="target zone not found")
+
+    robot = get_robot_from_payload(
+        db,
+        robot_id=task_create.assigned_robot_id,
+        robot_name=task_create.assigned_robot_name,
+    )
+    validate_task_robot_type(robot, task_create.task_type)
+    return robot
+
+
+def resolve_task_sequence_no(db: Session, task_create, robot: Robot | None) -> int:
+    if task_create.sequence_no is not None:
+        return task_create.sequence_no
+
+    task_query = db.query(Task)
+
+    if task_create.stocking_item_id is not None:
+        task_query = task_query.filter(Task.stocking_item_id == task_create.stocking_item_id)
+    elif task_create.order_id is not None:
+        task_query = task_query.filter(Task.order_id == task_create.order_id)
+    elif task_create.order_item_id is not None:
+        task_query = task_query.filter(Task.order_item_id == task_create.order_item_id)
+    else:
+        task_query = task_query.filter(
+            Task.order_id.is_(None),
+            Task.order_item_id.is_(None),
+            Task.stocking_item_id.is_(None),
+        )
+
+        if robot is not None:
+            task_query = task_query.filter(Task.assigned_robot_id == robot.robot_id)
+
+    previous_task = task_query.order_by(Task.sequence_no.desc(), Task.task_id.desc()).first()
+    return (previous_task.sequence_no if previous_task else 0) + 1
+
+
+@router.websocket("/ws/events")
+async def fleet_events_websocket(websocket: WebSocket):
+    await fleet_event_websockets.connect(websocket)
+
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        await fleet_event_websockets.disconnect(websocket)
+
+
+@router.get("/snapshot")
+def get_fleet_snapshot(db: Session = Depends(get_db)):
+    return build_admin_status(db)
+
+
+@router.get("/zones", response_model=list[FleetZoneRead])
+def list_fleet_zones(
+    zone_type: str | None = "PRODUCT",
+    db: Session = Depends(get_db),
+):
+    zone_query = db.query(Zone)
+
+    normalized_zone_type = zone_type.upper() if zone_type else None
+
+    if normalized_zone_type and normalized_zone_type != "ALL":
+        zone_query = zone_query.filter(Zone.zone_type == normalized_zone_type)
+
+    zones = zone_query.order_by(Zone.zone_type, Zone.zone_name).all()
+    return [
+        {
+            "zone_id": zone.zone_id,
+            "zone_name": zone.zone_name,
+            "zone_type": zone.zone_type,
+            "pose": build_zone_pose(zone),
+        }
+        for zone in zones
+    ]
+
+
+@router.post("/stocking-items", response_model=FleetStockingItemRead, status_code=201)
+def create_stocking_item(
+    stocking_create: FleetStockingItemCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    product = db.get(Product, stocking_create.product_id)
+
+    if not product:
+        raise HTTPException(status_code=404, detail="product not found")
+
+    validate_robot_unit(db, stocking_create.assigned_unit_id)
+    try:
+        stocking_item = create_stocking_item_record(
+            db,
+            product_id=stocking_create.product_id,
+            requested_quantity=stocking_create.requested_quantity,
+            detected_quantity=stocking_create.detected_quantity,
+            stock_delta=stocking_create.stock_delta,
+            stocking_policy=stocking_create.stocking_policy,
+            status=stocking_create.status,
+            assigned_unit_id=stocking_create.assigned_unit_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    db.commit()
+    db.refresh(stocking_item)
+    background_tasks.add_task(broadcast_all_status)
+    background_tasks.add_task(
+        broadcast_fleet_event,
+        {"event": "STOCKING_ITEM_CREATED", "stocking_item_id": stocking_item.stocking_item_id},
+    )
+    return build_stocking_item_summary(db, stocking_item)
+
+
+@router.get("/stocking-items", response_model=list[FleetStockingItemRead])
+def list_stocking_items(
+    status: StockingItemStatus | None = None,
+    include_completed: bool = False,
+    db: Session = Depends(get_db),
+):
+    stocking_query = db.query(StockingItem)
+
+    if status is not None:
+        stocking_query = stocking_query.filter(StockingItem.status == status)
+    elif not include_completed:
+        stocking_query = stocking_query.filter(StockingItem.status.notin_(("COMPLETED", "CANCELLED")))
+
+    stocking_items = (
+        stocking_query
+        .order_by(StockingItem.stocking_item_id.desc())
+        .limit(50)
+        .all()
+    )
+    return [build_stocking_item_summary(db, item) for item in stocking_items]
+
+
+@router.patch("/stocking-items/{stocking_item_id}", response_model=FleetStockingItemRead)
+def update_stocking_item(
+    stocking_item_id: int,
+    stocking_update: FleetStockingItemUpdate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    stocking_item = (
+        db.query(StockingItem)
+        .filter(StockingItem.stocking_item_id == stocking_item_id)
+        .with_for_update()
+        .one_or_none()
+    )
+
+    if not stocking_item:
+        raise HTTPException(status_code=404, detail="stocking item not found")
+
+    if "assigned_unit_id" in stocking_update.model_fields_set:
+        validate_robot_unit(db, stocking_update.assigned_unit_id)
+        stocking_item.assigned_unit_id = stocking_update.assigned_unit_id
+
+    requested_quantity = (
+        stocking_update.requested_quantity
+        if "requested_quantity" in stocking_update.model_fields_set
+        else stocking_item.requested_quantity
+    )
+    stocking_policy = resolve_stocking_policy_or_400(
+        requested_quantity,
+        stocking_update.stocking_policy or stocking_item.stocking_policy,
+    )
+
+    if "requested_quantity" in stocking_update.model_fields_set:
+        stocking_item.requested_quantity = stocking_update.requested_quantity
+
+    if "detected_quantity" in stocking_update.model_fields_set:
+        stocking_item.detected_quantity = stocking_update.detected_quantity
+
+    if "stock_delta" in stocking_update.model_fields_set:
+        stocking_item.stock_delta = stocking_update.stock_delta
+
+    if stocking_update.stocking_policy is not None:
+        stocking_item.stocking_policy = stocking_policy
+
+    if stocking_update.status is not None:
+        stocking_item.status = stocking_update.status
+
+    db.commit()
+    db.refresh(stocking_item)
+    background_tasks.add_task(broadcast_all_status)
+    return build_stocking_item_summary(db, stocking_item)
+
+
+@router.post("/tasks/bulk", response_model=FleetTaskBulkCreateRead, status_code=201)
+def create_fleet_tasks(
+    task_bulk_create: FleetTaskBulkCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    created_task_ids = []
+
+    for task_create in task_bulk_create.tasks:
+        robot = validate_task_refs(db, task_create)
+        task = Task(
+            order_id=task_create.order_id,
+            order_item_id=task_create.order_item_id,
+            stocking_item_id=task_create.stocking_item_id,
+            sequence_no=resolve_task_sequence_no(db, task_create, robot),
+            assigned_robot_id=robot.robot_id if robot else None,
+            task_type=task_create.task_type,
+            status=task_create.status,
+            priority=task_create.priority,
+            source_zone_id=task_create.source_zone_id,
+            target_zone_id=task_create.target_zone_id,
+            result_message=task_create.result_message,
+        )
+        db.add(task)
+        db.flush()
+        created_task_ids.append(task.task_id)
+
+    db.commit()
+    background_tasks.add_task(broadcast_all_status)
+    background_tasks.add_task(
+        broadcast_fleet_event,
+        {"event": "TASKS_CREATED", "task_ids": created_task_ids},
+    )
+    return {
+        "status": "ok",
+        "task_ids": created_task_ids,
+        "created_count": len(created_task_ids),
+    }
+
+
 @router.get("/tasks", response_model=list[FleetTaskSummaryRead])
 def list_fleet_tasks(
-    robot_id: str | None = None,
+    robot_id: int | None = None,
+    robot_name: str | None = None,
     status: TaskStatus | None = None,
     task_type: TaskType | None = None,
     order_id: int | None = None,
@@ -219,8 +529,10 @@ def list_fleet_tasks(
 ):
     task_query = db.query(Task)
 
-    if robot_id is not None:
-        task_query = task_query.filter(Task.assigned_robot_id == robot_id)
+    robot = get_robot_from_payload(db, robot_id=robot_id, robot_name=robot_name)
+
+    if robot is not None:
+        task_query = task_query.filter(Task.assigned_robot_id == robot.robot_id)
 
     if status is not None:
         task_query = task_query.filter(Task.status == status)
@@ -231,7 +543,7 @@ def list_fleet_tasks(
     if order_id is not None:
         task_query = task_query.filter(Task.order_id == order_id)
 
-    tasks = task_query.order_by(Task.task_id.desc()).all()
+    tasks = task_query.order_by(Task.priority, Task.sequence_no, Task.task_id).all()
     return [build_task_summary(db, task) for task in tasks]
 
 
@@ -246,10 +558,65 @@ def list_order_tasks(
     tasks = (
         db.query(Task)
         .filter(Task.order_id == order_id)
-        .order_by(Task.task_id)
+        .order_by(Task.sequence_no, Task.task_id)
         .all()
     )
     return [build_task_summary(db, task) for task in tasks]
+
+
+@router.delete("/tasks/{task_id}", response_model=FleetStateUpdateRead)
+def delete_fleet_task(
+    task_id: int,
+    background_tasks: BackgroundTasks,
+    force: bool = False,
+    db: Session = Depends(get_db),
+):
+    task = (
+        db.query(Task)
+        .filter(Task.task_id == task_id)
+        .with_for_update()
+        .one_or_none()
+    )
+
+    if not task:
+        raise HTTPException(status_code=404, detail="task not found")
+
+    previous_status = task.status
+
+    if previous_status in ("RUNNING", "PAUSED") and not force:
+        raise HTTPException(
+            status_code=409,
+            detail="running or paused task cannot be deleted without force=true",
+        )
+
+    robots_with_task = db.query(Robot).filter(Robot.current_task_id == task.task_id).all()
+
+    for robot in robots_with_task:
+        robot.current_task_id = None
+
+        if robot.robot_status in ("BUSY", "CHARGING"):
+            robot.robot_status = "IDLE"
+
+    db.query(ExceptionLog).filter(ExceptionLog.task_id == task.task_id).update(
+        {ExceptionLog.task_id: None},
+        synchronize_session=False,
+    )
+    db.query(TaskEvent).filter(TaskEvent.task_id == task.task_id).delete(
+        synchronize_session=False,
+    )
+    db.delete(task)
+    db.commit()
+
+    background_tasks.add_task(broadcast_all_status)
+    background_tasks.add_task(
+        broadcast_fleet_event,
+        {"event": "TASK_DELETED", "task_id": task_id},
+    )
+    return {
+        "status": "ok",
+        "previous_status": previous_status,
+        "current_status": None,
+    }
 
 
 @router.patch("/orders/{order_id}", response_model=FleetStateUpdateRead)
@@ -277,6 +644,9 @@ def update_order_state(
 
     if "pickup_slot_id" in state_update.model_fields_set:
         order.pickup_slot_id = state_update.pickup_slot_id
+
+    if "assigned_unit_id" in state_update.model_fields_set:
+        order.assigned_unit_id = state_update.assigned_unit_id
 
     sync_order_pickup_slot(db, order, previous_slot_id)
     db.commit()
@@ -316,21 +686,18 @@ def update_task_state(
     if state_update.status is not None:
         task.status = state_update.status
 
-    if state_update.assigned_robot_id is not None:
-        robot = (
-            db.query(Robot)
-            .filter(Robot.robot_id == state_update.assigned_robot_id)
-            .with_for_update()
-            .one_or_none()
-        )
+    robot = get_robot_from_payload(
+        db,
+        robot_id=state_update.assigned_robot_id,
+        robot_name=state_update.assigned_robot_name,
+    )
 
-        if not robot:
-            raise HTTPException(status_code=404, detail="robot not found")
-
-        task.assigned_robot_id = state_update.assigned_robot_id
+    if robot is not None:
+        task.assigned_robot_id = robot.robot_id
 
     if state_update.result_message is not None:
         task.result_message = state_update.result_message
+
 
     if state_update.status is not None and previous_status != task.status:
         db.add(
@@ -345,9 +712,13 @@ def update_task_state(
             )
         )
 
-    apply_task_runtime_state(db, task)
+    apply_task_runtime_state(db, task, previous_status=previous_status)
     db.commit()
     background_tasks.add_task(broadcast_all_status)
+    background_tasks.add_task(
+        broadcast_fleet_event,
+        {"event": "TASK_STATUS_CHANGED", "task_id": task.task_id, "status": task.status},
+    )
     return {
         "status": "ok",
         "previous_status": previous_status,
@@ -372,8 +743,11 @@ def create_task_event(
     if not task:
         raise HTTPException(status_code=404, detail="task not found")
 
-    if event_create.robot_id is not None and not db.get(Robot, event_create.robot_id):
-        raise HTTPException(status_code=404, detail="robot not found")
+    robot = get_robot_from_payload(
+        db,
+        robot_id=event_create.robot_id,
+        robot_name=event_create.robot_name,
+    )
 
     if (
         event_create.update_task_status
@@ -392,7 +766,7 @@ def create_task_event(
     from_status = event_create.from_status or task.status
     task_event = TaskEvent(
         task_id=task.task_id,
-        robot_id=event_create.robot_id or task.assigned_robot_id,
+        robot_id=robot.robot_id if robot else task.assigned_robot_id,
         from_status=from_status,
         to_status=event_create.to_status,
         event_name=event_create.event_name,
@@ -402,13 +776,18 @@ def create_task_event(
     db.add(task_event)
 
     if event_create.update_task_status:
+        previous_status = task.status
         task.status = event_create.to_status
+        apply_task_runtime_state(db, task, previous_status=previous_status)
 
-    apply_task_runtime_state(db, task)
     db.commit()
     db.refresh(task_event)
     background_tasks.add_task(broadcast_all_status)
-    return build_task_event_response(task_event)
+    background_tasks.add_task(
+        broadcast_fleet_event,
+        {"event": task_event.event_name or "TASK_EVENT", "task_id": task.task_id},
+    )
+    return build_task_event_response(db, task_event)
 
 
 @router.get("/tasks/{task_id}/events", response_model=list[FleetTaskEventRead])
@@ -426,30 +805,30 @@ def list_task_events(
         .all()
     )
     return [
-        build_task_event_response(task_event)
+        build_task_event_response(db, task_event)
         for task_event in task_events
     ]
 
 
-@router.get("/robots/{robot_id}", response_model=FleetRobotRuntimeRead)
+@router.get("/robots/{robot_identifier}", response_model=FleetRobotRuntimeRead)
 def get_robot_runtime(
-    robot_id: str,
+    robot_identifier: str,
     db: Session = Depends(get_db),
 ):
-    robot = db.get(Robot, robot_id)
+    robot = get_robot_by_identifier(db, robot_identifier)
 
     if not robot:
         raise HTTPException(status_code=404, detail="robot not found")
 
-    return build_robot_runtime_response(db, robot)
+    return build_robot_summary(db, robot)
 
 
-@router.get("/robots/{robot_id}/running-task", response_model=FleetRobotRunningTaskRead)
+@router.get("/robots/{robot_identifier}/running-task", response_model=FleetRobotRunningTaskRead)
 def get_robot_running_task(
-    robot_id: str,
+    robot_identifier: str,
     db: Session = Depends(get_db),
 ):
-    robot = db.get(Robot, robot_id)
+    robot = get_robot_by_identifier(db, robot_identifier)
 
     if not robot:
         raise HTTPException(status_code=404, detail="robot not found")
@@ -457,16 +836,21 @@ def get_robot_running_task(
     return build_robot_running_task_response(db, robot)
 
 
-@router.patch("/robots/{robot_id}", response_model=FleetStateUpdateRead)
+@router.patch("/robots/{robot_identifier}", response_model=FleetStateUpdateRead)
 def update_robot_state(
-    robot_id: str,
+    robot_identifier: str,
     state_update: FleetRobotStateUpdate,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
+    existing_robot = get_robot_by_identifier(db, robot_identifier)
+
+    if not existing_robot:
+        raise HTTPException(status_code=404, detail="robot not found")
+
     robot = (
         db.query(Robot)
-        .filter(Robot.robot_id == robot_id)
+        .filter(Robot.robot_id == existing_robot.robot_id)
         .with_for_update()
         .one_or_none()
     )
@@ -474,8 +858,20 @@ def update_robot_state(
     if not robot:
         raise HTTPException(status_code=404, detail="robot not found")
 
-    if state_update.status is not None:
-        robot.status = state_update.status
+    requested_status = state_update.robot_status or state_update.status
+
+    if requested_status is not None:
+        robot.robot_status = requested_status
+
+    if "picky_state" in state_update.model_fields_set:
+        if robot.robot_type != "PICKY" and state_update.picky_state is not None:
+            raise HTTPException(status_code=400, detail="picky_state is only for PICKY")
+        robot.picky_state = state_update.picky_state
+
+    if "cobot_state" in state_update.model_fields_set:
+        if robot.robot_type != "COBOT" and state_update.cobot_state is not None:
+            raise HTTPException(status_code=400, detail="cobot_state is only for COBOT")
+        robot.cobot_state = state_update.cobot_state
 
     if "current_task_id" in state_update.model_fields_set and state_update.current_task_id is not None:
         task = db.get(Task, state_update.current_task_id)
@@ -498,21 +894,22 @@ def update_robot_state(
     if "pos_theta" in state_update.model_fields_set:
         robot.pos_theta = state_update.pos_theta
 
-    assign_ready_tasks(db, preferred_robot_id=robot_id)
     db.commit()
     background_tasks.add_task(broadcast_all_status)
+    background_tasks.add_task(
+        broadcast_fleet_event,
+        {"event": "ROBOT_STATE_CHANGED", "robot_id": robot.robot_id, "robot_name": robot.robot_name},
+    )
     return {"status": "ok"}
 
 
 @router.post("/assignments/run")
-def run_task_assignment(
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-):
-    assigned_count = assign_ready_tasks(db)
-    db.commit()
-    background_tasks.add_task(broadcast_all_status)
-    return {"status": "ok", "assigned_count": assigned_count}
+def run_task_assignment():
+    return {
+        "status": "ok",
+        "assigned_count": 0,
+        "message": "task assignment is handled by Fleet Manager",
+    }
 
 
 @router.get("/orders", response_model=list[FleetOrderSummaryRead])
@@ -565,7 +962,7 @@ def assign_pickup_slot(
             db.commit()
             background_tasks.add_task(broadcast_all_status)
 
-        return build_pickup_slot_assignment_response(order, pickup_slot)
+        return build_pickup_slot_assignment_response(db, order, pickup_slot)
 
     pickup_slot = (
         db.query(PickupSlot)
@@ -585,7 +982,7 @@ def assign_pickup_slot(
     db.refresh(order)
     db.refresh(pickup_slot)
     background_tasks.add_task(broadcast_all_status)
-    return build_pickup_slot_assignment_response(order, pickup_slot)
+    return build_pickup_slot_assignment_response(db, order, pickup_slot)
 
 
 @router.get("/pickup-slots", response_model=list[FleetPickupSlotRead])
@@ -631,8 +1028,11 @@ def create_exception_report(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    if exception_create.robot_id is not None and not db.get(Robot, exception_create.robot_id):
-        raise HTTPException(status_code=404, detail="robot not found")
+    robot = get_robot_from_payload(
+        db,
+        robot_id=exception_create.robot_id,
+        robot_name=exception_create.robot_name,
+    )
 
     if exception_create.task_id is not None and not db.get(Task, exception_create.task_id):
         raise HTTPException(status_code=404, detail="task not found")
@@ -641,7 +1041,7 @@ def create_exception_report(
         raise HTTPException(status_code=404, detail="order not found")
 
     exception = ExceptionLog(
-        robot_id=exception_create.robot_id,
+        robot_id=robot.robot_id if robot else None,
         task_id=exception_create.task_id,
         order_id=exception_create.order_id,
         exception_type=exception_create.exception_type,
@@ -653,7 +1053,90 @@ def create_exception_report(
     db.commit()
     db.refresh(exception)
     background_tasks.add_task(broadcast_all_status)
+    background_tasks.add_task(
+        broadcast_fleet_event,
+        {"event": "EXCEPTION_CREATED", "exception_id": exception.exception_id},
+    )
     return {
         "status": "ok",
         "exception_id": exception.exception_id,
+    }
+
+
+@router.post("/stocking/complete")
+def complete_stocking(
+    stocking_complete: FleetStockingComplete,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    task = (
+        db.query(Task)
+        .filter(Task.task_id == stocking_complete.task_id)
+        .with_for_update()
+        .one_or_none()
+    )
+
+    if not task:
+        raise HTTPException(status_code=404, detail="task not found")
+
+    if task.task_type != "STOCKING_PLACE":
+        raise HTTPException(status_code=409, detail="task is not STOCKING_PLACE")
+
+    if task.stocking_item_id is None:
+        raise HTTPException(status_code=409, detail="stocking item is not linked to task")
+
+    stocking_item = (
+        db.query(StockingItem)
+        .filter(StockingItem.stocking_item_id == task.stocking_item_id)
+        .with_for_update()
+        .one_or_none()
+    )
+
+    if not stocking_item:
+        raise HTTPException(status_code=404, detail="stocking item not found")
+
+    product = db.get(Product, stocking_item.product_id)
+
+    if not product:
+        raise HTTPException(status_code=404, detail="product not found")
+
+    if stocking_complete.detected_quantity is not None:
+        stocking_item.detected_quantity = stocking_complete.detected_quantity
+
+    if stocking_complete.stock_delta is not None:
+        stocking_item.stock_delta = stocking_complete.stock_delta
+
+    previous_status = task.status
+    task.status = "SUCCESS"
+
+    if stocking_complete.result_message is not None:
+        task.result_message = stocking_complete.result_message
+
+    apply_task_runtime_state(db, task, previous_status=previous_status)
+    stock_delta = stocking_item.stock_delta
+
+    db.add(
+        TaskEvent(
+            task_id=task.task_id,
+            robot_id=task.assigned_robot_id,
+            from_status=previous_status,
+            to_status=task.status,
+            event_name="STOCKING_COMPLETED",
+            reason=task.result_message,
+            created_at=datetime.now(UTC),
+        )
+    )
+    db.commit()
+    background_tasks.add_task(broadcast_all_status)
+    background_tasks.add_task(
+        broadcast_fleet_event,
+        {"event": "STOCKING_COMPLETED", "task_id": task.task_id, "stock_delta": stock_delta},
+    )
+    return {
+        "status": "ok",
+        "task_id": task.task_id,
+        "stocking_item_id": stocking_item.stocking_item_id,
+        "product_id": product.product_id,
+        "stock_delta": stock_delta,
+        "stock_qty": product.stock_qty,
     }

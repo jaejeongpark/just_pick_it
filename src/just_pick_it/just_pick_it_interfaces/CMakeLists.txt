@@ -13,8 +13,12 @@ find_package(geometry_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DetectedObject.msg"
-  # srv 파일 추가 예시: "srv/GetObjectPose.srv"
-  # action 파일 추가 예시: "action/PickPlace.action"
+  "msg/TrackedObject.msg"
+  "msg/TrackedObjectArray.msg"
+  "srv/EmergencyControl.srv"
+  "srv/SelectTarget.srv"
+  "action/DockCommand.action"
+  "action/MoveCommand.action"
   DEPENDENCIES std_msgs geometry_msgs
 )
 

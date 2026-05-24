@@ -1,105 +1,51 @@
-from datetime import UTC, datetime
-
 from sqlalchemy.orm import Session
 
-from app.models import Order, OrderItem, PickupSlot, Robot, Task, TaskEvent, Zone
-from app.services.robot_runtime_policy import (
-    FINAL_TASK_STATUSES,
-    MIN_AMR_BATTERY_LEVEL,
-    UNAVAILABLE_ROBOT_STATUSES,
-)
+from app.models import Order, OrderItem, PickupSlot, Product, Robot, StockingItem, Task
+from app.services.robot_runtime_policy import FINAL_TASK_STATUSES, UNAVAILABLE_ROBOT_STATUSES
+from app.services.stocking_service import FINAL_STOCKING_ITEM_STATUSES, resolve_stock_delta
 
 
-# 주문 workflow helper다.
-# 주문 접수 시 Control Server는 task 목록을 만들고 Cobot 담당 task를 고정 배정한다.
-# AMR 담당 task는 AMR이 대기 상태를 보고할 때 배정한다.
 ORDER_PRIORITY = 2
-PATROL_PRIORITY = 1
-AMR_ORDER_TASK_TYPES = ("STANDBY_LOAD", "LOAD", "STANDBY_UNLOAD", "UNLOAD")
-ACTIVE_RUNTIME_TASK_STATUSES = ("ASSIGNED", "RUNNING", "PAUSED")
-ORDER_WORKFLOW_INACTIVE_STATUSES = ("PICKUP_READY", "COMPLETED", "ERROR")
-AMR_ASSIGNMENT_READY_STATUSES = ("IDLE", "STANDBY")
-ROBOT_STATUS_AFTER_TASK_SUCCESS = {
-    "STANDBY_LOAD": "WAITING",
-    "LOAD": "WAITING",
-    "STANDBY_UNLOAD": "WAITING",
-    "UNLOAD": "WAITING",
-}
 
-ORDER_TASK_TYPES = (
-    "STANDBY_LOAD",
-    "LOAD",
-    "SORTING",
-    "STANDBY_UNLOAD",
-    "UNLOAD",
-    "INSPECTION",
-)
-
-FIXED_TASK_ROBOT_ID = {
-    "SORTING": "SORTING_COBOT",
-    "INSPECTION": "INSPECTION_COBOT",
-}
-
-TASK_ZONE_NAMES = {
-    "STANDBY_LOAD": (None, "STANDBY_LOADING_ZONE"),
-    "LOAD": ("STANDBY_LOADING_ZONE", "LOADING_ZONE"),
-    "SORTING": ("PRODUCT_ZONE", "LOADING_ZONE"),
-    "STANDBY_UNLOAD": ("LOADING_ZONE", "STANDBY_UNLOADING_ZONE"),
-    "UNLOAD": ("STANDBY_UNLOADING_ZONE", "UNLOADING_ZONE"),
-    "INSPECTION": ("UNLOADING_ZONE", "UNLOADING_ZONE"),
-}
-
-ORDER_STATUS_BY_TASK = {
-    "STANDBY_LOAD": "ORDER_WAIT",
-    "LOAD": "ORDER_WAIT",
-    "SORTING": "SORTING",
-    "STANDBY_UNLOAD": "DELIVERING",
-    "UNLOAD": "DELIVERING",
+ORDER_STATUS_BY_RUNNING_TASK = {
+    "MOVE_TO_PRODUCT": "SORTING",
+    "SORTING_AND_LOAD": "SORTING",
+    "MOVE_TO_PICKUP": "DELIVERING",
     "INSPECTION": "INSPECTING",
+    "UNLOAD": "INSPECTING",
 }
 
-ROBOT_STATUS_BY_TASK = {
-    "STANDBY_LOAD": "STANDBY",
-    "SORTING": "SORTING",
-    "LOAD": "LOADING",
-    "STANDBY_UNLOAD": "MOVING",
+PICKY_STATE_BY_TASK = {
+    "MOVE_TO_PRODUCT": "MOVING_TO_PRODUCT",
+    "MOVE_TO_PICKUP": "MOVING_TO_PICKUP",
+    "MOVE_TO_STOCK": "MOVING_TO_STOCK",
+    "MOVE_TO_STORAGE": "MOVING_TO_STORAGE",
+    "RETURN_HOME": "RETURNING",
+    "DOCK_IN": "DOCKING",
+    "CHARGE": "CHARGING",
+}
+
+COBOT_STATE_BY_TASK = {
+    "SORTING_AND_LOAD": "SORTING",
     "INSPECTION": "INSPECTING",
     "UNLOAD": "UNLOADING",
-    "PATROL": "PATROLLING",
-    "CHARGE": "CHARGING",
-    "RETURN_HOME": "RETURNING",
+    "STOCKING_PICK": "STOCKING_SORTING",
+    "STOCKING_PLACE": "STOCKING_PLACING",
 }
 
+COBOT_TASKS_REQUIRING_PICKY_WAIT = frozenset(COBOT_STATE_BY_TASK)
 
-def create_order_workflow(db: Session, order: Order) -> None:
-    existing_task = (
-        db.query(Task)
-        .filter(Task.order_id == order.order_id)
-        .first()
-    )
 
-    if existing_task:
-        return
+def create_order_workflow(_db: Session, order: Order) -> None:
+    """Move a newly created order into the Fleet Manager waiting queue.
+
+    Task creation and robot assignment are owned by Fleet Manager. The Control
+    Server only stores the order and order_item rows, then exposes them through
+    snapshot/event APIs.
+    """
 
     order.status = "ORDER_WAIT"
     order.priority = ORDER_PRIORITY
-    zone_ids_by_name = build_zone_ids_by_name(db)
-
-    for task_type in ORDER_TASK_TYPES:
-        source_zone_id, target_zone_id = resolve_task_zone_ids(zone_ids_by_name, task_type)
-        task = Task(
-            order_id=order.order_id,
-            assigned_robot_id=resolve_order_task_robot_id(task_type),
-            task_type=task_type,
-            status="QUEUED",
-            priority=order.priority,
-            source_zone_id=source_zone_id,
-            target_zone_id=target_zone_id,
-        )
-        db.add(task)
-
-    db.flush()
-    assign_ready_tasks(db)
 
 
 def complete_order_workflow(db: Session, order: Order) -> None:
@@ -107,262 +53,84 @@ def complete_order_workflow(db: Session, order: Order) -> None:
 
     if order.pickup_slot_id:
         pickup_slot = db.get(PickupSlot, order.pickup_slot_id)
-        if pickup_slot:
+        if pickup_slot and pickup_slot.status != "BLOCKED":
             pickup_slot.status = "EMPTY"
 
-    for task in order_tasks(db, order):
-        if task.status not in FINAL_TASK_STATUSES:
-            record_task_event(db, task, "SUCCESS", "ORDER_COMPLETED")
-            task.status = "SUCCESS"
-        clear_robot_task(db, task)
-
-    db.flush()
-    assign_ready_tasks(db)
-
-
-def resolve_order_task_robot_id(task_type: str) -> str | None:
-    if task_type in AMR_ORDER_TASK_TYPES:
-        return None
-
-    return FIXED_TASK_ROBOT_ID[task_type]
-
-
-def get_robot_for_update(db: Session, robot_id: str) -> Robot | None:
-    return (
-        db.query(Robot)
-        .filter(Robot.robot_id == robot_id)
-        .with_for_update()
-        .one_or_none()
-    )
-
-
-def assign_ready_tasks(db: Session, preferred_robot_id: str | None = None) -> int:
     db.flush()
 
-    assigned_count = 0
-    preferred_robot = (
-        get_robot_for_update(db, preferred_robot_id)
-        if preferred_robot_id
-        else None
-    )
-    tasks = (
-        db.query(Task)
-        .filter(Task.status == "QUEUED")
-        .order_by(Task.priority, Task.task_id)
-        .with_for_update(skip_locked=True)
-        .all()
-    )
 
-    for task in tasks:
-        if not task_is_ready_to_assign(db, task):
-            continue
-
-        robot = resolve_task_assignment_robot(db, task, preferred_robot)
-        if not robot:
-            continue
-
-        if not robot_is_assignable(db, robot, task):
-            continue
-
-        order = db.get(Order, task.order_id) if task.order_id else None
-        if order and task.task_type == "INSPECTION" and not reserve_pickup_slot(db, order):
-            continue
-
-        if task.assigned_robot_id is None:
-            task.assigned_robot_id = robot.robot_id
-            reserve_related_amr_tasks(db, task, robot.robot_id)
-
-        mark_task_assigned(db, task, "Ready task assigned by Control Server.")
-        assigned_count += 1
-
-    return assigned_count
-
-
-def task_is_ready_to_assign(db: Session, task: Task) -> bool:
-    if task.order_id is None:
-        return True
-
-    order = db.get(Order, task.order_id)
-    if not order or order.status in ORDER_WORKFLOW_INACTIVE_STATUSES:
-        return False
-
-    if order_has_active_runtime_task(db, order):
-        return False
-
-    next_task = next_pending_task(db, order)
-    return bool(next_task and next_task.task_id == task.task_id)
-
-
-def resolve_task_assignment_robot(
-    db: Session,
-    task: Task,
-    preferred_robot: Robot | None,
-) -> Robot | None:
-    if task.assigned_robot_id is not None:
-        return get_robot_for_update(db, task.assigned_robot_id)
-
-    if task.task_type not in AMR_ORDER_TASK_TYPES and task.task_type != "PATROL":
-        return None
-
-    if not preferred_robot or not preferred_robot.robot_id.startswith("AMR_"):
-        return None
-
-    return preferred_robot
-
-
-def reserve_related_amr_tasks(db: Session, task: Task, robot_id: str) -> None:
-    if task.order_id is None or task.task_type not in AMR_ORDER_TASK_TYPES:
-        return
-
-    tasks = (
-        db.query(Task)
-        .filter(
-            Task.order_id == task.order_id,
-            Task.task_type.in_(AMR_ORDER_TASK_TYPES),
-            Task.status.notin_(FINAL_TASK_STATUSES),
-        )
-        .all()
-    )
-
-    for order_task in tasks:
-        if order_task.assigned_robot_id is None:
-            order_task.assigned_robot_id = robot_id
-
-
-def order_has_active_runtime_task(db: Session, order: Order) -> bool:
-    return (
-        db.query(Task)
-        .filter(
-            Task.order_id == order.order_id,
-            Task.status.in_(ACTIVE_RUNTIME_TASK_STATUSES),
-        )
-        .first()
-        is not None
-    )
-
-
-def build_zone_ids_by_name(db: Session) -> dict[str, int]:
-    return {
-        zone.zone_name: zone.zone_id
-        for zone in db.query(Zone).all()
-    }
-
-
-def resolve_task_zone_ids(
-    zone_ids_by_name: dict[str, int],
-    task_type: str,
-) -> tuple[int | None, int | None]:
-    source_zone_name, target_zone_name = TASK_ZONE_NAMES.get(task_type, (None, None))
-    source_zone_id = zone_ids_by_name.get(source_zone_name) if source_zone_name else None
-    target_zone_id = zone_ids_by_name.get(target_zone_name) if target_zone_name else None
-
-    return source_zone_id, target_zone_id
-
-
-def robot_battery_can_take_order(robot: Robot) -> bool:
-    if robot.battery_level is None:
-        return True
-
-    return robot.battery_level >= MIN_AMR_BATTERY_LEVEL
-
-
-def robot_is_assignable(db: Session, robot: Robot | None, task: Task) -> bool:
-    if not robot or robot.status in UNAVAILABLE_ROBOT_STATUSES:
-        return False
-
-    if robot.robot_id.startswith("AMR_"):
-        if (
-            robot.status not in AMR_ASSIGNMENT_READY_STATUSES
-            and not task_is_amr_order_continuation(task, robot)
-        ):
-            return False
-
-        if not robot_battery_can_take_order(robot):
-            return False
-
-    if robot.current_task_id:
-        current_task = db.get(Task, robot.current_task_id)
-        if current_task and current_task.task_id != task.task_id:
-            return False
-
-    other_task = (
-        db.query(Task)
-        .filter(
-            Task.assigned_robot_id == robot.robot_id,
-            Task.task_id != task.task_id,
-            Task.status.in_(ACTIVE_RUNTIME_TASK_STATUSES),
-        )
-        .first()
-    )
-
-    return other_task is None
-
-
-def task_is_amr_order_continuation(task: Task, robot: Robot) -> bool:
-    return (
-        robot.status == "WAITING"
-        and task.task_type in AMR_ORDER_TASK_TYPES
-        and task.assigned_robot_id == robot.robot_id
-        and task.order_id is not None
-    )
-
-
-def apply_task_runtime_state(db: Session, task: Task) -> None:
+def apply_task_runtime_state(db: Session, task: Task, previous_status: str | None = None) -> None:
     if task.status == "RUNNING":
         start_runtime_task(db, task)
     elif task.status == "SUCCESS":
-        finish_runtime_task(db, task)
-        assign_ready_tasks(db)
+        finish_runtime_task(db, task, previous_status=previous_status)
     elif task.status in ("FAILED", "CANCELLED"):
+        update_stocking_item_status(db, task, "FAILED" if task.status == "FAILED" else "CANCELLED")
         clear_robot_task(db, task)
+        clear_companion_picky_waiting(db, task)
         if task.status == "FAILED" and task.order_id:
             order = db.get(Order, task.order_id)
             if order:
                 order.status = "ERROR"
-        assign_ready_tasks(db)
 
 
 def start_runtime_task(db: Session, task: Task) -> None:
-    if not task.assigned_robot_id:
-        return
-
-    robot = db.get(Robot, task.assigned_robot_id)
+    robot = db.get(Robot, task.assigned_robot_id) if task.assigned_robot_id else None
     order = db.get(Order, task.order_id) if task.order_id else None
 
     if robot:
         robot.current_task_id = task.task_id
-        robot.status = ROBOT_STATUS_BY_TASK.get(task.task_type, robot.status)
+        robot.robot_status = "CHARGING" if task.task_type == "CHARGE" else "BUSY"
+        apply_robot_state_for_task(robot, task.task_type)
+        mark_companion_picky_waiting(db, task, robot)
+
+    update_stocking_item_status(db, task, "IN_PROGRESS")
 
     if order:
         if task.task_type == "INSPECTION":
             reserve_pickup_slot(db, order)
 
-        order.status = ORDER_STATUS_BY_TASK.get(task.task_type, order.status)
+        order.status = ORDER_STATUS_BY_RUNNING_TASK.get(task.task_type, order.status)
 
 
-def finish_runtime_task(db: Session, task: Task) -> None:
+def finish_runtime_task(
+    db: Session,
+    task: Task,
+    previous_status: str | None = None,
+) -> None:
     order = db.get(Order, task.order_id) if task.order_id else None
-    clear_robot_task(db, task, robot_status_after_task_success(task))
+    clear_robot_task(db, task)
+    clear_companion_picky_waiting(db, task)
+
+    if task.task_type == "STOCKING_PLACE":
+        apply_stocking_success(db, task, previous_status)
+
+    mark_picky_waiting_for_next_cobot_task(db, task)
 
     if not order:
         return
 
-    if task.task_type == "SORTING":
-        update_order_items(db, order, "SORTED")
+    if task.task_type == "SORTING_AND_LOAD":
+        update_order_item(db, task.order_item_id, "SORTED")
     elif task.task_type == "INSPECTION":
         update_order_items(db, order, "INSPECTED")
+    elif task.task_type == "UNLOAD":
         if order.pickup_slot_id:
             pickup_slot = db.get(PickupSlot, order.pickup_slot_id)
             if pickup_slot and pickup_slot.status != "BLOCKED":
                 pickup_slot.status = "OCCUPIED"
+
         order.status = "PICKUP_READY"
 
 
-def robot_status_after_task_success(task: Task) -> str:
-    return ROBOT_STATUS_AFTER_TASK_SUCCESS.get(task.task_type, "IDLE")
+def apply_robot_state_for_task(robot: Robot, task_type: str) -> None:
+    if robot.robot_type == "PICKY":
+        robot.picky_state = PICKY_STATE_BY_TASK.get(task_type, robot.picky_state)
+    elif robot.robot_type == "COBOT":
+        robot.cobot_state = COBOT_STATE_BY_TASK.get(task_type, robot.cobot_state)
 
 
-def clear_robot_task(db: Session, task: Task, next_status: str = "IDLE") -> None:
+def clear_robot_task(db: Session, task: Task) -> None:
     if not task.assigned_robot_id:
         return
 
@@ -373,8 +141,105 @@ def clear_robot_task(db: Session, task: Task, next_status: str = "IDLE") -> None
 
     robot.current_task_id = None
 
-    if robot.status not in UNAVAILABLE_ROBOT_STATUSES:
-        robot.status = next_status
+    if robot.robot_status not in UNAVAILABLE_ROBOT_STATUSES:
+        robot.robot_status = "IDLE"
+
+    if robot.robot_type == "PICKY":
+        robot.picky_state = "STANDBY"
+    elif robot.robot_type == "COBOT":
+        robot.cobot_state = "STANDBY"
+
+
+def mark_companion_picky_waiting(db: Session, task: Task, robot: Robot) -> None:
+    """COBOT 작업 중 같은 unit의 PICKY를 대기 중으로 표시한다."""
+    if robot.robot_type != "COBOT":
+        return
+    if task.task_type not in COBOT_TASKS_REQUIRING_PICKY_WAIT:
+        return
+
+    picky = find_unit_robot(db, robot.unit_id, "PICKY")
+    if not picky:
+        return
+
+    picky.current_task_id = task.task_id
+    if picky.robot_status not in UNAVAILABLE_ROBOT_STATUSES:
+        picky.robot_status = "BUSY"
+    picky.picky_state = "WAITING_FOR_COBOT"
+
+
+def clear_companion_picky_waiting(db: Session, task: Task) -> None:
+    """COBOT 작업 종료 시 같은 unit의 PICKY 대기 상태를 해제한다."""
+    if task.task_type not in COBOT_TASKS_REQUIRING_PICKY_WAIT:
+        return
+
+    cobot = db.get(Robot, task.assigned_robot_id) if task.assigned_robot_id else None
+    if not cobot or cobot.robot_type != "COBOT":
+        return
+
+    picky = find_unit_robot(db, cobot.unit_id, "PICKY")
+    if not picky or picky.current_task_id != task.task_id:
+        return
+
+    picky.current_task_id = None
+    if picky.robot_status not in UNAVAILABLE_ROBOT_STATUSES:
+        picky.robot_status = "IDLE"
+    picky.picky_state = "STANDBY"
+
+
+def mark_picky_waiting_for_next_cobot_task(db: Session, finished_task: Task) -> None:
+    """PICKY 이동 직후 또는 연속 COBOT 작업 사이에 PICKY 대기 상태를 유지한다."""
+    next_task = find_next_open_task(db, finished_task)
+    if not next_task or next_task.task_type not in COBOT_TASKS_REQUIRING_PICKY_WAIT:
+        return
+
+    next_robot = db.get(Robot, next_task.assigned_robot_id) if next_task.assigned_robot_id else None
+    if not next_robot or next_robot.robot_type != "COBOT":
+        return
+
+    current_robot = db.get(Robot, finished_task.assigned_robot_id) if finished_task.assigned_robot_id else None
+    if current_robot and current_robot.robot_type == "PICKY":
+        picky = current_robot
+    else:
+        picky = find_unit_robot(db, next_robot.unit_id, "PICKY")
+
+    if not picky:
+        return
+
+    picky.current_task_id = next_task.task_id
+    if picky.robot_status not in UNAVAILABLE_ROBOT_STATUSES:
+        picky.robot_status = "BUSY"
+    picky.picky_state = "WAITING_FOR_COBOT"
+
+
+def find_next_open_task(db: Session, task: Task) -> Task | None:
+    """같은 주문/입고 흐름에서 현재 task 다음 미완료 task를 찾는다."""
+    query = db.query(Task).filter(Task.sequence_no > task.sequence_no)
+
+    if task.order_id is not None:
+        query = query.filter(Task.order_id == task.order_id)
+    elif task.stocking_item_id is not None:
+        query = query.filter(Task.stocking_item_id == task.stocking_item_id)
+    else:
+        return None
+
+    return (
+        query
+        .filter(Task.status.notin_(FINAL_TASK_STATUSES))
+        .order_by(Task.sequence_no, Task.task_id)
+        .first()
+    )
+
+
+def find_unit_robot(db: Session, unit_id: int | None, robot_type: str) -> Robot | None:
+    """robot_unit 안에서 타입에 맞는 로봇을 찾는다."""
+    if unit_id is None:
+        return None
+
+    return (
+        db.query(Robot)
+        .filter(Robot.unit_id == unit_id, Robot.robot_type == robot_type)
+        .one_or_none()
+    )
 
 
 def reserve_pickup_slot(db: Session, order: Order) -> bool:
@@ -388,7 +253,7 @@ def reserve_pickup_slot(db: Session, order: Order) -> bool:
         db.query(PickupSlot)
         .filter(PickupSlot.status == "EMPTY")
         .order_by(PickupSlot.slot_id)
-        .with_for_update()
+        .with_for_update(skip_locked=True)
         .first()
     )
 
@@ -400,6 +265,16 @@ def reserve_pickup_slot(db: Session, order: Order) -> bool:
     return True
 
 
+def update_order_item(db: Session, order_item_id: int | None, status: str) -> None:
+    if order_item_id is None:
+        return
+
+    item = db.get(OrderItem, order_item_id)
+
+    if item:
+        item.status = status
+
+
 def update_order_items(db: Session, order: Order, status: str) -> None:
     items = db.query(OrderItem).filter(OrderItem.order_id == order.order_id).all()
 
@@ -407,57 +282,40 @@ def update_order_items(db: Session, order: Order, status: str) -> None:
         item.status = status
 
 
-def record_task_event(
+def update_stocking_item_status(db: Session, task: Task, status: str) -> None:
+    if task.stocking_item_id is None:
+        return
+
+    stocking_item = db.get(StockingItem, task.stocking_item_id)
+
+    if stocking_item and stocking_item.status not in FINAL_STOCKING_ITEM_STATUSES:
+        stocking_item.status = status
+
+
+def apply_stocking_success(
     db: Session,
     task: Task,
-    to_status: str,
-    event_name: str,
-    reason: str | None = None,
-) -> None:
-    db.add(
-        TaskEvent(
-            task_id=task.task_id,
-            robot_id=task.assigned_robot_id,
-            from_status=task.status,
-            to_status=to_status,
-            event_name=event_name,
-            reason=reason,
-            created_at=datetime.now(UTC),
-        )
-    )
+    previous_status: str | None = None,
+) -> int | None:
+    if previous_status == "SUCCESS" or task.stocking_item_id is None:
+        return None
 
+    stocking_item = db.get(StockingItem, task.stocking_item_id)
 
-def mark_task_assigned(
-    db: Session,
-    task: Task,
-    reason: str | None = None,
-) -> None:
-    if task.status != "ASSIGNED":
-        record_task_event(db, task, "ASSIGNED", "TASK_ASSIGNED", reason)
+    if not stocking_item or stocking_item.status == "COMPLETED":
+        return stocking_item.stock_delta if stocking_item else None
 
-    task.status = "ASSIGNED"
+    product = db.get(Product, stocking_item.product_id)
 
+    if not product:
+        return None
 
-def next_pending_task(db: Session, order: Order) -> Task | None:
-    db.flush()
+    stock_delta = resolve_stock_delta(stocking_item)
 
-    return (
-        db.query(Task)
-        .filter(
-            Task.order_id == order.order_id,
-            Task.status.notin_(FINAL_TASK_STATUSES),
-        )
-        .order_by(Task.task_id)
-        .first()
-    )
+    if stock_delta is None:
+        return None
 
-
-def order_tasks(db: Session, order: Order) -> list[Task]:
-    db.flush()
-
-    return (
-        db.query(Task)
-        .filter(Task.order_id == order.order_id)
-        .order_by(Task.task_id)
-        .all()
-    )
+    product.stock_qty += stock_delta
+    stocking_item.stock_delta = stock_delta
+    stocking_item.status = "COMPLETED"
+    return stock_delta

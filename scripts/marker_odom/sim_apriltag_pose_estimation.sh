@@ -4,15 +4,16 @@
 #
 # 레이아웃:
 #   ┌──────────────┬──────────────┐
-#   │  1. Gazebo   │  4. RViz     │
+#   │  1. Gazebo   │  3. RViz     │
 #   ├──────────────┼──────────────┤
-#   │  2. Estimator│  3. Teleop   │
+#   │  2. AprilTag │  4. Teleop   │
+#   │     Nodes    │              │
 #   └──────────────┴──────────────┘
 #
 # 자동: 1(Gazebo) 시작 시 /clock 발행
-#       2(Estimator)는 /clock 과 /camera/image_raw 등장 시 시작
-#       4(RViz)는 /clock 등장 시 시작 (map, april_odom TF 및 연결선 표시)
-# 수동: 3(Teleop)으로 pinky_pro 주행 (cmd_vel 발행: i, ,, j, l, k 키)
+#       2(AprilTag Nodes)는 /clock 등장 시 static TF, map TF, detector 동시 시작
+#       3(RViz)는 /clock 등장 시 시작 (map, odom TF 및 AprilTag 포즈 표시)
+# 수동: 4(Teleop)으로 pinky_pro 주행 (cmd_vel 발행: i, ,, j, l, k 키)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP_CONFIG=$(mktemp /tmp/terminator_sim_apriltag_pose_XXXXXX.cfg)
@@ -45,11 +46,11 @@ cat > "$TMP_CONFIG" << EOF
       parent = vpaned_left
       command = $SCRIPT_DIR/pane1_gazebo_apriltag.sh
       title = 1. Gazebo
-    [[[terminal_estimator]]]
+    [[[terminal_apriltag_nodes]]]
       type = Terminal
       parent = vpaned_left
       command = $SCRIPT_DIR/pane2_apriltag_estimator.sh
-      title = 2. Estimator
+      title = 2. AprilTag Nodes
     [[[vpaned_right]]]
       type = VPaned
       parent = hpaned0
@@ -58,12 +59,12 @@ cat > "$TMP_CONFIG" << EOF
       type = Terminal
       parent = vpaned_right
       command = $SCRIPT_DIR/pane4_rviz_apriltag.sh
-      title = 4. RViz
+      title = 3. RViz
     [[[terminal_teleop]]]
       type = Terminal
       parent = vpaned_right
       command = $SCRIPT_DIR/pane3_teleop.sh
-      title = 3. Teleop
+      title = 4. Teleop
 [plugins]
 EOF
 

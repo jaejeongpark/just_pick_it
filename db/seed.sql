@@ -1,29 +1,59 @@
--- Temporary development seed data. Replace coordinates and products after map/product details are fixed.
+-- Temporary development seed data. Replace coordinates after the final map is fixed.
+-- *_ZONE_* means a PICKY navigation/parking pose.
+-- *_SLOT_* means a physical product/pickup pose for COBOT work.
 
-INSERT INTO zone (zone_name, pos_x, pos_y, pos_z, pos_theta) VALUES
-    ('A_ZONE', 0.50, 0.70, 0.00, 0.00),
-    ('LOADING_ZONE', 0.30, 0.40, 0.00, 0.00),
-    ('STANDBY_LOADING_ZONE', 0.85, 0.40, 0.00, 0.00),
-    ('STANDBY_UNLOADING_ZONE', 1.45, 0.40, 0.00, 3.14),
-    ('UNLOADING_ZONE', 1.70, 0.40, 0.00, 3.14),
-    ('HOME', 1.00, 0.50, 0.00, 0.00),
-    ('CHARGING_ZONE', 1.00, 0.50, 0.00, 0.00),
-    ('PRODUCT_ZONE', 0.20, 0.80, 0.10, NULL);
+INSERT INTO zone (zone_name, zone_type, pos_x, pos_y, pos_z, pos_theta) VALUES
+    ('STANDBY_ZONE_1', 'STANDBY', 0.90, 0.82, 0.00, 0.00),
+    ('STANDBY_ZONE_2', 'STANDBY', 0.90, 0.08, 0.00, 0.00),
+    ('STOCK_ZONE', 'STOCK', 0.15, 0.45, 0.00, 0.00),
+    ('STOCK_SLOT', 'STOCK_SLOT', 0.08, 0.45, 0.35, 0.00),
+    ('PRODUCT_ZONE_1', 'PRODUCT', 0.20, 0.80, 0.00, 0.00),
+    ('PRODUCT_ZONE_2', 'PRODUCT', 0.32, 0.80, 0.00, 0.00),
+    ('PRODUCT_ZONE_3', 'PRODUCT', 0.44, 0.80, 0.00, 0.00),
+    ('PRODUCT_ZONE_4', 'PRODUCT', 0.56, 0.80, 0.00, 0.00),
+    ('PRODUCT_ZONE_5', 'PRODUCT', 0.68, 0.80, 0.00, 0.00),
+    ('PRODUCT_ZONE_6', 'PRODUCT', 0.80, 0.80, 0.00, 0.00),
+    ('PRODUCT_SLOT_1', 'PRODUCT_SLOT', 0.20, 0.92, 0.35, 0.00),
+    ('PRODUCT_SLOT_2', 'PRODUCT_SLOT', 0.32, 0.92, 0.35, 0.00),
+    ('PRODUCT_SLOT_3', 'PRODUCT_SLOT', 0.44, 0.92, 0.35, 0.00),
+    ('PRODUCT_SLOT_4', 'PRODUCT_SLOT', 0.56, 0.92, 0.35, 0.00),
+    ('PRODUCT_SLOT_5', 'PRODUCT_SLOT', 0.68, 0.92, 0.35, 0.00),
+    ('PRODUCT_SLOT_6', 'PRODUCT_SLOT', 0.80, 0.92, 0.35, 0.00),
+    ('PICKUP_ZONE_1', 'PICKUP', 1.70, 0.75, 0.00, 3.14),
+    ('PICKUP_ZONE_2', 'PICKUP', 1.70, 0.55, 0.00, 3.14),
+    ('PICKUP_SLOT_1', 'PICKUP_SLOT', 1.88, 0.75, 0.35, 3.14),
+    ('PICKUP_SLOT_2', 'PICKUP_SLOT', 1.88, 0.55, 0.35, 3.14);
 
-INSERT INTO product (name, image_url, stock_qty, storage_location) VALUES
-    ('우유', '/static/img/milk.png', 2, 'PRODUCT_ZONE'),
-    ('시리얼', '/static/img/cereal.png', 2, 'PRODUCT_ZONE'),
-    ('바나나 우유', '/static/img/banana_milk.png', 2, 'PRODUCT_ZONE'),
-    ('식빵', '/static/img/bread.png', 2, 'PRODUCT_ZONE'),
-    ('투게더', '/static/img/together.png', 2, 'PRODUCT_ZONE'),
-    ('바나나', '/static/img/banana.png', 2, 'PRODUCT_ZONE');
+INSERT INTO product (name, image_url, stock_qty, storage_zone_id) VALUES
+    ('우유', '/static/img/milk.png', 2, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_1')),
+    ('시리얼', '/static/img/cereal.png', 2, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_2')),
+    ('바나나 우유', '/static/img/banana_milk.png', 2, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_3')),
+    ('식빵', '/static/img/bread.png', 2, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_4')),
+    ('투게더', '/static/img/together.png', 2, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_5')),
+    ('바나나', '/static/img/banana.png', 2, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_6'));
 
 INSERT INTO pickup_slot (slot_name, status) VALUES
-    ('Pickup_slot_1', 'EMPTY'),
-    ('Pickup_slot_2', 'EMPTY');
+    ('PICKUP_SLOT_1', 'EMPTY'),
+    ('PICKUP_SLOT_2', 'EMPTY');
 
-INSERT INTO robot (robot_id, status, ros_namespace, battery_level, pos_x, pos_y, pos_theta) VALUES
-    ('SORTING_COBOT', 'IDLE', '/sorting_cobot', NULL, NULL, NULL, NULL),
-    ('INSPECTION_COBOT', 'IDLE', '/inspection_cobot', NULL, NULL, NULL, NULL),
-    ('AMR_1', 'IDLE', '/amr_1', 100, 0.90, 0.82, 0.00),
-    ('AMR_2', 'IDLE', '/amr_2', 100, 0.90, 0.08, 0.00);
+INSERT INTO robot_unit (unit_name, description) VALUES
+    ('PICKY_UNIT_1', 'PICKY1 and COBOT1 pair'),
+    ('PICKY_UNIT_2', 'PICKY2 and COBOT2 pair');
+
+INSERT INTO robot (
+    robot_name,
+    unit_id,
+    robot_type,
+    robot_status,
+    picky_state,
+    cobot_state,
+    ros_namespace,
+    battery_level,
+    pos_x,
+    pos_y,
+    pos_theta
+) VALUES
+    ('PICKY1', 1, 'PICKY', 'IDLE', 'STANDBY', NULL, '/picky1', 100, 0.90, 0.82, 0.00),
+    ('COBOT1', 1, 'COBOT', 'IDLE', NULL, 'STANDBY', '/cobot1', NULL, NULL, NULL, NULL),
+    ('PICKY2', 2, 'PICKY', 'IDLE', 'STANDBY', NULL, '/picky2', 100, 0.90, 0.08, 0.00),
+    ('COBOT2', 2, 'COBOT', 'IDLE', NULL, 'STANDBY', '/cobot2', NULL, NULL, NULL, NULL);

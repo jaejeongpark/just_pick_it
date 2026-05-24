@@ -1,0 +1,40 @@
+<?xml version='1.0' ?>
+<launch>
+    <arg name="image_topic"             default="/camera_head/color/image_raw"/>
+    <arg name="model_path"              default="yolov8n-seg.pt"/>
+    <arg name="confidence"              default="0.5"/>
+    <arg name="consistency_frames"      default="5"/>
+    <arg name="camera_frame"            default="camera_head_link"/>
+    <arg name="world_frame"             default="world"/>
+    <arg name="shelf_height_z"          default="0.15"/>
+    <arg name="use_sim_time"            default="true"/>
+
+    <arg name="calibration_file"
+         default="$(find-pkg-share just_pick_it_perception)/result/camera_calibration.yaml"/>
+    <arg name="apriltag_poses_file"
+         default="$(find-pkg-share just_pick_it_perception)/config/detection_apriltag_poses.yaml"/>
+    <arg name="params_file"
+         default="$(find-pkg-share just_pick_it_perception)/config/detection_params.yaml"/>
+
+    <node pkg="just_pick_it_perception" exec="detection_tracker"
+          name="detection_tracker_node" output="screen">
+        <param name="use_sim_time"       value="$(var use_sim_time)"/>
+        <param name="model_path"         value="$(var model_path)"/>
+        <param name="confidence"         value="$(var confidence)"/>
+        <param name="consistency_frames" value="$(var consistency_frames)"/>
+        <param name="image_topic"        value="$(var image_topic)"/>
+        <param from="$(var params_file)"/>
+    </node>
+
+    <node pkg="just_pick_it_perception" exec="target_manager"
+          name="target_manager_node" output="screen">
+        <param name="use_sim_time"              value="$(var use_sim_time)"/>
+        <param name="camera_calibration_file"   value="$(var calibration_file)"/>
+        <param name="apriltag_poses_file"       value="$(var apriltag_poses_file)"/>
+        <param name="camera_frame"              value="$(var camera_frame)"/>
+        <param name="world_frame"               value="$(var world_frame)"/>
+        <param name="shelf_height_z"            value="$(var shelf_height_z)"/>
+        <param name="image_topic"               value="$(var image_topic)"/>
+        <param from="$(var params_file)"/>
+    </node>
+</launch>

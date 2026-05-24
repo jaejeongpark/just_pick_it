@@ -6,7 +6,7 @@ from app.models import Order, OrderItem, PickupSlot, Product
 from app.schemas import OrderCreate, OrderRead
 from app.services.product_images import resolve_product_image_url
 from app.services.workflow_service import ORDER_PRIORITY, complete_order_workflow, create_order_workflow
-from app.services.realtime import broadcast_all_status
+from app.services.realtime import broadcast_all_status, broadcast_fleet_event
 
 
 router = APIRouter(prefix="/api/orders", tags=["orders"])
@@ -32,10 +32,13 @@ def build_order_response(db: Session, order: Order) -> OrderRead:
         order_id=order.order_id,
         order_no=order.order_no,
         status=order.status,
+        priority=order.priority,
         pickup_slot_id=order.pickup_slot_id,
         pickup_slot_name=pickup_slot_name,
+        assigned_unit_id=order.assigned_unit_id,
         items=[
             {
+                "item_id": item.item_id,
                 "product_id": item.product_id,
                 "product_name": product.name,
                 "image_url": resolve_product_image_url(product),
@@ -100,6 +103,14 @@ def create_order(
     db.commit()
     db.refresh(order)
     background_tasks.add_task(broadcast_all_status)
+    background_tasks.add_task(
+        broadcast_fleet_event,
+        {
+            "event": "ORDER_CREATED",
+            "order_id": order.order_id,
+            "order_no": order.order_no,
+        },
+    )
 
     return build_order_response(db, order)
 
@@ -144,5 +155,13 @@ def complete_order(
     db.commit()
     db.refresh(order)
     background_tasks.add_task(broadcast_all_status)
+    background_tasks.add_task(
+        broadcast_fleet_event,
+        {
+            "event": "ORDER_COMPLETED",
+            "order_id": order.order_id,
+            "order_no": order.order_no,
+        },
+    )
 
     return build_order_response(db, order)

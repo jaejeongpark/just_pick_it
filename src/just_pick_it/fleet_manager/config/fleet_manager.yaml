@@ -1,0 +1,11 @@
+fleet_manager:
+  ros__parameters:
+    robot_ids:
+      - PICKY1
+      - PICKY2
+      - COBOT1
+      - COBOT2
+    server_base_url: "http://192.168.4.1:8000"
+    waiting_work_poll_period_sec: 5.0
+    fleet_event_ws_enabled: true
+    fleet_event_reconnect_sec: 2.0
