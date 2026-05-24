@@ -15,7 +15,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DetectedObject.msg"
   "msg/TrackedObject.msg"
   "msg/TrackedObjectArray.msg"
+  "srv/EmergencyControl.srv"
   "srv/SelectTarget.srv"
+  "action/DockCommand.action"
   "action/MoveCommand.action"
   DEPENDENCIES std_msgs geometry_msgs
 )
