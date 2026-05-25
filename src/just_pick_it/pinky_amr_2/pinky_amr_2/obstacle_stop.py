@@ -1,5 +1,5 @@
 """
-AMR2 obstacle stop 노드.
+PICKY2 obstacle stop 노드.
 
 이 파일은 scan 기반 safety layer의 첫 버전이다.
 상위 controller가 만든 속도 명령을 바로 cmd_vel로 보내지 않고,
@@ -24,9 +24,9 @@ from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 
 
-class Amr2ObstacleStop(Node):
+class Picky2ObstacleStop(Node):
     """
-    AMR2 전방 장애물 정지 노드.
+    PICKY2 전방 장애물 정지 노드.
 
     이 노드는 planner나 controller가 아니다.
     목표 지점 계산, 경로 생성, 우회 판단은 하지 않는다.
@@ -39,7 +39,7 @@ class Amr2ObstacleStop(Node):
     def __init__(self):
         """정지 판단 parameter, subscriber, publisher를 준비한다."""
 
-        super().__init__("amr2_obstacle_stop")
+        super().__init__("picky2_obstacle_stop")
 
         # front_angle_limit_rad:
         #   로봇 기준 정면으로 볼 좌우 각도 범위다.
@@ -71,7 +71,7 @@ class Amr2ObstacleStop(Node):
         self.front_min_distance = float("inf")
         self.is_blocked = False
 
-        # scan은 장애물 판단 입력이다. launch namespace 기준 실제 토픽은 /amr2/scan.
+        # scan은 장애물 판단 입력이다. launch namespace 기준 실제 토픽은 /picky2/scan.
         self.scan_sub = self.create_subscription(
             LaserScan,
             "scan",
@@ -200,7 +200,7 @@ def main(args=None):
 
     rclpy.init(args=args)
 
-    node = Amr2ObstacleStop()
+    node = Picky2ObstacleStop()
 
     try:
         rclpy.spin(node)

@@ -1,0 +1,20 @@
+# true면 emergency stop, false면 resume 요청이다.
+bool emergency_stop
+
+# 요청 사유. 예: ADMIN, SYSTEM, HUMAN_DETECTED, OBSTACLE_DETECTED
+string reason
+
+# 관련 task가 없으면 0을 사용한다.
+int32 task_id
+
+# Control Server/Fleet Manager 로그 추적용. 비워도 된다.
+string request_id
+---
+# State Manager가 요청을 수락했는지 여부.
+bool accepted
+
+# State Manager가 전이한 상태 또는 거절 사유 코드.
+string status
+
+# 사람이 읽을 수 있는 상세 메시지.
+string message

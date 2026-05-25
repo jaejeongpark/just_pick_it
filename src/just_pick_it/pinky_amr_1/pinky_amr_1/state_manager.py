@@ -16,7 +16,7 @@ from sensor_msgs.msg import BatteryState
 from std_msgs.msg import Float32, String
 from tf2_ros import Buffer, TransformListener
 
-from just_pick_it_interfaces.action import MoveCommand
+from just_pick_it_interfaces.action import DockCommand, MoveCommand
 
 from pinky_amr_1.move_to_goal import MoveToGoal
 from pinky_amr_1.reverse_docking import ReverseDocking
@@ -31,12 +31,14 @@ TASK_TO_MOVING_STATE = {
     'RETURN_HOME':     'RETURNING',
 }
 
-# 목적지 도착 후 전환할 picky_state (RETURN_HOME 제외)
+# 목적지 도착 후 전환할 picky_state.
+# RETURN_HOME 은 STANDBY_ZONE 도착까지만 담당하고 도킹은 DOCK_IN task 가 별도 수행한다.
 ARRIVAL_STATE = {
     'MOVE_TO_PRODUCT': 'WAITING_FOR_COBOT',
     'MOVE_TO_PICKUP':  'WAITING_FOR_COBOT',
     'MOVE_TO_STOCK':   'WAITING_FOR_COBOT',
     'MOVE_TO_STORAGE': 'WAITING_FOR_COBOT',
+    'RETURN_HOME':     'STANDBY',
 }
 
 
@@ -50,42 +52,62 @@ class StateManager(Node):
     """
     AMR picky_state 상태 기계 노드.
 
-    Task Manager로부터 MoveCommand Action으로 명령을 수신하여
-    waypoint 이동을 수행하고 picky_state를 전환한다.
+    Task Manager로부터 MoveCommand / DockCommand Action으로 명령을 수신하여
+    waypoint 이동 또는 후진 도킹을 수행하고 picky_state를 전환한다.
 
-    외부 인터페이스:
-      Action Server : /{ns}/move_command  (MoveCommand)
-      Publisher     : /{ns}/picky_state   (std_msgs/String)
+    외부 인터페이스 (모두 launch namespace 기준 상대경로):
+      Action Server : move_command  (just_pick_it_interfaces/MoveCommand)
+      Action Server : dock_command  (just_pick_it_interfaces/DockCommand)
+      Publisher     : picky_state   (std_msgs/String)
+
+    자세한 모듈 설계는 docs/state_manager.md 참고.
     """
 
-    def __init__(self, move_node: MoveToGoal, aruco_node: ReverseDocking) -> None:
+    def __init__(self, move_node: MoveToGoal, reverse_docking_node: ReverseDocking) -> None:
         super().__init__('state_manager')
 
         self.declare_parameter('server_base_url', 'http://192.168.4.1:8000')
         self.declare_parameter('robot_id', 'PICKY1')
-        self.declare_parameter('robot_namespace', 'picky1')
         self.declare_parameter('report_interval_sec', 1.0)
-        self.declare_parameter('aruco_marker_id', 0)
-        self.declare_parameter('standby_x', 0.0)
-        self.declare_parameter('standby_y', 0.0)
-        self.declare_parameter('standby_theta', 0.0)
         self.declare_parameter('dock_departure_distance', 0.08)
         self.declare_parameter('battery_full_voltage', 8.4)
         self.declare_parameter('battery_empty_voltage', 6.8)
 
+        # 충전 도크별 ArUco 마커 ID와 도크의 절대 좌표(map frame).
+        # DockCommand goal 의 dock_name 으로 lookup 한다.
+        self.declare_parameter('charging_dock_1.marker_id', 0)
+        self.declare_parameter('charging_dock_1.map_x', 0.10)
+        self.declare_parameter('charging_dock_1.map_y', 0.10)
+        self.declare_parameter('charging_dock_1.map_yaw', 0.0)
+        self.declare_parameter('charging_dock_2.marker_id', 1)
+        self.declare_parameter('charging_dock_2.map_x', 0.27)
+        self.declare_parameter('charging_dock_2.map_y', 0.10)
+        self.declare_parameter('charging_dock_2.map_yaw', 0.0)
+
         self._url = self.get_parameter('server_base_url').value
         self._robot_id = self.get_parameter('robot_id').value
-        self._ns = self.get_parameter('robot_namespace').value
-        self._aruco_id = self.get_parameter('aruco_marker_id').value
-        self._standby_x = self.get_parameter('standby_x').value
-        self._standby_y = self.get_parameter('standby_y').value
-        self._standby_theta = self.get_parameter('standby_theta').value
         self._depart_dist = self.get_parameter('dock_departure_distance').value
         self._bat_full = self.get_parameter('battery_full_voltage').value
         self._bat_empty = self.get_parameter('battery_empty_voltage').value
 
+        # dock_name → (marker_id, map_x, map_y, map_yaw)
+        self._dock_pose_by_name: dict[str, tuple[int, float, float, float]] = {
+            'CHARGING_DOCK_1': (
+                int(self.get_parameter('charging_dock_1.marker_id').value),
+                float(self.get_parameter('charging_dock_1.map_x').value),
+                float(self.get_parameter('charging_dock_1.map_y').value),
+                float(self.get_parameter('charging_dock_1.map_yaw').value),
+            ),
+            'CHARGING_DOCK_2': (
+                int(self.get_parameter('charging_dock_2.marker_id').value),
+                float(self.get_parameter('charging_dock_2.map_x').value),
+                float(self.get_parameter('charging_dock_2.map_y').value),
+                float(self.get_parameter('charging_dock_2.map_yaw').value),
+            ),
+        }
+
         self._move = move_node
-        self._aruco = aruco_node
+        self._reverse_docking = reverse_docking_node
 
         self._lock = threading.Lock()
         self._picky_state = 'CHARGING'
@@ -97,27 +119,37 @@ class StateManager(Node):
         # Action과 타이머를 동시에 처리하기 위해 ReentrantCallbackGroup 사용
         cb_group = ReentrantCallbackGroup()
 
-        # picky_state 퍼블리셔 (Traffic Manager가 구독)
-        self._state_pub = self.create_publisher(
-            String, f'/{self._ns}/picky_state', 10
-        )
+        # picky_state 퍼블리셔 (Traffic Manager가 구독).
+        # 노드 namespace 가 'picky1' 이면 자동으로 /picky1/picky_state 가 된다.
+        self._state_pub = self.create_publisher(String, 'picky_state', 10)
         # 도크 이탈 시 직접 구동용
         self._cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
 
-        # Task Manager 명령 수신 Action Server
-        self._action_server = ActionServer(
+        # Task Manager 이동 명령 수신 Action Server
+        self._move_action_server = ActionServer(
             self,
             MoveCommand,
-            f'/{self._ns}/move_command',
+            'move_command',
             execute_callback=self._execute_move,
-            goal_callback=self._on_goal,
-            cancel_callback=self._on_cancel,
+            goal_callback=self._on_move_goal,
+            cancel_callback=self._on_move_cancel,
             callback_group=cb_group,
         )
 
-        # 배터리 구독
-        self.create_subscription(Float32, '/battery/voltage', self._battery_voltage_cb, 10)
-        self.create_subscription(BatteryState, '/battery_state', self._battery_state_cb, 10)
+        # Task Manager 도킹 명령 수신 Action Server (DOCK_IN task 전용)
+        self._dock_action_server = ActionServer(
+            self,
+            DockCommand,
+            'dock_command',
+            execute_callback=self._execute_dock,
+            goal_callback=self._on_dock_goal,
+            cancel_callback=self._on_dock_cancel,
+            callback_group=cb_group,
+        )
+
+        # 배터리 구독 (pinky_bringup 이 namespace remap 으로 /picky{N}/battery/* 에 publish)
+        self.create_subscription(Float32, 'battery/voltage', self._battery_voltage_cb, 10)
+        self.create_subscription(BatteryState, 'battery_state', self._battery_state_cb, 10)
 
         # TF
         self._tf_buffer = Buffer()
@@ -129,7 +161,8 @@ class StateManager(Node):
         self.create_timer(interval, self._periodic_report, callback_group=cb_group)
 
         self.get_logger().info(
-            f'[StateManager] 시작 — robot_id={self._robot_id}, ns=/{self._ns}'
+            f'[StateManager] 시작 — robot_id={self._robot_id}, '
+            f'namespace=/{self.get_namespace().strip("/")}'
         )
 
     # ── picky_state 상태 전환 ──────────────────────────────────────────
@@ -150,17 +183,17 @@ class StateManager(Node):
         msg.data = state
         self._state_pub.publish(msg)
 
-    # ── Action 콜백 ────────────────────────────────────────────────────
+    # ── MoveCommand Action 콜백 ────────────────────────────────────────
 
-    def _on_goal(self, goal_request) -> GoalResponse:
+    def _on_move_goal(self, goal_request) -> GoalResponse:
         task_type = goal_request.task_type
         if task_type not in TASK_TO_MOVING_STATE:
             self.get_logger().warn(f'[StateManager] 알 수 없는 task_type: {task_type}')
             return GoalResponse.REJECT
         return GoalResponse.ACCEPT
 
-    def _on_cancel(self, goal_handle) -> CancelResponse:
-        self.get_logger().info('[StateManager] 취소 요청 수신')
+    def _on_move_cancel(self, goal_handle) -> CancelResponse:
+        self.get_logger().info('[StateManager] MOVE 취소 요청 수신')
         self._move.cancel_navigation()
         return CancelResponse.ACCEPT
 
@@ -169,7 +202,7 @@ class StateManager(Node):
         waypoints = goal_handle.request.waypoints
 
         self.get_logger().info(
-            f'[StateManager] 실행: {task_type}, waypoints={len(waypoints)}개'
+            f'[StateManager] MOVE 실행: {task_type}, waypoints={len(waypoints)}개'
         )
 
         # 충전 도크에 있을 경우 이탈 동작 우선 수행
@@ -204,16 +237,9 @@ class StateManager(Node):
                     success=False, message=f'navigation failed at waypoint {i}'
                 )
 
-        # 전체 이동 완료 후 상태 전환
-        if task_type == 'RETURN_HOME':
-            success = self._do_docking()
-            if not success:
-                self._set_state('ERROR_RECOVERY')
-                goal_handle.abort()
-                return MoveCommand.Result(success=False, message='aruco docking failed')
-            self._set_state('CHARGING')
-        else:
-            self._set_state(ARRIVAL_STATE[task_type])
+        # 전체 이동 완료 후 상태 전환.
+        # RETURN_HOME 도 여기서 STANDBY 로 종료한다. 도킹은 별도 DOCK_IN task 가 수행.
+        self._set_state(ARRIVAL_STATE[task_type])
 
         goal_handle.succeed()
         return MoveCommand.Result(success=True, message='ok')
@@ -234,14 +260,57 @@ class StateManager(Node):
         self._cmd_vel_pub.publish(Twist())
         self.get_logger().info('[StateManager] 충전 도크 이탈 완료')
 
-    # ── ArUco 후진 도킹 ────────────────────────────────────────────────
+    # ── DockCommand Action 콜백 ────────────────────────────────────────
 
-    def _do_docking(self) -> bool:
-        """RETURN_HOME 완료 후 ArUco 마커 기반 후진 도킹 및 위치 보정."""
-        self.get_logger().info('[StateManager] ArUco 도킹 시작')
-        return self._aruco.aruco_dock(
-            self._aruco_id, self._standby_x, self._standby_y
+    def _on_dock_goal(self, goal_request) -> GoalResponse:
+        dock_name = goal_request.dock_name
+        if dock_name not in self._dock_pose_by_name:
+            self.get_logger().warn(
+                f'[StateManager] 알 수 없는 dock_name: {dock_name}'
+            )
+            return GoalResponse.REJECT
+        return GoalResponse.ACCEPT
+
+    def _on_dock_cancel(self, goal_handle) -> CancelResponse:
+        # reverse_docking 은 phase 도중 cancel 을 지원하지 않으므로
+        # cancel 요청은 받아두되 phase 종료 후에만 반영된다.
+        self.get_logger().info('[StateManager] DOCK 취소 요청 수신')
+        return CancelResponse.ACCEPT
+
+    def _execute_dock(self, goal_handle) -> DockCommand.Result:
+        """DOCK_IN task 수신 시 reverse_docking 으로 ArUco 기반 후진 도킹을 수행한다."""
+        request = goal_handle.request
+        dock_name = request.dock_name
+        start_zone_name = request.start_zone_name
+        task_id = int(request.task_id)
+
+        marker_id, map_x, map_y, map_yaw = self._dock_pose_by_name[dock_name]
+
+        self.get_logger().info(
+            f'[StateManager] DOCK_IN 실행: task_id={task_id}, '
+            f'dock={dock_name}, start_zone={start_zone_name}, marker={marker_id}'
         )
+
+        self._set_state('DOCKING')
+
+        feedback = DockCommand.Feedback()
+        feedback.phase = 'REVERSE_DOCKING'
+        feedback.progress = 0.0
+        feedback.message = f'starting {dock_name}'
+        goal_handle.publish_feedback(feedback)
+
+        success = self._reverse_docking.reverse_dock(marker_id, map_x, map_y, map_yaw)
+
+        if not success:
+            self._set_state('ERROR_RECOVERY')
+            goal_handle.abort()
+            return DockCommand.Result(
+                success=False, message=f'reverse docking failed at {dock_name}'
+            )
+
+        self._set_state('CHARGING')
+        goal_handle.succeed()
+        return DockCommand.Result(success=True, message=f'docked at {dock_name}')
 
     # ── 센서 / TF 콜백 ────────────────────────────────────────────────
 
@@ -299,12 +368,12 @@ def main(args=None) -> None:
     rclpy.init(args=args)
 
     move_node = MoveToGoal()
-    aruco_node = ReverseDocking()
-    state_mgr = StateManager(move_node, aruco_node)
+    reverse_docking_node = ReverseDocking()
+    state_mgr = StateManager(move_node, reverse_docking_node)
 
     executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(move_node)
-    executor.add_node(aruco_node)
+    executor.add_node(reverse_docking_node)
     executor.add_node(state_mgr)
 
     try:

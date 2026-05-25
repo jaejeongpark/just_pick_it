@@ -18,7 +18,7 @@ setup(
         (os.path.join('share', package_name, 'config'),
             glob('config/*.yaml')),
     ],
-    install_requires=['setuptools', 'requests'],
+    install_requires=['setuptools', 'requests', 'websockets'],
     zip_safe=True,
     maintainer='suwoo3131',
     maintainer_email='suwoo3131@gmail.com',

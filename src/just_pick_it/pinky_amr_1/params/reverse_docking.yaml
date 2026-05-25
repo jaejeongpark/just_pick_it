@@ -1,4 +1,4 @@
-reverse_docking:
+/**/reverse_docking:
   ros__parameters:
 
     # ------------------------------------------------------------------ #
@@ -16,7 +16,7 @@ reverse_docking:
       - 0.0,   777.0, 540.0
       - 0.0,     0.0,   1.0
     dist_coeffs: [0.0, 0.0, 0.0, 0.0, 0.0]   # [k1, k2, p1, p2, k3]
-    camera_topic: "/camera/image_raw"
+    camera_topic: "camera/image_raw"
 
     # ------------------------------------------------------------------ #
     # 거리 임계값
