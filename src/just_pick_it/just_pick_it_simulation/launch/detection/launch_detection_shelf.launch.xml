@@ -29,6 +29,7 @@
 -->
 <launch>
     <arg name="world_file" default="empty.world"/>
+    <arg name="use_rviz"   default="true"/>
 
     <!-- GZ_SIM_RESOURCE_PATH: mycobot + just_pick_it models -->
     <set_env name="GZ_SIM_RESOURCE_PATH"
@@ -46,6 +47,7 @@
         <arg name="use_rviz"         value="false"/>
         <arg name="use_camera"       value="false"/>
         <arg name="use_gazebo"       value="true"/>
+        <arg name="use_wrist_camera" value="true"/>
         <arg name="load_controllers" value="true"/>
         <arg name="use_sim_time"     value="true"/>
         <arg name="x"                value="0.0"/>
@@ -88,5 +90,17 @@
           args="-name apriltag_36h11_id1 -file $(find-pkg-share just_pick_it_simulation)/models/markers/apriltag_36h11_id1/model.sdf -x 0.3795 -y  0.13 -z 0.0838 -R 0.0 -P 0.0 -Y 0.0">
         <param name="use_sim_time" value="true"/>
     </node>
+
+    <!-- MoveIt2 move_group -->
+    <include file="$(find-pkg-share mycobot_moveit_config)/launch/move_group.launch.py">
+        <arg name="use_sim_time"        value="true"/>
+        <arg name="use_rviz"            value="true"/>
+        <arg name="robot_name"          value="mycobot_280"/>
+        <arg name="rviz_config_file"    value="move_group.rviz"/>
+        <arg name="rviz_config_package" value="mycobot_moveit_config"/>
+        <arg name="use_wrist_camera"    value="true"/>
+        <arg name="use_gazebo"          value="true"/>
+        <arg name="use_camera"          value="false"/>
+    </include>
 
 </launch>
