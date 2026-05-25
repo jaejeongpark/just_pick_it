@@ -10,6 +10,7 @@
     <xacro:arg name="use_camera" default="false"/>
     <xacro:arg name="use_gazebo" default="false"/>
     <xacro:arg name="use_gripper" default="true"/>
+    <xacro:arg name="use_wrist_camera" default="false"/>
 
     <xacro:if value="$(arg add_world)">
       <link name="world"/>
@@ -60,5 +61,6 @@
       use_gazebo="$(arg use_gazebo)"/>
 
     <xacro:include filename="$(find mycobot_description)/urdf/sensors/intel_rgbd_cam_d435.urdf.xacro"/>
+    <xacro:include filename="$(find mycobot_description)/urdf/sensors/wrist_camera.urdf.xacro"/>
 
 </robot>

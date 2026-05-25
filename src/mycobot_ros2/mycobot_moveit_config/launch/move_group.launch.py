@@ -12,7 +12,7 @@ starts the move_group node, and optionally launches RViz for visualization.
 
 import os
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, EmitEvent, RegisterEventHandler, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, EmitEvent, RegisterEventHandler, OpaqueFunction, TimerAction
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
@@ -71,6 +71,21 @@ def generate_launch_description():
         default_value=package_name_moveit_config,
         description='Package containing the RViz configuration file')
 
+    declare_use_wrist_camera_cmd = DeclareLaunchArgument(
+        name='use_wrist_camera',
+        default_value='false',
+        description='Whether wrist camera is attached (must match robot_state_publisher)')
+
+    declare_use_gazebo_cmd = DeclareLaunchArgument(
+        name='use_gazebo',
+        default_value='false',
+        description='Whether Gazebo simulation is active (must match robot_state_publisher)')
+
+    declare_use_camera_cmd = DeclareLaunchArgument(
+        name='use_camera',
+        default_value='false',
+        description='Whether head RGBD camera is attached (must match robot_state_publisher)')
+
     def configure_setup(context):
         """Configure MoveIt and create nodes with proper string conversions."""
         # Get the robot name as a string for use in MoveItConfigsBuilder
@@ -90,9 +105,21 @@ def generate_launch_description():
         srdf_model_path = os.path.join(config_path, f'{robot_name_str}.srdf')
         pilz_cartesian_limits_file_path = os.path.join(config_path, 'pilz_cartesian_limits.yaml')
 
+        use_wrist_camera_str = LaunchConfiguration('use_wrist_camera').perform(context)
+        use_gazebo_str = LaunchConfiguration('use_gazebo').perform(context)
+        use_camera_str = LaunchConfiguration('use_camera').perform(context)
+        use_rviz_str = LaunchConfiguration('use_rviz').perform(context)
+
         # Create MoveIt configuration
         moveit_config = (
             MoveItConfigsBuilder(robot_name_str, package_name=package_name_moveit_config)
+            .robot_description(
+                mappings={
+                    'use_wrist_camera': use_wrist_camera_str,
+                    'use_gazebo':       use_gazebo_str,
+                    'use_camera':       use_camera_str,
+                }
+            )
             .trajectory_execution(file_path=moveit_controllers_file_path)
             .robot_description_semantic(file_path=srdf_model_path)
             .joint_limits(file_path=joint_limits_file_path)
@@ -126,9 +153,13 @@ def generate_launch_description():
             ],
         )
 
-        # Create RViz node
+        start_move_group_delayed = TimerAction(period=15.0, actions=[start_move_group_node_cmd])
+
+        if use_rviz_str != 'true':
+            return [start_move_group_delayed]
+
+        # Create RViz node (use_rviz condition handled at Python level)
         start_rviz_node_cmd = Node(
-            condition=IfCondition(use_rviz),
             package="rviz2",
             executable="rviz2",
             arguments=[
@@ -146,16 +177,20 @@ def generate_launch_description():
             ],
         )
 
-        # RViz exit handler
+        # RViz exit handler (condition handled at Python level)
         exit_event_handler = RegisterEventHandler(
-            condition=IfCondition(use_rviz),
             event_handler=OnProcessExit(
                 target_action=start_rviz_node_cmd,
                 on_exit=EmitEvent(event=Shutdown(reason='rviz exited')),
             ),
         )
 
-        return [start_move_group_node_cmd, start_rviz_node_cmd, exit_event_handler]
+        if use_gazebo_str == 'true':
+            start_rviz_action = TimerAction(period=18.0, actions=[start_rviz_node_cmd])
+        else:
+            start_rviz_action = start_rviz_node_cmd
+
+        return [start_move_group_delayed, start_rviz_action, exit_event_handler]
 
     # Create the launch description
     ld = LaunchDescription()
@@ -166,6 +201,9 @@ def generate_launch_description():
     ld.add_action(declare_rviz_config_package_cmd)
     ld.add_action(declare_use_sim_time_cmd)
     ld.add_action(declare_use_rviz_cmd)
+    ld.add_action(declare_use_wrist_camera_cmd)
+    ld.add_action(declare_use_gazebo_cmd)
+    ld.add_action(declare_use_camera_cmd)
 
     # Add the setup and node creation
     ld.add_action(OpaqueFunction(function=configure_setup))

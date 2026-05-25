@@ -98,7 +98,10 @@ ARGUMENTS = [
                           description='Whether to use Gazebo simulation'),
     DeclareLaunchArgument('use_gripper', default_value='true',
                           choices=['true', 'false'],
-                          description='Whether to attach a gripper')
+                          description='Whether to attach a gripper'),
+    DeclareLaunchArgument('use_wrist_camera', default_value='false',
+                          choices=['true', 'false'],
+                          description='Whether to attach a wrist camera for visual servoing'),
 ]
 
 
@@ -178,7 +181,8 @@ def generate_launch_description():
         'gripper_type:=', LaunchConfiguration('gripper_type'), ' ',
         'use_camera:=', LaunchConfiguration('use_camera'), ' ',
         'use_gazebo:=', LaunchConfiguration('use_gazebo'), ' ',
-        'use_gripper:=', LaunchConfiguration('use_gripper')
+        'use_gripper:=', LaunchConfiguration('use_gripper'), ' ',
+        'use_wrist_camera:=', LaunchConfiguration('use_wrist_camera')
     ]), value_type=str)
 
     # Subscribe to the joint states of the robot, and publish the 3D pose of each link.

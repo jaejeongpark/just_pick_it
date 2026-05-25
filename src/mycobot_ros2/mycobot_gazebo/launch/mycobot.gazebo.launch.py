@@ -67,6 +67,7 @@ def generate_launch_description():
     use_rviz = LaunchConfiguration('use_rviz')
     use_camera = LaunchConfiguration('use_camera')
     use_gazebo = LaunchConfiguration('use_gazebo')
+    use_wrist_camera = LaunchConfiguration('use_wrist_camera')
     use_robot_state_pub = LaunchConfiguration('use_robot_state_pub')
     use_sim_time = LaunchConfiguration('use_sim_time')
     world_file = LaunchConfiguration('world_file')
@@ -111,6 +112,11 @@ def generate_launch_description():
         name='use_camera',
         default_value='false',
         description='Flag to enable the RGBD camera for Gazebo point cloud simulation')
+
+    declare_use_wrist_camera_cmd = DeclareLaunchArgument(
+        name='use_wrist_camera',
+        default_value='false',
+        description='Flag to enable the wrist camera for visual servoing')
 
     declare_use_gazebo_cmd = DeclareLaunchArgument(
         name='use_gazebo',
@@ -173,7 +179,8 @@ def generate_launch_description():
             'use_camera': use_camera,
             'use_gazebo': use_gazebo,
             'use_rviz': use_rviz,
-            'use_sim_time': use_sim_time
+            'use_sim_time': use_sim_time,
+            'use_wrist_camera': use_wrist_camera,
         }.items(),
         condition=IfCondition(use_robot_state_pub)
     )
@@ -210,8 +217,7 @@ def generate_launch_description():
         output='screen'
     )
 
-    # Includes optimizations to minimize latency and bandwidth when streaming image data
-    start_gazebo_ros_image_bridge_cmd = Node(
+    start_head_image_bridge_cmd = Node(
         package='ros_gz_image',
         executable='image_bridge',
         arguments=[
@@ -222,6 +228,15 @@ def generate_launch_description():
             ('/camera_head/depth_image', '/camera_head/depth/image_rect_raw'),
             ('/camera_head/image', '/camera_head/color/image_raw'),
         ],
+        condition=IfCondition(use_camera),
+    )
+
+    start_wrist_image_bridge_cmd = Node(
+        package='ros_gz_image',
+        executable='image_bridge',
+        arguments=['/camera_wrist/image'],
+        remappings=[('/camera_wrist/image', '/camera_wrist/color/image_raw')],
+        condition=IfCondition(use_wrist_camera),
     )
 
     # Spawn the robot
@@ -249,6 +264,7 @@ def generate_launch_description():
     ld.add_action(declare_jsp_gui_cmd)
     ld.add_action(declare_load_controllers_cmd)
     ld.add_action(declare_use_camera_cmd)
+    ld.add_action(declare_use_wrist_camera_cmd)
     ld.add_action(declare_use_gazebo_cmd)
     ld.add_action(declare_use_rviz_cmd)
     ld.add_action(declare_use_robot_state_pub_cmd)
@@ -269,7 +285,8 @@ def generate_launch_description():
     ld.add_action(load_controllers_cmd)
     ld.add_action(start_gazebo_cmd)
     ld.add_action(start_gazebo_ros_bridge_cmd)
-    ld.add_action(start_gazebo_ros_image_bridge_cmd)
+    ld.add_action(start_head_image_bridge_cmd)
+    ld.add_action(start_wrist_image_bridge_cmd)
     ld.add_action(start_gazebo_ros_spawner_cmd)
 
     return ld
