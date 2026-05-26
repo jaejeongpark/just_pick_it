@@ -1113,6 +1113,65 @@ class FleetRepository:
             exception.is_resolved = True
             return {"status": "ok"}
 
+    def apply_emergency_stop(self) -> dict[str, Any]:
+        """비상 정지 DB 전이: 모든 로봇을 EMERGENCY_STOP, RUNNING task 를 PAUSED 로.
+
+        로봇으로의 실제 전파는 노드(executor)에서 별도로 수행한다.
+        """
+        with session_scope() as db:
+            robots = db.query(Robot).all()
+            running_tasks = db.query(Task).filter(Task.status == "RUNNING").all()
+
+            for robot in robots:
+                robot.robot_status = "EMERGENCY_STOP"
+
+            paused_task_ids: list[int] = []
+            for task in running_tasks:
+                db.add(
+                    TaskEvent(
+                        task_id=task.task_id,
+                        robot_id=task.assigned_robot_id,
+                        from_status="RUNNING",
+                        to_status="PAUSED",
+                        event_name="EMERGENCY_STOP",
+                        reason="emergency stop",
+                        created_at=datetime.now(UTC),
+                    )
+                )
+                task.status = "PAUSED"
+                paused_task_ids.append(task.task_id)
+
+            return {"status": "ok", "paused_task_ids": paused_task_ids}
+
+    def apply_resume(self) -> dict[str, Any]:
+        """재개 DB 전이: EMERGENCY_STOP 로봇의 PAUSED task 를 RUNNING 으로 되돌린다."""
+        with session_scope() as db:
+            robots = db.query(Robot).filter(Robot.robot_status == "EMERGENCY_STOP").all()
+
+            resumed_task_ids: list[int] = []
+            for robot in robots:
+                task = db.get(Task, robot.current_task_id) if robot.current_task_id else None
+                if task and task.status == "PAUSED":
+                    previous_status = task.status
+                    task.status = "RUNNING"
+                    db.add(
+                        TaskEvent(
+                            task_id=task.task_id,
+                            robot_id=robot.robot_id,
+                            from_status="PAUSED",
+                            to_status="RUNNING",
+                            event_name="RESUME",
+                            reason="resume",
+                            created_at=datetime.now(UTC),
+                        )
+                    )
+                    apply_task_runtime_state(db, task, previous_status=previous_status)
+                    resumed_task_ids.append(task.task_id)
+                else:
+                    robot.robot_status = "IDLE"
+
+            return {"status": "ok", "resumed_task_ids": resumed_task_ids}
+
     # ==================================================================
     # 정규화 helpers (이전 ControlServerClient 와 동일, 저수준 조회만 DB 기반)
     # ==================================================================

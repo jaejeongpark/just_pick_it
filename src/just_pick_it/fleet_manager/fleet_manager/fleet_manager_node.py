@@ -41,6 +41,7 @@ class FleetManagerNode(Node):
         self.declare_parameter('api_enabled', True)
         self.declare_parameter('api_host', '0.0.0.0')
         self.declare_parameter('api_port', 8100)
+        self.declare_parameter('api_push_interval_sec', 1.0)
 
         robot_ids: list[str] = self.get_parameter('robot_ids').value
         picky_robot_ids = self._filter_picky_robot_ids(robot_ids)
@@ -51,6 +52,7 @@ class FleetManagerNode(Node):
         api_enabled: bool = self.get_parameter('api_enabled').value
         api_host: str = self.get_parameter('api_host').value
         api_port: int = self.get_parameter('api_port').value
+        api_push_interval_sec: float = self.get_parameter('api_push_interval_sec').value
 
         self.robot_ids = robot_ids
         self._fleet_event_stop = threading.Event()
@@ -88,7 +90,13 @@ class FleetManagerNode(Node):
 
         self.api_server: FleetApiServer | None = None
         if api_enabled:
-            self.api_server = FleetApiServer(self, self.fleet_repo, host=api_host, port=api_port)
+            self.api_server = FleetApiServer(
+                self,
+                self.fleet_repo,
+                host=api_host,
+                port=api_port,
+                push_interval_sec=api_push_interval_sec,
+            )
             self.api_server.start()
 
         self.get_logger().info(
@@ -180,11 +188,15 @@ class FleetManagerNode(Node):
         elif event_name == 'RESUME':
             self._send_emergency_stop(False, event)
 
-    def _send_emergency_stop(self, enabled: bool, event: dict) -> None:
-        """Emergency/Resume fleet event를 robot EmergencyControl service 호출로 전파한다."""
-        task_id = int(event.get('task_id') or 0)
-        request_id = str(event.get('request_id') or event.get('event_id') or '')
-        reason = str(event.get('reason') or event.get('event') or 'ADMIN')
+    def _propagate_emergency(
+        self,
+        enabled: bool,
+        *,
+        reason: str = 'ADMIN',
+        task_id: int = 0,
+        request_id: str = '',
+    ) -> dict:
+        """robot EmergencyControl 전파 + TaskManager dispatch 제어(공통)."""
         results = self.robot_gateway.set_emergency_stop(
             self.robot_ids,
             enabled,
@@ -192,15 +204,46 @@ class FleetManagerNode(Node):
             task_id=task_id,
             request_id=request_id,
         )
-
         if enabled:
             self.task_manager.handle_emergency_stop()
         else:
             self.task_manager.handle_resume()
+        return results
 
+    def _send_emergency_stop(self, enabled: bool, event: dict) -> None:
+        """Control Server fleet event(WS) 경유 전파.
+
+        이 경로는 Control Server 가 DB 전이를 이미 처리했다고 보고 전파만 수행한다.
+        """
+        task_id = int(event.get('task_id') or 0)
+        request_id = str(event.get('request_id') or event.get('event_id') or '')
+        reason = str(event.get('reason') or event.get('event') or 'ADMIN')
+        results = self._propagate_emergency(
+            enabled,
+            reason=reason,
+            task_id=task_id,
+            request_id=request_id,
+        )
         self.get_logger().info(
             f"[FleetManager] event={event.get('event')} emergency_control={enabled} 전파: {results}"
         )
+
+    def trigger_emergency_stop(self, enabled: bool, *, reason: str = 'ADMIN') -> dict:
+        """API 경유 emergency/resume: DB 전이 + robot 전파 + TaskManager 처리.
+
+        uvicorn 스레드에서 호출되지만, robot_gateway/task_manager 호출은 기존 WS listener
+        스레드 경로(_send_emergency_stop)와 동일한 패턴이다. DB 전이는 FleetRepository 가
+        자기 session 으로 처리하므로 스레드 안전하다.
+        """
+        if enabled:
+            result = self.fleet_repo.apply_emergency_stop()
+        else:
+            result = self.fleet_repo.apply_resume()
+        results = self._propagate_emergency(enabled, reason=reason)
+        self.get_logger().info(
+            f"[FleetManager] API emergency_control={enabled} db={result} 전파: {results}"
+        )
+        return result
 
     def _to_fleet_event_ws_url(self, server_url: str) -> str:
         """HTTP base URL을 fleet event WebSocket URL로 변환한다."""
