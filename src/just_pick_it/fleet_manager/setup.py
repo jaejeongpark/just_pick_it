@@ -18,7 +18,7 @@ setup(
         (os.path.join('share', package_name, 'config'),
             glob('config/*.yaml')),
     ],
-    install_requires=['setuptools', 'requests', 'websockets'],
+    install_requires=['setuptools', 'requests', 'websockets', 'fastapi', 'uvicorn', 'just_pick_it_db'],
     zip_safe=True,
     maintainer='suwoo3131',
     maintainer_email='suwoo3131@gmail.com',

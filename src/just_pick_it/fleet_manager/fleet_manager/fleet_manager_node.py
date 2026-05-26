@@ -6,6 +6,7 @@ import rclpy
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
+from fleet_manager.fleet_api_server import FleetApiServer
 from fleet_manager.fleet_repository import FleetRepository
 from fleet_manager.robot_command_gateway import RobotCommandGateway
 from fleet_manager.robot_state_monitor import RobotStateMonitor
@@ -37,6 +38,9 @@ class FleetManagerNode(Node):
         self.declare_parameter('waiting_work_poll_period_sec', 5.0)
         self.declare_parameter('fleet_event_ws_enabled', True)
         self.declare_parameter('fleet_event_reconnect_sec', 2.0)
+        self.declare_parameter('api_enabled', True)
+        self.declare_parameter('api_host', '0.0.0.0')
+        self.declare_parameter('api_port', 8100)
 
         robot_ids: list[str] = self.get_parameter('robot_ids').value
         picky_robot_ids = self._filter_picky_robot_ids(robot_ids)
@@ -44,6 +48,9 @@ class FleetManagerNode(Node):
         waiting_work_poll_period_sec: float = self.get_parameter('waiting_work_poll_period_sec').value
         fleet_event_ws_enabled: bool = self.get_parameter('fleet_event_ws_enabled').value
         fleet_event_reconnect_sec: float = self.get_parameter('fleet_event_reconnect_sec').value
+        api_enabled: bool = self.get_parameter('api_enabled').value
+        api_host: str = self.get_parameter('api_host').value
+        api_port: int = self.get_parameter('api_port').value
 
         self.robot_ids = robot_ids
         self._fleet_event_stop = threading.Event()
@@ -78,6 +85,11 @@ class FleetManagerNode(Node):
 
         if fleet_event_ws_enabled:
             self._start_fleet_event_listener(server_url, fleet_event_reconnect_sec)
+
+        self.api_server: FleetApiServer | None = None
+        if api_enabled:
+            self.api_server = FleetApiServer(self, self.fleet_repo, host=api_host, port=api_port)
+            self.api_server.start()
 
         self.get_logger().info(
             f'[FleetManager] 노드 시작 — robots={robot_ids}, picky={picky_robot_ids}, '
@@ -200,8 +212,10 @@ class FleetManagerNode(Node):
         return f'{base}/api/fleet/ws/events'
 
     def destroy_node(self) -> bool:
-        """노드 종료 시 fleet event listener를 멈춘다."""
+        """노드 종료 시 fleet event listener와 API 서버를 멈춘다."""
         self._fleet_event_stop.set()
+        if self.api_server is not None:
+            self.api_server.stop()
         return super().destroy_node()
 
 

@@ -22,6 +22,7 @@ from just_pick_it_db.services.product_images import resolve_product_image_url
 from just_pick_it_db.services.robot_runtime_policy import FINAL_TASK_STATUSES, TASK_ROBOT_TYPE
 from just_pick_it_db.services.status_service import (
     build_admin_status,
+    build_customer_status,
     build_product_summary,
     build_robot_summary,
     build_task_summary,
@@ -283,9 +284,14 @@ class FleetRepository:
     # ==================================================================
 
     def get_snapshot(self) -> dict[str, Any] | None:
-        """Fleet Manager 용 전체 상태 snapshot 을 조회한다."""
+        """Fleet Manager / 관리자 화면용 전체 상태 snapshot 을 조회한다."""
         with session_scope() as db:
             return build_admin_status(db)
+
+    def get_customer_snapshot(self) -> dict[str, Any] | None:
+        """고객 화면용 상태 snapshot 을 조회한다."""
+        with session_scope() as db:
+            return build_customer_status(db)
 
     def list_robots(self) -> list[dict[str, Any]]:
         """robot 목록을 조회한다."""
