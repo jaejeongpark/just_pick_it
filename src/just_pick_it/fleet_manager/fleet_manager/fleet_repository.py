@@ -333,20 +333,30 @@ class FleetRepository:
 
     def get_zone_map(self) -> dict[str, dict[str, Any]]:
         """zone_name 을 key 로 하는 zone map 을 만든다."""
-        zones = self.list_zones(zone_type="ALL")
+        with session_scope() as db:
+            return self._zone_map(db)
+
+    def _zone_map(self, db) -> dict[str, dict[str, Any]]:
+        zones = self._query_zones(db, "ALL")
         return {str(zone["zone_name"]): zone for zone in zones if zone.get("zone_name") is not None}
 
     def list_products(self) -> list[dict[str, Any]]:
         """상품 목록을 조회한다."""
         with session_scope() as db:
-            products = db.query(Product).order_by(Product.product_id).all()
-            return [build_product_summary(db, product) for product in products]
+            return self._products(db)
+
+    def _products(self, db) -> list[dict[str, Any]]:
+        products = db.query(Product).order_by(Product.product_id).all()
+        return [build_product_summary(db, product) for product in products]
 
     def get_product_map(self) -> dict[int, dict[str, Any]]:
         """product_id 를 key 로 하는 product map 을 만든다."""
-        products = self.list_products()
+        with session_scope() as db:
+            return self._product_map(db)
+
+    def _product_map(self, db) -> dict[int, dict[str, Any]]:
         result: dict[int, dict[str, Any]] = {}
-        for product in products:
+        for product in self._products(db):
             product_id = product.get("product_id")
             if product_id is None:
                 continue
@@ -421,44 +431,47 @@ class FleetRepository:
     def get_order_detail(self, order_id: int) -> dict[str, Any] | None:
         """주문 상세를 조회한다(이전 /api/orders/{id} 응답과 동형)."""
         with session_scope() as db:
-            order = db.get(Order, order_id)
-            if not order:
-                return None
+            return self._order_detail(db, order_id)
 
-            pickup_slot_name = None
-            if order.pickup_slot_id:
-                pickup_slot = db.get(PickupSlot, order.pickup_slot_id)
-                if pickup_slot:
-                    pickup_slot_name = pickup_slot.slot_name
+    def _order_detail(self, db, order_id: int) -> dict[str, Any] | None:
+        order = db.get(Order, order_id)
+        if not order:
+            return None
 
-            order_items = (
-                db.query(OrderItem, Product)
-                .join(Product, OrderItem.product_id == Product.product_id)
-                .filter(OrderItem.order_id == order.order_id)
-                .order_by(OrderItem.item_id)
-                .all()
-            )
+        pickup_slot_name = None
+        if order.pickup_slot_id:
+            pickup_slot = db.get(PickupSlot, order.pickup_slot_id)
+            if pickup_slot:
+                pickup_slot_name = pickup_slot.slot_name
 
-            return {
-                "order_id": order.order_id,
-                "order_no": order.order_no,
-                "status": order.status,
-                "priority": order.priority,
-                "pickup_slot_id": order.pickup_slot_id,
-                "pickup_slot_name": pickup_slot_name,
-                "assigned_unit_id": order.assigned_unit_id,
-                "items": [
-                    {
-                        "item_id": item.item_id,
-                        "product_id": item.product_id,
-                        "product_name": product.name,
-                        "image_url": resolve_product_image_url(product),
-                        "quantity": item.quantity,
-                        "status": item.status,
-                    }
-                    for item, product in order_items
-                ],
-            }
+        order_items = (
+            db.query(OrderItem, Product)
+            .join(Product, OrderItem.product_id == Product.product_id)
+            .filter(OrderItem.order_id == order.order_id)
+            .order_by(OrderItem.item_id)
+            .all()
+        )
+
+        return {
+            "order_id": order.order_id,
+            "order_no": order.order_no,
+            "status": order.status,
+            "priority": order.priority,
+            "pickup_slot_id": order.pickup_slot_id,
+            "pickup_slot_name": pickup_slot_name,
+            "assigned_unit_id": order.assigned_unit_id,
+            "items": [
+                {
+                    "item_id": item.item_id,
+                    "product_id": item.product_id,
+                    "product_name": product.name,
+                    "image_url": resolve_product_image_url(product),
+                    "quantity": item.quantity,
+                    "status": item.status,
+                }
+                for item, product in order_items
+            ],
+        }
 
     # ==================================================================
     # Order / Robot / Task 상태 변경
@@ -937,13 +950,17 @@ class FleetRepository:
     # ==================================================================
 
     def get_order_work(self, order_id: int) -> dict[str, Any] | None:
-        """주문 상세를 TaskManager 가 쓰기 좋은 dict 로 정규화한다."""
-        order = self.get_order_detail(order_id)
-        if order is None:
-            return None
+        """주문 상세를 TaskManager 가 쓰기 좋은 dict 로 정규화한다(단일 트랜잭션).
 
-        product_map = self.get_product_map()
-        zone_map = self.get_zone_map()
+        주문 상세/상품맵/zone맵을 하나의 session_scope 안에서 일관되게 읽고,
+        이후 dict 가공은 세션 밖 순수 파이썬으로 처리한다.
+        """
+        with session_scope() as db:
+            order = self._order_detail(db, order_id)
+            if order is None:
+                return None
+            product_map = self._product_map(db)
+            zone_map = self._zone_map(db)
 
         items: list[dict[str, Any]] = []
         raw_items = order.get("items") or []
@@ -1023,8 +1040,9 @@ class FleetRepository:
             self._log().warn(f"[FleetRepository] stocking_item에 product_id 없음: {stocking_item}")
             return None
 
-        product_map = self.get_product_map()
-        zone_map = self.get_zone_map()
+        with session_scope() as db:
+            product_map = self._product_map(db)
+            zone_map = self._zone_map(db)
         product = product_map.get(int(product_id), {})
 
         product_slot_name = stocking_item.get("storage_zone_name") or product.get("storage_zone_name")
