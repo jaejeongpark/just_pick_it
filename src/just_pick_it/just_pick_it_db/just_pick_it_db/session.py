@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from contextlib import contextmanager
 from typing import Iterator
 
@@ -29,6 +30,12 @@ DEFAULT_DATABASE_URL = "postgresql://just_pick_it_user:just_pick_it_pw@localhost
 _engine: Engine | None = None
 _session_factory: sessionmaker | None = None
 _scoped_session: scoped_session | None = None
+
+# executor 스레드와 uvicorn 스레드가 동시에 첫 사용 시 engine/factory 를 중복 생성하지
+# 않도록 lazy 초기화를 보호한다(double-checked locking).
+# get_session_factory 가 락을 잡은 채 get_engine 을 호출하는 등 같은 스레드 재진입이
+# 있으므로 재진입 가능한 RLock 을 쓴다(일반 Lock 이면 자기 자신과 데드락).
+_init_lock = threading.RLock()
 
 
 def database_url() -> str:
@@ -44,14 +51,16 @@ def get_engine() -> Engine:
     """
     global _engine
     if _engine is None:
-        pool_size = int(os.getenv("DB_POOL_SIZE", "10"))
-        max_overflow = int(os.getenv("DB_MAX_OVERFLOW", "5"))
-        _engine = create_engine(
-            database_url(),
-            pool_size=pool_size,
-            max_overflow=max_overflow,
-            pool_pre_ping=True,
-        )
+        with _init_lock:
+            if _engine is None:
+                pool_size = int(os.getenv("DB_POOL_SIZE", "10"))
+                max_overflow = int(os.getenv("DB_MAX_OVERFLOW", "5"))
+                _engine = create_engine(
+                    database_url(),
+                    pool_size=pool_size,
+                    max_overflow=max_overflow,
+                    pool_pre_ping=True,
+                )
     return _engine
 
 
@@ -62,11 +71,13 @@ def get_session_factory() -> sessionmaker:
     """
     global _session_factory
     if _session_factory is None:
-        _session_factory = sessionmaker(
-            autocommit=False,
-            autoflush=False,
-            bind=get_engine(),
-        )
+        with _init_lock:
+            if _session_factory is None:
+                _session_factory = sessionmaker(
+                    autocommit=False,
+                    autoflush=False,
+                    bind=get_engine(),
+                )
     return _session_factory
 
 
@@ -79,7 +90,9 @@ def get_scoped_session() -> scoped_session:
     """
     global _scoped_session
     if _scoped_session is None:
-        _scoped_session = scoped_session(get_session_factory())
+        with _init_lock:
+            if _scoped_session is None:
+                _scoped_session = scoped_session(get_session_factory())
     return _scoped_session
 
 

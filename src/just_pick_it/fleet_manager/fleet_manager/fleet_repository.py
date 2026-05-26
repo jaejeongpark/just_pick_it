@@ -28,22 +28,30 @@ from just_pick_it_db.services.status_service import (
     build_task_summary,
     build_zone_pose,
 )
-from just_pick_it_db.services.stocking_service import (
-    build_stocking_item_summary,
-    create_stocking_item_record,
-    resolve_stocking_policy,
+from just_pick_it_db.services.stocking_service import build_stocking_item_summary
+from just_pick_it_db.services.workflow_service import (
+    ORDER_PRIORITY,
+    apply_task_runtime_state,
+    complete_order_workflow,
+    create_order_workflow,
 )
-from just_pick_it_db.services.workflow_service import apply_task_runtime_state
 from just_pick_it_db.session import session_scope
 
 
-class _RepoError(Exception):
-    """Repository 내부에서 not-found / 검증 실패를 표현하는 예외.
+class RepoError(Exception):
+    """Repository 의 not-found / 검증 실패를 표현하는 예외.
 
-    이전 HTTP 구현에서 Control Server 가 4xx 를 돌려주면 ControlServerClient 는 None 을
-    반환했다. 같은 계약을 지키기 위해 이 예외는 public 메서드 경계에서 잡혀 경고 로그 +
-    None(또는 빈 list)로 변환된다.
+    두 가지 방식으로 쓰인다.
+    - 내부 조회/상태 변경 메서드(TaskManager 호출용): 메서드 경계에서 잡아 경고 로그 +
+      None(또는 빈 list)로 변환한다. 이전 ControlServerClient 의 HTTP 4xx→None 계약 유지.
+    - 명령 메서드(API 서버 호출용): 잡지 않고 그대로 던진다. API 핸들러가 status_code 로
+      HTTP 상태를 매핑한다.
     """
+
+    def __init__(self, detail: str, status_code: int = 400) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.status_code = status_code
 
 
 class FleetRepository:
@@ -103,19 +111,19 @@ class FleetRepository:
     ) -> Robot | None:
         """payload 의 robot_id/robot_name 으로 Robot 을 찾는다.
 
-        id 나 name 이 주어졌는데 없으면 _RepoError 를 던진다(이전 HTTP 404 에 대응).
+        id 나 name 이 주어졌는데 없으면 RepoError 를 던진다(이전 HTTP 404 에 대응).
         둘 다 None 이면 None 을 반환한다.
         """
         if robot_id is not None:
             robot = self._get_robot_by_identifier(db, robot_id)
             if not robot:
-                raise _RepoError("robot not found")
+                raise RepoError("robot not found")
             return robot
 
         if robot_name is not None:
             robot = db.query(Robot).filter(Robot.robot_name == robot_name).first()
             if not robot:
-                raise _RepoError("robot not found")
+                raise RepoError("robot not found")
             return robot
 
         return None
@@ -214,14 +222,14 @@ class FleetRepository:
 
     def _validate_robot_unit(self, db, unit_id: int | None) -> None:
         if unit_id is not None and not db.get(RobotUnit, unit_id):
-            raise _RepoError("robot unit not found")
+            raise RepoError("robot unit not found")
 
     def _validate_task_robot_type(self, robot: Robot | None, task_type: str) -> None:
         if robot is None:
             return
         expected_robot_type = TASK_ROBOT_TYPE.get(task_type)
         if expected_robot_type and robot.robot_type != expected_robot_type:
-            raise _RepoError(f"{task_type} task must be assigned to {expected_robot_type}")
+            raise RepoError(f"{task_type} task must be assigned to {expected_robot_type}")
 
     def _validate_task_refs(self, db, task: dict) -> Robot | None:
         stocking_item_id = task.get("stocking_item_id")
@@ -230,23 +238,23 @@ class FleetRepository:
 
         if stocking_item_id is not None:
             if order_id is not None or order_item_id is not None:
-                raise _RepoError("stocking task cannot reference order or order_item")
+                raise RepoError("stocking task cannot reference order or order_item")
             if not db.get(StockingItem, stocking_item_id):
-                raise _RepoError("stocking item not found")
+                raise RepoError("stocking item not found")
 
         if order_id is not None and not db.get(Order, order_id):
-            raise _RepoError("order not found")
+            raise RepoError("order not found")
 
         order_item = db.get(OrderItem, order_item_id) if order_item_id is not None else None
         if order_item_id is not None and not order_item:
-            raise _RepoError("order item not found")
+            raise RepoError("order item not found")
         if order_item and order_id is not None and order_item.order_id != order_id:
-            raise _RepoError("order item does not belong to order")
+            raise RepoError("order item does not belong to order")
 
         if task.get("source_zone_id") is not None and not db.get(Zone, task["source_zone_id"]):
-            raise _RepoError("source zone not found")
+            raise RepoError("source zone not found")
         if task.get("target_zone_id") is not None and not db.get(Zone, task["target_zone_id"]):
-            raise _RepoError("target zone not found")
+            raise RepoError("target zone not found")
 
         robot = self._resolve_robot(
             db,
@@ -500,7 +508,7 @@ class FleetRepository:
             with session_scope() as db:
                 order = db.get(Order, order_id)
                 if not order:
-                    raise _RepoError("order not found")
+                    raise RepoError("order not found")
 
                 previous_slot_id = order.pickup_slot_id
 
@@ -509,7 +517,7 @@ class FleetRepository:
 
                 if pickup_slot_id is not None:
                     if not db.get(PickupSlot, pickup_slot_id):
-                        raise _RepoError("pickup slot not found")
+                        raise RepoError("pickup slot not found")
                     order.pickup_slot_id = pickup_slot_id
 
                 if assigned_unit_id is not None:
@@ -517,7 +525,7 @@ class FleetRepository:
 
                 self._sync_order_pickup_slot(db, order, previous_slot_id)
                 return {"status": "ok"}
-        except _RepoError as exc:
+        except RepoError as exc:
             self._log().warn(f"[FleetRepository] order_id={order_id} 상태 변경 실패: {exc}")
             return None
 
@@ -539,24 +547,24 @@ class FleetRepository:
             with session_scope() as db:
                 robot = self._get_robot_by_identifier(db, robot_name)
                 if not robot:
-                    raise _RepoError("robot not found")
+                    raise RepoError("robot not found")
 
                 if robot_status is not None:
                     robot.robot_status = robot_status
 
                 if picky_state is not None:
                     if robot.robot_type != "PICKY":
-                        raise _RepoError("picky_state is only for PICKY")
+                        raise RepoError("picky_state is only for PICKY")
                     robot.picky_state = picky_state
 
                 if cobot_state is not None:
                     if robot.robot_type != "COBOT":
-                        raise _RepoError("cobot_state is only for COBOT")
+                        raise RepoError("cobot_state is only for COBOT")
                     robot.cobot_state = cobot_state
 
                 if current_task_id is not None:
                     if not db.get(Task, current_task_id):
-                        raise _RepoError("task not found")
+                        raise RepoError("task not found")
                     robot.current_task_id = current_task_id
 
                 if battery_level is not None:
@@ -569,7 +577,7 @@ class FleetRepository:
                     robot.pos_theta = pos_theta
 
                 return {"status": "ok"}
-        except _RepoError as exc:
+        except RepoError as exc:
             self._log().warn(f"[FleetRepository] robot={robot_name} 상태 변경 실패: {exc}")
             return None
 
@@ -593,10 +601,10 @@ class FleetRepository:
                     .one_or_none()
                 )
                 if not task:
-                    raise _RepoError("task not found")
+                    raise RepoError("task not found")
 
                 if current_status is not None and task.status != current_status:
-                    raise _RepoError(
+                    raise RepoError(
                         f"task status conflict (expected={current_status}, current={task.status})"
                     )
 
@@ -633,7 +641,7 @@ class FleetRepository:
                     "previous_status": previous_status,
                     "current_status": task.status,
                 }
-        except _RepoError as exc:
+        except RepoError as exc:
             self._log().warn(f"[FleetRepository] task_id={task_id} 상태 변경 실패: {exc}")
             return None
 
@@ -659,7 +667,7 @@ class FleetRepository:
                     .one_or_none()
                 )
                 if not task:
-                    raise _RepoError("task not found")
+                    raise RepoError("task not found")
 
                 robot = self._resolve_robot(db, robot_id=robot_id, robot_name=robot_name)
 
@@ -668,7 +676,7 @@ class FleetRepository:
                     and from_status is not None
                     and task.status != from_status
                 ):
-                    raise _RepoError(
+                    raise RepoError(
                         f"task status conflict (expected={from_status}, current={task.status})"
                     )
 
@@ -691,7 +699,7 @@ class FleetRepository:
 
                 db.flush()
                 return self._build_task_event_response(db, task_event)
-        except _RepoError as exc:
+        except RepoError as exc:
             self._log().warn(f"[FleetRepository] task_id={task_id} event 생성 실패: {exc}")
             return None
 
@@ -718,10 +726,10 @@ class FleetRepository:
             with session_scope() as db:
                 pickup_slot = db.get(PickupSlot, slot_id)
                 if not pickup_slot:
-                    raise _RepoError("pickup slot not found")
+                    raise RepoError("pickup slot not found")
                 pickup_slot.status = status
                 return {"status": "ok"}
-        except _RepoError as exc:
+        except RepoError as exc:
             self._log().warn(f"[FleetRepository] pickup_slot_id={slot_id} 상태 변경 실패: {exc}")
             return None
 
@@ -762,7 +770,7 @@ class FleetRepository:
                     "task_ids": created_task_ids,
                     "created_count": len(created_task_ids),
                 }
-        except _RepoError as exc:
+        except RepoError as exc:
             self._log().warn(f"[FleetRepository] task 일괄 생성 실패: {exc}")
             return None
 
@@ -793,9 +801,9 @@ class FleetRepository:
                 robot = self._resolve_robot(db, robot_id=robot_id, robot_name=robot_name)
 
                 if task_id is not None and not db.get(Task, task_id):
-                    raise _RepoError("task not found")
+                    raise RepoError("task not found")
                 if order_id is not None and not db.get(Order, order_id):
-                    raise _RepoError("order not found")
+                    raise RepoError("order not found")
 
                 exception = ExceptionLog(
                     robot_id=robot.robot_id if robot else None,
@@ -809,7 +817,7 @@ class FleetRepository:
                 db.add(exception)
                 db.flush()
                 return {"status": "ok", "exception_id": exception.exception_id}
-        except _RepoError as exc:
+        except RepoError as exc:
             self._log().warn(f"[FleetRepository] exception 생성 실패: {exc}")
             return None
 
@@ -857,7 +865,7 @@ class FleetRepository:
                     .one_or_none()
                 )
                 if not stocking_item:
-                    raise _RepoError("stocking item not found")
+                    raise RepoError("stocking item not found")
 
                 if assigned_unit_id is not None:
                     self._validate_robot_unit(db, assigned_unit_id)
@@ -872,7 +880,7 @@ class FleetRepository:
 
                 db.flush()
                 return build_stocking_item_summary(db, stocking_item)
-        except _RepoError as exc:
+        except RepoError as exc:
             self._log().warn(
                 f"[FleetRepository] stocking_item_id={stocking_item_id} 상태 변경 실패: {exc}"
             )
@@ -896,11 +904,11 @@ class FleetRepository:
                     .one_or_none()
                 )
                 if not task:
-                    raise _RepoError("task not found")
+                    raise RepoError("task not found")
                 if task.task_type != "STOCKING_PLACE":
-                    raise _RepoError("task is not STOCKING_PLACE")
+                    raise RepoError("task is not STOCKING_PLACE")
                 if task.stocking_item_id is None:
-                    raise _RepoError("stocking item is not linked to task")
+                    raise RepoError("stocking item is not linked to task")
 
                 stocking_item = (
                     db.query(StockingItem)
@@ -909,11 +917,11 @@ class FleetRepository:
                     .one_or_none()
                 )
                 if not stocking_item:
-                    raise _RepoError("stocking item not found")
+                    raise RepoError("stocking item not found")
 
                 product = db.get(Product, stocking_item.product_id)
                 if not product:
-                    raise _RepoError("product not found")
+                    raise RepoError("product not found")
 
                 if detected_quantity is not None:
                     stocking_item.detected_quantity = detected_quantity
@@ -947,9 +955,163 @@ class FleetRepository:
                     "stock_delta": applied_stock_delta,
                     "stock_qty": product.stock_qty,
                 }
-        except _RepoError as exc:
+        except RepoError as exc:
             self._log().warn(f"[FleetRepository] task_id={task_id} 입고 완료 실패: {exc}")
             return None
+
+    # ==================================================================
+    # 명령 (웹에서 위임받는 쓰기 동작) — 실패 시 RepoError 를 그대로 던진다
+    # ==================================================================
+
+    def _resolve_storage_zone_id(
+        self,
+        db,
+        storage_zone_id: int | None,
+        storage_location: str | None,
+    ) -> int:
+        if storage_zone_id is not None:
+            if not db.get(Zone, storage_zone_id):
+                raise RepoError("storage zone not found", 404)
+            return storage_zone_id
+        if not storage_location:
+            raise RepoError("storage zone is required", 400)
+        zone = db.query(Zone).filter(Zone.zone_name == storage_location).first()
+        if not zone:
+            raise RepoError("storage zone not found", 404)
+        return zone.zone_id
+
+    def create_order(self, items: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """고객 주문을 생성한다.
+
+        Args:
+            items: [{"product_id": int, "quantity": int}, ...]
+        재고를 확인/차감하고 주문을 ORDER_WAIT 로 진입시킨 뒤 주문 상세를 반환한다.
+        """
+        if not items:
+            raise RepoError("order items are required", 400)
+
+        with session_scope() as db:
+            quantities: dict[int, int] = {}
+            for item in items:
+                pid = item["product_id"]
+                quantities[pid] = quantities.get(pid, 0) + item["quantity"]
+
+            product_ids = list(quantities)
+            products = (
+                db.query(Product)
+                .filter(Product.product_id.in_(product_ids))
+                .with_for_update()
+                .all()
+            )
+            products_by_id = {p.product_id: p for p in products}
+
+            if any(pid not in products_by_id for pid in product_ids):
+                raise RepoError("product not found", 404)
+            for pid, qty in quantities.items():
+                if products_by_id[pid].stock_qty < qty:
+                    raise RepoError("not enough stock", 400)
+
+            order = Order(status="ORDER_RECEIVED", priority=ORDER_PRIORITY)
+            db.add(order)
+            db.flush()
+            order.order_no = f"ORD-{order.order_id:04d}"
+
+            for pid, qty in quantities.items():
+                products_by_id[pid].stock_qty -= qty
+                db.add(
+                    OrderItem(
+                        order_id=order.order_id,
+                        product_id=pid,
+                        quantity=qty,
+                        status="WAITING",
+                    )
+                )
+
+            create_order_workflow(db, order)
+            db.flush()
+            return self._order_detail(db, order.order_id)
+
+    def complete_order(self, order_id: int) -> dict[str, Any] | None:
+        """PICKUP_READY 상태의 주문을 완료 처리한다."""
+        with session_scope() as db:
+            order = db.get(Order, order_id)
+            if not order:
+                raise RepoError("order not found", 404)
+            if order.status != "PICKUP_READY":
+                raise RepoError("order is not ready for pickup", 400)
+            complete_order_workflow(db, order)
+            db.flush()
+            return self._order_detail(db, order_id)
+
+    def create_product(
+        self,
+        *,
+        name: str,
+        stock_qty: int,
+        storage_zone_id: int | None = None,
+        storage_location: str | None = None,
+        image_url: str | None = None,
+    ) -> dict[str, Any]:
+        """상품을 등록한다."""
+        with session_scope() as db:
+            zone_id = self._resolve_storage_zone_id(db, storage_zone_id, storage_location)
+            product = Product(
+                name=name,
+                image_url=image_url,
+                stock_qty=stock_qty,
+                storage_zone_id=zone_id,
+            )
+            db.add(product)
+            db.flush()
+            return build_product_summary(db, product)
+
+    def update_product(
+        self,
+        product_id: int,
+        *,
+        name: str,
+        stock_qty: int,
+        storage_zone_id: int | None = None,
+        storage_location: str | None = None,
+        image_url: str | None = None,
+    ) -> dict[str, Any]:
+        """상품 정보를 수정한다."""
+        with session_scope() as db:
+            product = db.get(Product, product_id)
+            if not product:
+                raise RepoError("product not found", 404)
+            zone_id = self._resolve_storage_zone_id(db, storage_zone_id, storage_location)
+            product.name = name
+            product.image_url = image_url
+            product.stock_qty = stock_qty
+            product.storage_zone_id = zone_id
+            db.flush()
+            return build_product_summary(db, product)
+
+    def update_product_stock(self, product_id: int, stock_qty: int) -> dict[str, Any]:
+        """상품 재고 수량만 수정한다."""
+        with session_scope() as db:
+            product = db.get(Product, product_id)
+            if not product:
+                raise RepoError("product not found", 404)
+            product.stock_qty = stock_qty
+            db.flush()
+            return build_product_summary(db, product)
+
+    def create_pickup_slot(self, *, slot_name: str, status: str = "EMPTY") -> dict[str, Any]:
+        """pickup slot 을 생성한다."""
+        with session_scope() as db:
+            db.add(PickupSlot(slot_name=slot_name, status=status))
+            return {"status": "ok"}
+
+    def resolve_exception(self, exception_id: int) -> dict[str, Any]:
+        """예외를 해결됨 처리한다."""
+        with session_scope() as db:
+            exception = db.get(ExceptionLog, exception_id)
+            if not exception:
+                raise RepoError("exception not found", 404)
+            exception.is_resolved = True
+            return {"status": "ok"}
 
     # ==================================================================
     # 정규화 helpers (이전 ControlServerClient 와 동일, 저수준 조회만 DB 기반)

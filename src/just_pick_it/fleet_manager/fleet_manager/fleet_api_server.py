@@ -6,7 +6,14 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from rclpy.node import Node
 
-from fleet_manager.fleet_repository import FleetRepository
+from fleet_manager.fleet_api_schemas import (
+    OrderCreateIn,
+    PickupSlotCreateIn,
+    ProductCreateIn,
+    ProductStockUpdateIn,
+    ProductUpdateIn,
+)
+from fleet_manager.fleet_repository import FleetRepository, RepoError
 from just_pick_it_db.session import check_database_connection
 
 
@@ -81,7 +88,47 @@ class FleetApiServer:
                 raise HTTPException(status_code=404, detail="order not found")
             return order
 
+        # ----- 명령 (POST/PATCH) -----
+        # RepoError 는 status_code 를 들고 있으므로 HTTPException 으로 매핑한다.
+
+        @app.post("/api/orders", status_code=201)
+        def create_order(body: OrderCreateIn):
+            items = [item.model_dump() for item in body.items]
+            return self._guard(lambda: repo.create_order(items))
+
+        @app.post("/api/orders/{order_id}/complete")
+        def complete_order(order_id: int):
+            return self._guard(lambda: repo.complete_order(order_id))
+
+        @app.post("/api/admin/products", status_code=201)
+        def create_product(body: ProductCreateIn):
+            return self._guard(lambda: repo.create_product(**body.model_dump()))
+
+        @app.patch("/api/admin/products/{product_id}")
+        def update_product(product_id: int, body: ProductUpdateIn):
+            return self._guard(lambda: repo.update_product(product_id, **body.model_dump()))
+
+        @app.patch("/api/admin/products/{product_id}/stock")
+        def update_product_stock(product_id: int, body: ProductStockUpdateIn):
+            return self._guard(lambda: repo.update_product_stock(product_id, body.stock_qty))
+
+        @app.post("/api/admin/pickup-slots", status_code=201)
+        def create_pickup_slot(body: PickupSlotCreateIn):
+            return self._guard(lambda: repo.create_pickup_slot(**body.model_dump()))
+
+        @app.post("/api/admin/exceptions/{exception_id}/resolve")
+        def resolve_exception(exception_id: int):
+            return self._guard(lambda: repo.resolve_exception(exception_id))
+
         return app
+
+    @staticmethod
+    def _guard(action):
+        """명령 실행을 감싸 RepoError 를 적절한 HTTP 상태로 변환한다."""
+        try:
+            return action()
+        except RepoError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
     @property
     def app(self) -> FastAPI:
