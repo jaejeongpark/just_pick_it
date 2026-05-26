@@ -223,10 +223,16 @@ class AdminPickupSlotCreate(BaseModel):
     status: PickupSlotStatus = "EMPTY"
 
 
+class FleetOrderItemQuantityUpdate(BaseModel):
+    item_id: int
+    quantity: int = Field(gt=0)
+
+
 class FleetOrderStateUpdate(BaseModel):
     status: OrderStatus | None = None
     pickup_slot_id: int | None = None
     assigned_unit_id: int | None = None
+    item_quantities: list[FleetOrderItemQuantityUpdate] | None = None
 
 
 class FleetTaskStateUpdate(BaseModel):

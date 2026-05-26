@@ -4,7 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Just Pick It Admin</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260520-fleet-ui-3" />
+    <link
+      rel="stylesheet"
+      href="/static/css/style.css?v=20260520-fleet-ui-30"
+    />
   </head>
   <body class="admin-console" data-admin-page="{{ page }}">
     <div class="admin-app-shell">
@@ -790,7 +793,8 @@
             </form>
             <div class="ai-command-feedback">
               <p id="dashboard-llm-result">
-                입고 명령이나 재고/예외 질문을 입력하면 AI 응답이 여기에 표시됩니다.
+                입고 명령이나 재고/예외 질문을 입력하면 AI 응답이 여기에
+                표시됩니다.
               </p>
             </div>
           </section>
@@ -988,26 +992,7 @@
               No orders loaded
             </div>
           </section>
-          <section class="section-band tasks-secondary-section">
-            <div class="section-heading">
-              <h2>작업 목록</h2>
-              <div class="command-stack horizontal-command-stack">
-                <button id="task-create-button" class="small-action-button" type="button">
-                  + 작업 생성
-                </button>
-                <button id="task-view-button" class="ghost-button" type="button">
-                  작업 보기
-                </button>
-              </div>
-            </div>
-            <div id="task-list" class="table-placeholder">No tasks loaded</div>
-          </section>
-          <section class="section-band full-span order-work-detail-section">
-            <div id="order-work-detail-panel" class="order-work-detail-panel">
-              주문을 선택하면 상세가 표시됩니다
-            </div>
-          </section>
-          <section class="section-band full-span pickup-management-section">
+          <section class="section-band pickup-management-section">
             <div class="section-heading">
               <h2>픽업 슬롯</h2>
               <button
@@ -1021,6 +1006,33 @@
             <div id="pickup-slot-list" class="table-placeholder">
               No pickup slots loaded
             </div>
+          </section>
+          <section class="section-band order-work-detail-section">
+            <div id="order-work-detail-panel" class="order-work-detail-panel">
+              주문을 선택하면 상세가 표시됩니다
+            </div>
+          </section>
+          <section class="section-band tasks-secondary-section">
+            <div class="section-heading">
+              <h2>작업 목록</h2>
+              <div class="command-stack horizontal-command-stack">
+                <button
+                  id="task-create-button"
+                  class="small-action-button"
+                  type="button"
+                >
+                  + 작업 생성
+                </button>
+                <button
+                  id="task-view-button"
+                  class="ghost-button"
+                  type="button"
+                >
+                  작업 보기
+                </button>
+              </div>
+            </div>
+            <div id="task-list" class="table-placeholder">No tasks loaded</div>
           </section>
         </main>
         {% elif page == 'exceptions' %}
@@ -1103,14 +1115,16 @@
       >
         <div class="modal-header">
           <h2 id="modal-title">Order Detail</h2>
-          <button id="modal-close-button" class="ghost-button" type="button">
-            Close
-          </button>
+          <div class="modal-header-actions">
+            <button id="modal-close-button" class="ghost-button" type="button">
+              Close
+            </button>
+          </div>
         </div>
         <div id="modal-body" class="modal-body"></div>
       </section>
     </div>
 
-    <script src="/static/js/admin.js?v=20260520-fleet-ui-5"></script>
+    <script src="/static/js/admin.js?v=20260520-fleet-ui-26"></script>
   </body>
 </html>

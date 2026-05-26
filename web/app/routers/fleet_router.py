@@ -633,6 +633,61 @@ def update_order_state(
 
     previous_slot_id = order.pickup_slot_id
 
+    if "item_quantities" in state_update.model_fields_set and state_update.item_quantities is not None:
+        if order.status not in {"ORDER_RECEIVED", "ORDER_WAIT"}:
+            raise HTTPException(status_code=400, detail="진행 중이거나 완료된 주문은 상품 수량을 변경할 수 없습니다")
+
+        if db.query(Task).filter(Task.order_id == order.order_id).first():
+            raise HTTPException(status_code=400, detail="작업이 생성된 주문은 상품 수량을 변경할 수 없습니다")
+
+        quantities_by_item_id = {}
+
+        for item_update in state_update.item_quantities:
+            if item_update.item_id in quantities_by_item_id:
+                raise HTTPException(status_code=400, detail="duplicate order item update")
+
+            quantities_by_item_id[item_update.item_id] = item_update.quantity
+
+        if quantities_by_item_id:
+            order_items = (
+                db.query(OrderItem)
+                .filter(
+                    OrderItem.order_id == order.order_id,
+                    OrderItem.item_id.in_(quantities_by_item_id.keys()),
+                )
+                .with_for_update()
+                .all()
+            )
+
+            if len(order_items) != len(quantities_by_item_id):
+                raise HTTPException(status_code=404, detail="order item not found")
+
+            products = (
+                db.query(Product)
+                .filter(Product.product_id.in_([item.product_id for item in order_items]))
+                .with_for_update()
+                .all()
+            )
+            products_by_id = {product.product_id: product for product in products}
+
+            for item in order_items:
+                product = products_by_id.get(item.product_id)
+                new_quantity = quantities_by_item_id[item.item_id]
+                stock_delta = new_quantity - item.quantity
+
+                if product is None:
+                    raise HTTPException(status_code=404, detail="product not found")
+
+                if stock_delta > 0 and product.stock_qty < stock_delta:
+                    raise HTTPException(status_code=400, detail="not enough stock")
+
+            for item in order_items:
+                product = products_by_id[item.product_id]
+                new_quantity = quantities_by_item_id[item.item_id]
+                stock_delta = new_quantity - item.quantity
+                product.stock_qty -= stock_delta
+                item.quantity = new_quantity
+
     if state_update.status is not None:
         order.status = state_update.status
 
