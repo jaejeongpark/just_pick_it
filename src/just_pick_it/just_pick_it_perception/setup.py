@@ -40,6 +40,9 @@ setup(
             'target_manager = just_pick_it_perception.target_manager_node:main',
             'udp_image_sender = just_pick_it_perception.udp_image_sender_node:main',
             'udp_image_receiver = just_pick_it_perception.udp_image_receiver:main',
+            'camera_publisher_node = just_pick_it_perception.camera_publisher_node:main',
+            'hand_eye_calibrator = just_pick_it_perception.hand_eye_calibrator:main',
+            'generate_apriltag_board = just_pick_it_perception.generate_apriltag_board:main',
         ],
     },
 )
