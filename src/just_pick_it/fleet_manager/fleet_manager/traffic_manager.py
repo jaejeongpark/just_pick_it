@@ -149,7 +149,7 @@ class TrafficManager:
 
     외부 I/O 는 없다.
       - 로봇 상태는 RobotStateMonitor 가 받아서 notify_state() 로 전달한다.
-      - zone 좌표는 ControlServerClient 가 받은 값을 생성자에서 주입한다.
+      - zone 좌표는 FleetRepository 가 받은 값을 생성자에서 주입한다.
     """
 
     def __init__(

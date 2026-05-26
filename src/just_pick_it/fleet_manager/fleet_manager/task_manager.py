@@ -6,7 +6,7 @@ from typing import Any
 
 from rclpy.node import Node
 
-from fleet_manager.control_server_client import ControlServerClient
+from fleet_manager.fleet_repository import FleetRepository
 from fleet_manager.traffic_manager import TrafficManager
 
 
@@ -56,23 +56,23 @@ class TaskManager:
     """Fleet Manager 내부 task 생성/상태 전이 담당 클래스.
 
     역할:
-    - Control Server를 polling해서 ORDER_WAIT 주문과 REQUESTED 입고 요청을 찾는다.
+    - DB를 polling해서 ORDER_WAIT 주문과 REQUESTED 입고 요청을 찾는다.
     - 사용 가능한 robot unit을 배정한다.
     - 주문/입고 데이터를 task payload로 변환한다.
     - TrafficManager와 협업해 PICKY 이동 경로를 예약한다.
-    - task 상태 변경과 실패를 Control Server에 보고한다.
+    - task 상태 변경과 실패를 DB에 보고한다.
 
     주의:
     - 이 클래스는 ROS2 Node가 아니다. FleetManagerNode를 주입받아 logger만 사용한다.
     - 경로 탐색 자체는 TrafficManager 책임이다.
-    - HTTP 호출 세부사항은 ControlServerClient 책임이다.
+    - DB 접근 세부사항은 FleetRepository 책임이다.
     - ROS2 Action 송신은 RobotCommandGateway 책임이다.
     """
 
     def __init__(
         self,
         node: Node,
-        control_server: ControlServerClient,
+        fleet_repo: FleetRepository,
         traffic_manager: TrafficManager,
         robot_gateway: Any | None = None,
     ) -> None:
@@ -80,12 +80,12 @@ class TaskManager:
 
         Args:
             node: 로그 출력을 위해 공유받는 FleetManagerNode.
-            control_server: Control Server API adapter.
+            fleet_repo: DB 접근 Repository.
             traffic_manager: 경로 탐색/예약 담당 객체.
             robot_gateway: ROS2 Action 송신 담당 객체. 초기 task 생성 단계에서는 None 가능.
         """
         self._node = node
-        self._control = control_server
+        self._repo = fleet_repo
         self._traffic = traffic_manager
         self._robot_gateway = robot_gateway
         self._scheduler_lock = threading.RLock()
@@ -120,7 +120,7 @@ class TaskManager:
         if self._fleet_paused:
             return False
 
-        for robot in self._control.list_robots():
+        for robot in self._repo.list_robots():
             if robot.get("robot_type") != "PICKY":
                 continue
             if not self._picky_idle_for_waiting_work(robot):
@@ -262,11 +262,11 @@ class TaskManager:
             return False
 
         order_id = int(order_id)
-        tasks = self._control.list_order_tasks(order_id)
+        tasks = self._repo.list_order_tasks(order_id)
         if self._has_task_after_sequence(task, tasks):
             return self._pre_reserve_next_existing_move_task(task)
 
-        order_work = self._control.get_order_work(order_id)
+        order_work = self._repo.get_order_work(order_id)
         if order_work is None:
             return False
 
@@ -364,10 +364,10 @@ class TaskManager:
         stocking_item_id = task.get("stocking_item_id")
 
         if order_id is not None:
-            tasks = self._control.list_order_tasks(int(order_id))
+            tasks = self._repo.list_order_tasks(int(order_id))
         elif stocking_item_id is not None:
             tasks = [
-                item for item in self._control.list_tasks()
+                item for item in self._repo.list_tasks()
                 if item.get("stocking_item_id") == stocking_item_id
             ]
         else:
@@ -385,7 +385,7 @@ class TaskManager:
 
     def _find_task_by_id(self, task_id: int) -> dict[str, Any] | None:
         """Control Server task 목록에서 task_id 하나를 찾는다."""
-        for task in self._control.list_tasks():
+        for task in self._repo.list_tasks():
             if int(task.get("task_id") or 0) == task_id:
                 return task
         return None
@@ -400,7 +400,7 @@ class TaskManager:
 
         tasks_by_id = {
             int(task["task_id"]): task
-            for task in self._control.list_tasks()
+            for task in self._repo.list_tasks()
             if task.get("task_id") is not None
         }
 
@@ -417,7 +417,7 @@ class TaskManager:
                 continue
             if task.get("status") in FINAL_TASK_STATUSES:
                 continue
-            self._control.update_task_status(
+            self._repo.update_task_status(
                 created_task_id,
                 status="CANCELLED",
                 current_status=str(task.get("status") or "ASSIGNED"),
@@ -480,7 +480,7 @@ class TaskManager:
         `_select_available_unit()`은 실제 배정 직전에 PARKING RETURN_HOME을 취소하는
         side effect가 있다. scheduler cycle 초반 guard에서는 순수 확인만 필요하므로 별도 helper로 둔다.
         """
-        robots = self._control.list_robots()
+        robots = self._repo.list_robots()
         units: dict[int, dict[str, Any]] = {}
 
         for robot in robots:
@@ -518,12 +518,12 @@ class TaskManager:
         """아직 task가 없는 주문/입고 요청을 priority 기준 대기열로 모은다."""
         requests: list[WorkRequest] = []
 
-        for order in self._control.list_waiting_orders():
+        for order in self._repo.list_waiting_orders():
             order_id = order.get("order_id")
             if order_id is None:
                 self._node.get_logger().warn(f"[TaskManager] order_id 없는 주문 skip: {order}")
                 continue
-            if self._control.list_order_tasks(int(order_id)):
+            if self._repo.list_order_tasks(int(order_id)):
                 self._node.get_logger().debug(
                     f"[TaskManager] order_id={order_id} 기존 task 존재, 생성 skip"
                 )
@@ -538,7 +538,7 @@ class TaskManager:
                 )
             )
 
-        for stocking_item in self._control.list_requested_stocking_items():
+        for stocking_item in self._repo.list_requested_stocking_items():
             stocking_item_id = stocking_item.get("stocking_item_id")
             if stocking_item_id is None:
                 continue
@@ -577,7 +577,7 @@ class TaskManager:
             )
             return
 
-        assigned = self._control.update_order_status(
+        assigned = self._repo.update_order_status(
             order_id,
             assigned_unit_id=unit["unit_id"],
         )
@@ -587,7 +587,7 @@ class TaskManager:
             )
             return
 
-        order_work = self._control.get_order_work(order_id)
+        order_work = self._repo.get_order_work(order_id)
         if order_work is None:
             self._node.get_logger().warn(
                 f"[TaskManager] order_id={order_id} order_work 정규화 실패"
@@ -612,7 +612,7 @@ class TaskManager:
         - 둘 다 robot_status=IDLE이고 current_task_id가 없어야 배정 가능하다.
         - 후보가 여러 개면 PICKY battery_level이 높은 unit을 우선한다.
         """
-        robots = self._control.list_robots()
+        robots = self._repo.list_robots()
         units: dict[int, dict[str, Any]] = {}
 
         for robot in robots:
@@ -692,7 +692,7 @@ class TaskManager:
         같은 polling cycle에서 중복 배정하지 않는다.
         단, RETURN_HOME은 새 주문/입고가 들어오면 선점 취소 가능한 housekeeping task로 본다.
         """
-        tasks = self._control.list_tasks(robot_name=robot_name)
+        tasks = self._repo.list_tasks(robot_name=robot_name)
         return any(
             task.get("status") not in FINAL_TASK_STATUSES
             and not self._is_preemptible_return_home(task)
@@ -714,7 +714,7 @@ class TaskManager:
         겹칠 수 있다. task 묶음 생성 직전에 한 번 더 막는다.
         """
         for robot_name in (picky_name, cobot_name):
-            for task in self._control.list_tasks(robot_name=robot_name):
+            for task in self._repo.list_tasks(robot_name=robot_name):
                 if task.get("status") in FINAL_TASK_STATUSES:
                     continue
                 if self._is_preemptible_return_home(task):
@@ -736,7 +736,7 @@ class TaskManager:
         """
         tasks_by_flow: dict[tuple[str, int], list[dict[str, Any]]] = {}
 
-        for task in self._control.list_tasks(robot_name=robot_name):
+        for task in self._repo.list_tasks(robot_name=robot_name):
             if task.get("task_type") not in HOUSEKEEPING_TASK_TYPES:
                 continue
             if self._housekeeping_reason(task) != HOUSEKEEPING_REASON_LOW_BATTERY:
@@ -780,7 +780,7 @@ class TaskManager:
         PARKING 사유의 RETURN_HOME만 취소한다.
         LOW_BATTERY 사유의 RETURN_HOME은 충전을 우선해야 하므로 선점하지 않는다.
         """
-        for task in self._control.list_tasks(robot_name=robot_name):
+        for task in self._repo.list_tasks(robot_name=robot_name):
             if not self._is_preemptible_return_home(task):
                 continue
 
@@ -789,7 +789,7 @@ class TaskManager:
             if current_status == "RUNNING" and self._robot_gateway is not None:
                 self._robot_gateway.cancel_task(robot_name, task_id)
 
-            self._control.update_task_status(
+            self._repo.update_task_status(
                 task_id,
                 status="CANCELLED",
                 current_status=current_status,
@@ -806,7 +806,7 @@ class TaskManager:
     def _last_robot_target_zone(self, robot_name: str) -> str | None:
         """해당 PICKY가 마지막으로 성공한 이동 task의 target zone을 반환한다."""
         tasks = [
-            task for task in self._control.list_tasks(robot_name=robot_name)
+            task for task in self._repo.list_tasks(robot_name=robot_name)
             if task.get("task_type") in MOVE_TASK_TYPES
             and task.get("status") == "SUCCESS"
             and task.get("target_zone_name")
@@ -897,7 +897,7 @@ class TaskManager:
             target_zone_name=selected_zone,
             base_sequence_no=base_sequence_no,
         )
-        result_data = self._control.create_tasks_bulk(tasks)
+        result_data = self._repo.create_tasks_bulk(tasks)
         if result_data is None:
             self._traffic.release_path(picky_name, None)
             return []
@@ -995,7 +995,7 @@ class TaskManager:
 
     def _process_requested_stocking_items(self) -> None:
         """REQUESTED stocking_item을 조회하고 task가 없는 항목을 처리한다."""
-        stocking_items = self._control.list_requested_stocking_items()
+        stocking_items = self._repo.list_requested_stocking_items()
 
         for stocking_item in stocking_items:
             stocking_item_id = stocking_item.get("stocking_item_id")
@@ -1011,7 +1011,7 @@ class TaskManager:
 
     def _stocking_item_has_tasks(self, stocking_item_id: int) -> bool:
         """stocking_item에 이미 task가 생성되어 있는지 확인한다."""
-        tasks = self._control.list_tasks()
+        tasks = self._repo.list_tasks()
         return any(task.get("stocking_item_id") == stocking_item_id for task in tasks)
 
     def _process_new_stocking_item(self, stocking_item: dict[str, Any]) -> list[int]:
@@ -1022,7 +1022,7 @@ class TaskManager:
             return []
 
         stocking_item_id = int(stocking_item["stocking_item_id"])
-        stocking_work = self._control.get_stocking_work(
+        stocking_work = self._repo.get_stocking_work(
             {
                 **stocking_item,
                 "assigned_unit_id": unit["unit_id"],
@@ -1039,7 +1039,7 @@ class TaskManager:
         if not task_ids:
             return []
 
-        updated = self._control.update_stocking_item(
+        updated = self._repo.update_stocking_item(
             stocking_item_id,
             status="ASSIGNED",
             assigned_unit_id=unit["unit_id"],
@@ -1095,7 +1095,7 @@ class TaskManager:
             ),
         ]
 
-        result_data = self._control.create_tasks_bulk(tasks)
+        result_data = self._repo.create_tasks_bulk(tasks)
         if result_data is None:
             return []
 
@@ -1125,7 +1125,7 @@ class TaskManager:
         result_message: str | None = None,
     ) -> dict[str, Any]:
         """Control Server의 `/api/fleet/tasks/bulk` payload 1개를 만든다."""
-        zone_map = self._control.get_zone_map()
+        zone_map = self._repo.get_zone_map()
         source_zone = zone_map.get(source_zone_name or "")
         target_zone = zone_map.get(target_zone_name or "")
 
@@ -1156,7 +1156,7 @@ class TaskManager:
         - WAITING item이 남아 있으면 다음 상품 1개 task를 만든다.
         - WAITING item이 없고 pickup task가 없으면 pickup task 3개를 만든다.
         """
-        for order in self._control.list_orders(include_completed=False):
+        for order in self._repo.list_orders(include_completed=False):
             order_id = order.get("order_id")
             if order_id is None:
                 continue
@@ -1164,7 +1164,7 @@ class TaskManager:
             if order.get("status") == "ORDER_WAIT":
                 continue
 
-            tasks = self._control.list_order_tasks(int(order_id))
+            tasks = self._repo.list_order_tasks(int(order_id))
             if not tasks:
                 continue
 
@@ -1172,7 +1172,7 @@ class TaskManager:
 
     def _advance_order_by_id_if_ready(self, order_id: int) -> None:
         """task result 직후 해당 주문만 다음 단계로 즉시 진행한다."""
-        tasks = self._control.list_order_tasks(order_id)
+        tasks = self._repo.list_order_tasks(order_id)
         if not tasks:
             return
 
@@ -1189,7 +1189,7 @@ class TaskManager:
         if not self._all_existing_tasks_success(tasks):
             return
 
-        order_work = self._control.get_order_work(order_id)
+        order_work = self._repo.get_order_work(order_id)
         if order_work is None:
             return
 
@@ -1294,7 +1294,7 @@ class TaskManager:
 
         self._cancel_preemptible_return_home(picky_name)
 
-        empty_slots = self._control.list_pickup_slots(status="EMPTY")
+        empty_slots = self._repo.list_pickup_slots(status="EMPTY")
         slot_by_zone = self._pickup_slots_by_zone(empty_slots)
 
         if not slot_by_zone:
@@ -1326,7 +1326,7 @@ class TaskManager:
             return []
 
         slot_id = int(selected_slot["slot_id"])
-        assigned = self._control.update_order_status(order_id, pickup_slot_id=slot_id)
+        assigned = self._repo.update_order_status(order_id, pickup_slot_id=slot_id)
         if assigned is None:
             self._traffic.release_path(picky_name, None)
             return []
@@ -1365,7 +1365,7 @@ class TaskManager:
             ),
         ]
 
-        result_data = self._control.create_tasks_bulk(tasks)
+        result_data = self._repo.create_tasks_bulk(tasks)
         if result_data is None:
             self._traffic.release_path(picky_name, None)
             return []
@@ -1422,7 +1422,7 @@ class TaskManager:
         """입고 흐름이 끝난 뒤 필요한 housekeeping task를 이어서 만든다."""
         tasks_by_item: dict[int, list[dict[str, Any]]] = {}
 
-        for task in self._control.list_tasks():
+        for task in self._repo.list_tasks():
             stocking_item_id = task.get("stocking_item_id")
             if stocking_item_id is None:
                 continue
@@ -1434,7 +1434,7 @@ class TaskManager:
     def _advance_stocking_item_by_id_if_ready(self, stocking_item_id: int) -> None:
         """task result 직후 해당 입고 흐름만 다음 단계로 즉시 진행한다."""
         tasks = [
-            task for task in self._control.list_tasks()
+            task for task in self._repo.list_tasks()
             if task.get("stocking_item_id") is not None
             and int(task["stocking_item_id"]) == stocking_item_id
         ]
@@ -1601,7 +1601,7 @@ class TaskManager:
             priority=priority,
             result_message=f"HOUSEKEEPING_REASON={reason}",
         )
-        result_data = self._control.create_tasks_bulk([payload])
+        result_data = self._repo.create_tasks_bulk([payload])
         if result_data is None:
             return []
 
@@ -1613,7 +1613,7 @@ class TaskManager:
 
     def _complete_ready_charge_tasks(self) -> None:
         """배터리가 기준치를 넘은 CHARGE task를 SUCCESS로 정리한다."""
-        for task in self._control.list_tasks(status="RUNNING", task_type="CHARGE"):
+        for task in self._repo.list_tasks(status="RUNNING", task_type="CHARGE"):
             robot_name = task.get("assigned_robot_name")
             if not robot_name:
                 continue
@@ -1649,7 +1649,7 @@ class TaskManager:
             return False
 
         completed = False
-        for task in self._control.list_tasks(status="RUNNING", task_type="CHARGE"):
+        for task in self._repo.list_tasks(status="RUNNING", task_type="CHARGE"):
             if task.get("assigned_robot_name") != robot_name:
                 continue
             completed = self._complete_charge_task(task, int(battery_level)) or completed
@@ -1662,7 +1662,7 @@ class TaskManager:
         if not robot_name:
             return False
 
-        updated = self._control.update_task_status(
+        updated = self._repo.update_task_status(
             int(task["task_id"]),
             status="SUCCESS",
             current_status="RUNNING",
@@ -1685,7 +1685,7 @@ class TaskManager:
             return False
 
         task_id = int(task["task_id"])
-        updated = self._control.update_task_status(
+        updated = self._repo.update_task_status(
             task_id,
             status="RUNNING",
             current_status="ASSIGNED",
@@ -1720,12 +1720,12 @@ class TaskManager:
 
     def _has_assignable_waiting_work(self) -> bool:
         """아직 task가 없는 ORDER_WAIT 주문이나 REQUESTED 입고 요청이 있는지 확인한다."""
-        for order in self._control.list_waiting_orders():
+        for order in self._repo.list_waiting_orders():
             order_id = order.get("order_id")
-            if order_id is not None and not self._control.list_order_tasks(int(order_id)):
+            if order_id is not None and not self._repo.list_order_tasks(int(order_id)):
                 return True
 
-        for item in self._control.list_requested_stocking_items():
+        for item in self._repo.list_requested_stocking_items():
             stocking_item_id = item.get("stocking_item_id")
             if stocking_item_id is not None and not self._stocking_item_has_tasks(int(stocking_item_id)):
                 return True
@@ -1737,12 +1737,12 @@ class TaskManager:
         return any(
             task.get("status") not in FINAL_TASK_STATUSES
             and task.get("task_type") not in HOUSEKEEPING_TASK_TYPES
-            for task in self._control.list_tasks(robot_name=robot_name)
+            for task in self._repo.list_tasks(robot_name=robot_name)
         )
 
     def _robot_by_name(self, robot_name: str) -> dict[str, Any] | None:
         """snapshot robot 목록에서 robot_name 하나를 찾는다."""
-        for robot in self._control.list_robots():
+        for robot in self._repo.list_robots():
             if robot.get("robot_name") == robot_name:
                 return robot
         return None
@@ -1794,11 +1794,11 @@ class TaskManager:
             )
             return
 
-        assigned_tasks = self._control.list_tasks(status="ASSIGNED")
+        assigned_tasks = self._repo.list_tasks(status="ASSIGNED")
         if not assigned_tasks:
             return
 
-        all_tasks = self._control.list_tasks()
+        all_tasks = self._repo.list_tasks()
 
         for task in assigned_tasks:
             if not self._task_ready_by_sequence(task, all_tasks):
@@ -1824,7 +1824,7 @@ class TaskManager:
         stocking_item_id = task.get("stocking_item_id")
 
         if order_id is not None:
-            related_tasks = self._control.list_order_tasks(int(order_id))
+            related_tasks = self._repo.list_order_tasks(int(order_id))
         elif stocking_item_id is not None:
             related_tasks = [
                 item for item in all_tasks
@@ -1843,7 +1843,7 @@ class TaskManager:
 
     def _robot_has_running_task(self, robot_name: str) -> bool:
         """해당 로봇에 이미 RUNNING task가 있는지 확인한다."""
-        running = self._control.list_tasks(status="RUNNING", robot_name=robot_name)
+        running = self._repo.list_tasks(status="RUNNING", robot_name=robot_name)
         return bool(running)
 
     def _dispatch_task(self, task: dict[str, Any]) -> bool:
@@ -1880,7 +1880,7 @@ class TaskManager:
         if not self._reserve_move_path_for_task(task):
             return False
 
-        updated = self._control.update_task_status(
+        updated = self._repo.update_task_status(
             task_id,
             status="RUNNING",
             current_status="ASSIGNED",
@@ -1897,7 +1897,7 @@ class TaskManager:
             task_id=task_id,
             task_type=task_type,
             waypoints=self._move_waypoints_by_task[task_id],
-            zone_map=self._control.get_zone_map(),
+            zone_map=self._repo.get_zone_map(),
             feedback_callback=self.handle_move_feedback,
             result_callback=self.handle_task_result,
         )
@@ -1970,7 +1970,7 @@ class TaskManager:
             return False
         dock_name, start_zone_name = dock_target
 
-        updated = self._control.update_task_status(
+        updated = self._repo.update_task_status(
             task_id,
             status="RUNNING",
             current_status="ASSIGNED",
@@ -2077,7 +2077,7 @@ class TaskManager:
             return False
 
         if sent:
-            self._control.update_task_status(
+            self._repo.update_task_status(
                 task_id,
                 status="RUNNING",
                 current_status="ASSIGNED",
@@ -2102,7 +2102,7 @@ class TaskManager:
         robot_name = task.get("assigned_robot_name")
         task_type = task.get("task_type")
 
-        self._control.update_task_status(
+        self._repo.update_task_status(
             task_id,
             status="FAILED",
             current_status="RUNNING",
@@ -2114,7 +2114,7 @@ class TaskManager:
             self._traffic.release_path(str(robot_name), task_id)
             self._move_waypoints_by_task.pop(task_id, None)
 
-        self._control.create_exception(
+        self._repo.create_exception(
             exception_type="NAVIGATION_FAILED" if task_type in PATH_RESERVED_TASK_TYPES else "SYSTEM_ERROR",
             robot_name=str(robot_name) if robot_name else None,
             task_id=task_id,
@@ -2164,7 +2164,7 @@ class TaskManager:
             return
 
         next_status = "SUCCESS" if success else "FAILED"
-        self._control.update_task_status(
+        self._repo.update_task_status(
             task_id,
             status=next_status,
             current_status="RUNNING",
@@ -2187,7 +2187,7 @@ class TaskManager:
                 self._cancel_preplanned_after_cobot_failure(task_id)
 
         if not success:
-            self._control.create_exception(
+            self._repo.create_exception(
                 exception_type="NAVIGATION_FAILED" if task_type in PATH_RESERVED_TASK_TYPES else "SYSTEM_ERROR",
                 robot_name=robot_name,
                 task_id=task_id,

@@ -6,7 +6,7 @@ import rclpy
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
-from fleet_manager.control_server_client import ControlServerClient
+from fleet_manager.fleet_repository import FleetRepository
 from fleet_manager.robot_command_gateway import RobotCommandGateway
 from fleet_manager.robot_state_monitor import RobotStateMonitor
 from fleet_manager.task_manager import TaskManager
@@ -17,12 +17,12 @@ class FleetManagerNode(Node):
     """
     Fleet Manager 메인 노드 (조립자).
 
-    내부 모듈(ControlServerClient, TrafficManager, RobotStateMonitor, ...)은
+    내부 모듈(FleetRepository, TrafficManager, RobotStateMonitor, ...)은
     별도의 ROS2 Node 가 아닌 일반 Python 클래스이며, 필요한 경우 이 노드를
     인자로 받아 publisher/subscription/timer 를 생성한다.
 
     [구성]
-        ControlServerClient   : Control Server HTTP API 통신
+        FleetRepository       : DB 직접 접근(주문/작업/로봇/zone/입고)
         TrafficManager        : 경로 탐색 / 충돌 회피 / 경로 예약
         RobotStateMonitor     : picky_state 토픽 구독 → TrafficManager 로 전달
         RobotCommandGateway   : task → 로봇 Action goal 전송
@@ -49,10 +49,10 @@ class FleetManagerNode(Node):
         self._fleet_event_stop = threading.Event()
         self._fleet_event_thread: threading.Thread | None = None
 
-        self.control_server = ControlServerClient(self, server_url)
+        self.fleet_repo = FleetRepository(self)
         self.robot_gateway = RobotCommandGateway(self)
 
-        zone_coords = self.control_server.fetch_zone_coords()
+        zone_coords = self.fleet_repo.fetch_zone_coords()
         self.traffic_manager = TrafficManager(
             self,
             robot_ids=picky_robot_ids,
@@ -67,7 +67,7 @@ class FleetManagerNode(Node):
 
         self.task_manager = TaskManager(
             node=self,
-            control_server=self.control_server,
+            fleet_repo=self.fleet_repo,
             traffic_manager=self.traffic_manager,
             robot_gateway=self.robot_gateway,
         )
