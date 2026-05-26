@@ -2,7 +2,6 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
 OrderStatus = Literal[
     "ORDER_RECEIVED",
     "ORDER_WAIT",
@@ -81,6 +80,7 @@ TaskType = Literal[
     "MOVE_TO_STORAGE",
     "STOCKING_PLACE",
     "RETURN_HOME",
+    "DOCK_IN",
     "CHARGE",
 ]
 
@@ -223,10 +223,16 @@ class AdminPickupSlotCreate(BaseModel):
     status: PickupSlotStatus = "EMPTY"
 
 
+class FleetOrderItemQuantityUpdate(BaseModel):
+    item_id: int
+    quantity: int = Field(gt=0)
+
+
 class FleetOrderStateUpdate(BaseModel):
     status: OrderStatus | None = None
     pickup_slot_id: int | None = None
     assigned_unit_id: int | None = None
+    item_quantities: list[FleetOrderItemQuantityUpdate] | None = None
 
 
 class FleetTaskStateUpdate(BaseModel):
@@ -263,7 +269,7 @@ class FleetTaskCreate(BaseModel):
     order_id: int | None = None
     order_item_id: int | None = None
     stocking_item_id: int | None = None
-    sequence_no: int = Field(ge=1)
+    sequence_no: int | None = Field(default=None, ge=1)
     assigned_robot_id: int | str | None = None
     assigned_robot_name: str | None = None
     task_type: TaskType

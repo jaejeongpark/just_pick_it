@@ -65,6 +65,13 @@ body {
   gap: 10px;
 }
 
+.horizontal-command-stack {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
 .nav-link,
 .primary-button,
 .ghost-button,
@@ -924,6 +931,14 @@ body {
   grid-column: span 2;
 }
 
+.task-create-form {
+  grid-template-columns: repeat(3, minmax(120px, 1fr));
+}
+
+.task-create-form > button {
+  align-self: end;
+}
+
 .state-editor-form label {
   color: var(--muted);
   font-size: 12px;
@@ -1112,6 +1127,19 @@ body {
   border-bottom: 1px solid var(--line);
 }
 
+.modal-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.modal-header-danger {
+  min-height: 34px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+
 .modal-header h2 {
   margin: 0;
   color: var(--navy);
@@ -1202,6 +1230,93 @@ body {
 }
 
 .history-search input:focus {
+  border-color: var(--blue);
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.task-history-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.task-history-filters {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 160px;
+  gap: 10px;
+}
+
+.task-history-filters input,
+.task-history-filters select,
+.task-status-inline-select {
+  min-height: 38px;
+  min-width: 0;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--text);
+  font: inherit;
+  font-weight: 800;
+}
+
+.task-history-filters input:focus,
+.task-history-filters select:focus,
+.task-status-inline-select:focus {
+  border-color: var(--blue);
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.task-status-inline-select {
+  width: 112px;
+  min-height: 32px;
+  font-size: 13px;
+}
+
+.task-detail-button {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.order-item-editor-list {
+  display: grid;
+  gap: 10px;
+}
+
+.order-item-editor-row {
+  align-items: center;
+}
+
+.order-item-quantity-field {
+  width: 96px;
+  display: grid;
+  gap: 5px;
+}
+
+.order-item-quantity-field label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.order-item-quantity-field input {
+  min-height: 34px;
+  min-width: 0;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--text);
+  font: inherit;
+  font-weight: 800;
+}
+
+.order-item-quantity-field input:focus {
   border-color: var(--blue);
   outline: none;
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
@@ -1943,6 +2058,27 @@ body {
   color: #94a3b8;
 }
 
+.admin-console .task-history-filters input,
+.admin-console .task-history-filters select,
+.admin-console .task-status-inline-select,
+.admin-console .order-item-quantity-field input {
+  border-color: rgba(96, 165, 250, 0.26);
+  background: #08111f;
+  color: #e7eef8;
+}
+
+.admin-console .task-history-filters input::placeholder {
+  color: #64748b;
+}
+
+.admin-console .order-item-quantity-field label {
+  color: #94a3b8;
+}
+
+.admin-console .task-detail-button {
+  min-height: 28px;
+}
+
 .admin-console .inventory-editor-row .cart-item-main {
   padding-bottom: 10px;
   border-bottom: 1px solid rgba(148, 163, 184, 0.12);
@@ -2265,14 +2401,21 @@ body {
 }
 
 .mini-progress {
+  --progress-color: #3b82f6;
+  --progress-track: #26354a;
   width: 26px;
   height: 26px;
   border-radius: 999px;
   background: conic-gradient(
-    #3b82f6 0 var(--progress, 0%),
-    #26354a var(--progress, 0%) 100%
+    var(--progress-color) 0 var(--progress, 0%),
+    var(--progress-track) var(--progress, 0%) 100%
   );
   position: relative;
+  display: grid;
+  place-items: center;
+  box-shadow:
+    0 0 0 1px rgba(96, 165, 250, 0.14),
+    0 0 16px color-mix(in srgb, var(--progress-color) 28%, transparent);
 }
 
 .mini-progress::after {
@@ -2281,23 +2424,52 @@ body {
   inset: 7px;
   border-radius: inherit;
   background: #0b1522;
+  z-index: 0;
+}
+
+.mini-progress span {
+  position: relative;
+  z-index: 1;
+  display: none;
+  color: #eaf3ff;
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 1;
 }
 
 .mini-progress.status-success,
-.mini-progress.status-running {
-  background: #3b82f6;
-  background: conic-gradient(
-    #3b82f6 0 var(--progress, 0%),
-    #26354a var(--progress, 0%) 100%
-  );
+.mini-progress.status-completed,
+.mini-progress.status-pickup-ready {
+  --progress-color: #22c55e;
+  --progress-track: #183446;
+}
+
+.mini-progress.status-running,
+.mini-progress.status-sorting,
+.mini-progress.status-delivering {
+  --progress-color: #38bdf8;
+  --progress-track: #1d344e;
+}
+
+.mini-progress.status-inspecting,
+.mini-progress.status-paused {
+  --progress-color: #f59e0b;
+  --progress-track: #3b2f1d;
+}
+
+.mini-progress.status-order-wait,
+.mini-progress.status-order-received,
+.mini-progress.status-queued,
+.mini-progress.status-assigned {
+  --progress-color: #60a5fa;
+  --progress-track: #25354d;
 }
 
 .mini-progress.status-failed,
+.mini-progress.status-cancelled,
 .mini-progress.status-error {
-  background: conic-gradient(
-    #ef4444 0 var(--progress, 0%),
-    #26354a var(--progress, 0%) 100%
-  );
+  --progress-color: #ef4444;
+  --progress-track: #40252d;
 }
 
 .table-ok {
@@ -2482,37 +2654,348 @@ body {
 }
 
 .admin-console .orders-management-page {
-  grid-template-columns: minmax(0, 1.15fr) minmax(480px, 0.85fr);
+  grid-template-columns: minmax(720px, 1.45fr) minmax(280px, 0.55fr);
   gap: 14px;
   align-items: start;
 }
 
 .admin-console .orders-primary-section {
   grid-column: 1;
-  height: clamp(340px, 42vh, 430px);
+  height: clamp(260px, 30vh, 330px);
   min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
 }
 
 .admin-console .tasks-secondary-section {
-  grid-column: 2;
-  height: clamp(340px, 42vh, 430px);
-  min-height: 0;
+  grid-column: 1 / -1;
+  height: auto;
+  min-height: 220px;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
 }
 
 .admin-console .pickup-management-section {
-  grid-column: 1 / -1;
+  grid-column: 2;
+  height: clamp(260px, 30vh, 330px);
   min-height: 0;
   display: grid;
-  grid-template-rows: auto auto;
+  grid-template-rows: auto minmax(0, 1fr);
 }
 
 .admin-console .order-work-detail-section {
   grid-column: 1 / -1;
-  min-height: 238px;
+  min-height: 260px;
+  height: auto;
+  display: grid;
+  grid-template-rows: auto;
+  overflow: visible;
+}
+
+.admin-console .order-work-detail-section .order-work-detail-panel {
+  min-height: 0;
+  gap: 8px;
+  overflow: visible;
+}
+
+.admin-console .order-work-detail-section .work-detail-grid {
+  grid-template-columns: minmax(260px, 0.5fr) minmax(280px, 0.55fr) minmax(580px, 1.4fr);
+  grid-template-areas:
+    "info items tasks";
+  gap: 10px;
+  overflow: visible;
+}
+
+.admin-console .order-work-detail-section .work-detail-info-block {
+  grid-area: info;
+}
+
+.admin-console .order-work-detail-section .work-detail-items-block {
+  grid-area: items;
+}
+
+.admin-console .order-work-detail-section .work-detail-tasks-block {
+  grid-area: tasks;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.admin-console .order-work-detail-section .work-detail-header {
+  gap: 10px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+}
+
+.admin-console .order-work-detail-section .work-detail-title {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.admin-console .order-work-detail-section .work-detail-title strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #f8fafc;
+  font-size: 18px;
+  font-weight: 900;
+}
+
+.admin-console .order-work-detail-section .work-detail-title small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.admin-console .order-work-detail-section .work-detail-edit-button {
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding: 0 16px;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.admin-console .order-work-detail-section .work-detail-header-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  align-self: start;
+  margin-top: -2px;
+}
+
+.admin-console .order-work-detail-section .work-detail-block {
+  padding: 10px 12px;
+}
+
+.admin-console .order-work-detail-section .work-detail-block h3 {
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+
+.admin-console .order-work-detail-section .work-detail-block dl {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+}
+
+.admin-console .order-work-detail-section .work-detail-info-content {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 150px;
+  gap: 14px;
+  align-items: start;
+}
+
+.admin-console .order-work-detail-section .work-detail-info-side {
+  min-width: 0;
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 10px;
+  align-self: center;
+}
+
+.admin-console .order-work-detail-section .work-detail-info-side .state-badge {
+  min-height: 30px;
+  min-width: 88px;
+  justify-content: center;
+  padding: 0 12px;
+}
+
+.admin-console .order-work-detail-section .work-detail-info-side .mini-progress {
+  width: 96px;
+  height: 96px;
+}
+
+.admin-console .order-work-detail-section .work-detail-info-side .mini-progress::after {
+  inset: 17px;
+}
+
+.admin-console .order-work-detail-section .work-detail-info-side .mini-progress span {
+  display: block;
+  font-size: 15px;
+}
+
+.admin-console .order-work-detail-section .work-detail-item {
+  gap: 8px;
+}
+
+.admin-console .order-work-detail-section .work-detail-items {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  align-content: start;
+  gap: 8px;
+}
+
+.admin-console .order-work-detail-section .work-detail-item {
+  min-width: 0;
+  max-width: none;
+}
+
+.admin-console .order-work-detail-section .work-detail-image {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+}
+
+.admin-console .order-work-detail-section .work-detail-task-list {
+  max-height: 228px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.admin-console .order-work-detail-section .work-detail-task {
+  min-height: 34px;
+  grid-template-columns: 42px minmax(0, 1fr) minmax(82px, 0.42fr) auto;
+  gap: 8px;
+  padding: 0 10px;
+}
+
+.admin-console .order-work-detail-section .work-detail-task strong {
+  font-size: 13px;
+}
+
+.admin-console .order-work-detail-section .work-detail-task span,
+.admin-console .order-work-detail-section .work-detail-task em {
+  font-size: 11px;
+}
+
+.admin-console .pickup-management-section .table-placeholder {
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  gap: 10px;
+  height: 100%;
+  overflow-y: auto;
+}
+
+.admin-console .pickup-management-section .slot-row {
+  min-height: 82px;
+  padding: 14px 16px;
+}
+
+.admin-console .pickup-management-section .slot-row strong {
+  font-size: 17px;
+  font-weight: 900;
+}
+
+.admin-console .pickup-management-section .slot-row span {
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.active-task-table .task-table-section-row {
+  min-height: 38px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+  border-top: 1px solid rgba(96, 165, 250, 0.26);
+  border-bottom: 1px solid rgba(96, 165, 250, 0.16);
+  background: linear-gradient(
+    90deg,
+    rgba(37, 99, 235, 0.22),
+    rgba(15, 23, 42, 0.92)
+  );
+}
+
+.active-task-table .admin-table-head + .task-table-section-row {
+  border-top: 0;
+}
+
+.active-task-table .task-table-section-row i {
+  width: 4px;
+  height: 20px;
+  border-radius: 999px;
+  background: #60a5fa;
+}
+
+.active-task-table .task-section-current {
+  background: linear-gradient(
+    90deg,
+    rgba(34, 197, 94, 0.22),
+    rgba(15, 23, 42, 0.94)
+  );
+}
+
+.active-task-table .task-section-current i {
+  background: #22c55e;
+  box-shadow: 0 0 18px rgba(34, 197, 94, 0.28);
+}
+
+.active-task-table .task-section-waiting i {
+  background: #60a5fa;
+  box-shadow: 0 0 18px rgba(96, 165, 250, 0.26);
+}
+
+.active-task-table .task-table-section-row strong {
+  color: #f8fafc;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.active-task-table .task-table-section-row span {
+  min-height: 22px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.task-table-empty-row {
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 800;
+  min-height: 38px;
+  display: grid;
+  align-items: center;
+  padding: 0 12px;
+  border-top: 1px solid rgba(71, 85, 105, 0.32);
+}
+
+.task-cell-stack {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.task-cell-stack small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.active-task-table .task-row-current {
+  border-left: 3px solid rgba(34, 197, 94, 0.82);
+  background: rgba(15, 23, 42, 0.3);
+}
+
+.active-task-table .task-row-waiting {
+  border-left: 3px solid rgba(96, 165, 250, 0.42);
+}
+
+.active-task-table .task-row-current:hover,
+.active-task-table .task-row-waiting:hover {
+  background: rgba(30, 64, 175, 0.2);
 }
 
 .admin-console .orders-primary-section .table-placeholder,
@@ -2523,20 +3006,23 @@ body {
 
 .admin-console .orders-management-page .table-placeholder {
   min-height: 0;
+  align-content: start;
   overflow: auto;
 }
 
 .admin-console .pickup-management-section .table-placeholder {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
   gap: 10px;
-  height: auto;
-  overflow: visible;
+  height: 100%;
+  overflow-y: auto;
 }
 
 .admin-console .orders-primary-section .admin-table,
 .admin-console .tasks-secondary-section .admin-table {
   min-height: 0;
+  align-content: start;
 }
 
 .admin-console .orders-management-page .admin-table-head {
@@ -2595,10 +3081,11 @@ body {
 }
 
 .order-work-detail-panel {
-  min-height: 210px;
+  min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 12px;
+  overflow: auto;
 }
 
 .work-detail-header {
@@ -2638,9 +3125,7 @@ body {
 
 .work-detail-grid {
   display: grid;
-  grid-template-columns:
-    minmax(160px, 0.8fr) minmax(220px, 1fr) minmax(260px, 1.15fr)
-    160px;
+  grid-template-columns: minmax(150px, 0.72fr) minmax(210px, 0.9fr) minmax(260px, 1fr) 132px;
   gap: 12px;
   min-height: 0;
 }
@@ -2685,8 +3170,7 @@ body {
 }
 
 .work-detail-items,
-.work-detail-task-list,
-.work-detail-actions {
+.work-detail-task-list {
   display: grid;
   gap: 8px;
 }
@@ -2835,12 +3319,6 @@ body {
 
 .work-detail-task:disabled {
   cursor: default;
-}
-
-.work-detail-actions {
-  align-content: center;
-  padding-left: 12px;
-  border-left: 1px solid rgba(71, 85, 105, 0.55);
 }
 
 .admin-console .full-span {
@@ -4560,6 +5038,13 @@ body {
   gap: 8px;
 }
 
+.admin-console .command-stack.horizontal-command-stack {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-end;
+}
+
 .admin-console .command-stack .danger-button,
 .admin-console .command-stack .secondary-button {
   width: 100%;
@@ -4581,6 +5066,11 @@ body {
   margin-top: 6px;
 }
 
+.admin-console .pickup-summary-card .pickup-summary-list {
+  gap: 10px;
+  margin-top: 10px;
+}
+
 .pickup-summary-item {
   min-height: 45px;
   padding: 4px 10px;
@@ -4600,6 +5090,13 @@ body {
     border-color 0.16s ease,
     background 0.16s ease,
     transform 0.16s ease;
+}
+
+.admin-console .pickup-summary-card .pickup-summary-item {
+  min-height: 64px;
+  padding: 10px 14px;
+  border-left-width: 4px;
+  gap: 10px;
 }
 
 .pickup-summary-item:hover {
@@ -4669,6 +5166,87 @@ body {
   background: #ef4444;
 }
 
+.admin-console .pickup-management-section .slot-row {
+  min-height: 64px;
+  padding: 10px 14px;
+  border: 1px solid #2a3b52;
+  border-left-width: 4px;
+  border-radius: 6px;
+  background: #101c2b;
+  color: #dbe7f5;
+  box-shadow: none;
+}
+
+.admin-console .pickup-management-section .slot-empty {
+  border-left-color: #22c55e;
+  background: linear-gradient(
+    90deg,
+    rgba(34, 197, 94, 0.12),
+    #101c2b 34%
+  );
+}
+
+.admin-console .pickup-management-section .slot-reserved {
+  border-left-color: #60a5fa;
+  background: linear-gradient(
+    90deg,
+    rgba(96, 165, 250, 0.13),
+    #101c2b 34%
+  );
+}
+
+.admin-console .pickup-management-section .slot-occupied {
+  border-left-color: #f59e0b;
+  background: linear-gradient(
+    90deg,
+    rgba(245, 158, 11, 0.14),
+    #101c2b 34%
+  );
+}
+
+.admin-console .pickup-management-section .slot-blocked {
+  border-left-color: #ef4444;
+  background: linear-gradient(
+    90deg,
+    rgba(239, 68, 68, 0.14),
+    #101c2b 34%
+  );
+}
+
+.admin-console .pickup-management-section .slot-row:hover {
+  border-top-color: #3b82f6;
+  border-right-color: #3b82f6;
+  border-bottom-color: #3b82f6;
+  background: #142338;
+}
+
+.admin-console .pickup-management-section .slot-row strong {
+  color: #60a5fa;
+  font-size: 15px;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+
+.admin-console .pickup-management-section .slot-row span {
+  color: #e5eefb;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.admin-console .pickup-management-section .slot-row > div:first-child span {
+  color: #aebdd0;
+  font-size: 12px;
+}
+
+.admin-console .pickup-management-section .slot-state {
+  gap: 10px;
+}
+
+.admin-console .pickup-management-section .slot-state-dot {
+  width: 13px;
+  height: 13px;
+}
+
 .pickup-summary-item strong,
 .pickup-summary-item span {
   display: inline-block;
@@ -4697,13 +5275,16 @@ body {
 .admin-console .pickup-summary-card .pickup-summary-item strong {
   margin-top: 0;
   color: #60a5fa;
-  font-size: 10px;
+  font-size: 15px;
   font-weight: 900;
+  letter-spacing: 0;
 }
 
 .admin-console .pickup-summary-card .pickup-summary-item span {
   margin-top: 0;
-  font-size: 10px;
+  color: #e5eefb;
+  font-size: 13px;
+  font-weight: 900;
 }
 
 
@@ -5207,6 +5788,7 @@ body {
   .admin-console .inventory-summary-section,
   .admin-console .orders-primary-section,
   .admin-console .tasks-secondary-section,
+  .admin-console .order-work-detail-section,
   .admin-console .pickup-management-section {
     grid-column: auto;
   }
@@ -5216,8 +5798,34 @@ body {
   }
 
   .admin-console .orders-primary-section,
-  .admin-console .tasks-secondary-section {
+  .admin-console .tasks-secondary-section,
+  .admin-console .order-work-detail-section,
+  .admin-console .pickup-management-section {
     height: auto;
+  }
+
+  .admin-console .order-work-detail-section .work-detail-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "info"
+      "items"
+      "tasks";
+  }
+
+  .admin-console .order-work-detail-section .work-detail-header {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .admin-console .order-work-detail-section .work-detail-header-actions {
+    justify-self: start;
+  }
+
+  .admin-console .order-work-detail-section .work-detail-info-content {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .admin-console .order-work-detail-section .work-detail-info-side {
+    justify-items: start;
   }
 
   .admin-console .pickup-management-section .table-placeholder {
@@ -5228,10 +5836,6 @@ body {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .work-detail-actions {
-    padding-left: 0;
-    border-left: 0;
-  }
 }
 
 @media (max-width: 720px) {

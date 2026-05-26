@@ -302,6 +302,32 @@ def validate_task_refs(db: Session, task_create) -> Robot | None:
     return robot
 
 
+def resolve_task_sequence_no(db: Session, task_create, robot: Robot | None) -> int:
+    if task_create.sequence_no is not None:
+        return task_create.sequence_no
+
+    task_query = db.query(Task)
+
+    if task_create.stocking_item_id is not None:
+        task_query = task_query.filter(Task.stocking_item_id == task_create.stocking_item_id)
+    elif task_create.order_id is not None:
+        task_query = task_query.filter(Task.order_id == task_create.order_id)
+    elif task_create.order_item_id is not None:
+        task_query = task_query.filter(Task.order_item_id == task_create.order_item_id)
+    else:
+        task_query = task_query.filter(
+            Task.order_id.is_(None),
+            Task.order_item_id.is_(None),
+            Task.stocking_item_id.is_(None),
+        )
+
+        if robot is not None:
+            task_query = task_query.filter(Task.assigned_robot_id == robot.robot_id)
+
+    previous_task = task_query.order_by(Task.sequence_no.desc(), Task.task_id.desc()).first()
+    return (previous_task.sequence_no if previous_task else 0) + 1
+
+
 @router.websocket("/ws/events")
 async def fleet_events_websocket(websocket: WebSocket):
     await fleet_event_websockets.connect(websocket)
@@ -466,7 +492,7 @@ def create_fleet_tasks(
             order_id=task_create.order_id,
             order_item_id=task_create.order_item_id,
             stocking_item_id=task_create.stocking_item_id,
-            sequence_no=task_create.sequence_no,
+            sequence_no=resolve_task_sequence_no(db, task_create, robot),
             assigned_robot_id=robot.robot_id if robot else None,
             task_type=task_create.task_type,
             status=task_create.status,
@@ -538,6 +564,61 @@ def list_order_tasks(
     return [build_task_summary(db, task) for task in tasks]
 
 
+@router.delete("/tasks/{task_id}", response_model=FleetStateUpdateRead)
+def delete_fleet_task(
+    task_id: int,
+    background_tasks: BackgroundTasks,
+    force: bool = False,
+    db: Session = Depends(get_db),
+):
+    task = (
+        db.query(Task)
+        .filter(Task.task_id == task_id)
+        .with_for_update()
+        .one_or_none()
+    )
+
+    if not task:
+        raise HTTPException(status_code=404, detail="task not found")
+
+    previous_status = task.status
+
+    if previous_status in ("RUNNING", "PAUSED") and not force:
+        raise HTTPException(
+            status_code=409,
+            detail="running or paused task cannot be deleted without force=true",
+        )
+
+    robots_with_task = db.query(Robot).filter(Robot.current_task_id == task.task_id).all()
+
+    for robot in robots_with_task:
+        robot.current_task_id = None
+
+        if robot.robot_status in ("BUSY", "CHARGING"):
+            robot.robot_status = "IDLE"
+
+    db.query(ExceptionLog).filter(ExceptionLog.task_id == task.task_id).update(
+        {ExceptionLog.task_id: None},
+        synchronize_session=False,
+    )
+    db.query(TaskEvent).filter(TaskEvent.task_id == task.task_id).delete(
+        synchronize_session=False,
+    )
+    db.delete(task)
+    db.commit()
+
+    background_tasks.add_task(broadcast_all_status)
+    background_tasks.add_task(
+        broadcast_fleet_event,
+        {"event": "TASK_DELETED", "task_id": task_id},
+    )
+    return {
+        "status": "ok",
+        "previous_status": previous_status,
+        "current_status": None,
+    }
+
+
 @router.patch("/orders/{order_id}", response_model=FleetStateUpdateRead)
 def update_order_state(
     order_id: int,
@@ -551,6 +632,61 @@ def update_order_state(
         raise HTTPException(status_code=404, detail="order not found")
 
     previous_slot_id = order.pickup_slot_id
+
+    if "item_quantities" in state_update.model_fields_set and state_update.item_quantities is not None:
+        if order.status not in {"ORDER_RECEIVED", "ORDER_WAIT"}:
+            raise HTTPException(status_code=400, detail="진행 중이거나 완료된 주문은 상품 수량을 변경할 수 없습니다")
+
+        if db.query(Task).filter(Task.order_id == order.order_id).first():
+            raise HTTPException(status_code=400, detail="작업이 생성된 주문은 상품 수량을 변경할 수 없습니다")
+
+        quantities_by_item_id = {}
+
+        for item_update in state_update.item_quantities:
+            if item_update.item_id in quantities_by_item_id:
+                raise HTTPException(status_code=400, detail="duplicate order item update")
+
+            quantities_by_item_id[item_update.item_id] = item_update.quantity
+
+        if quantities_by_item_id:
+            order_items = (
+                db.query(OrderItem)
+                .filter(
+                    OrderItem.order_id == order.order_id,
+                    OrderItem.item_id.in_(quantities_by_item_id.keys()),
+                )
+                .with_for_update()
+                .all()
+            )
+
+            if len(order_items) != len(quantities_by_item_id):
+                raise HTTPException(status_code=404, detail="order item not found")
+
+            products = (
+                db.query(Product)
+                .filter(Product.product_id.in_([item.product_id for item in order_items]))
+                .with_for_update()
+                .all()
+            )
+            products_by_id = {product.product_id: product for product in products}
+
+            for item in order_items:
+                product = products_by_id.get(item.product_id)
+                new_quantity = quantities_by_item_id[item.item_id]
+                stock_delta = new_quantity - item.quantity
+
+                if product is None:
+                    raise HTTPException(status_code=404, detail="product not found")
+
+                if stock_delta > 0 and product.stock_qty < stock_delta:
+                    raise HTTPException(status_code=400, detail="not enough stock")
+
+            for item in order_items:
+                product = products_by_id[item.product_id]
+                new_quantity = quantities_by_item_id[item.item_id]
+                stock_delta = new_quantity - item.quantity
+                product.stock_qty -= stock_delta
+                item.quantity = new_quantity
 
     if state_update.status is not None:
         order.status = state_update.status

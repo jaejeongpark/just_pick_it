@@ -197,7 +197,24 @@ def build_admin_status(db: Session):
         .order_by(robot_unit_order, robot_type_order, Robot.robot_name, Robot.robot_id)
         .all()
     )
-    tasks = db.query(Task).order_by(Task.priority, Task.sequence_no, Task.task_id).limit(50).all()
+    active_task_statuses = ["QUEUED", "ASSIGNED", "RUNNING", "PAUSED"]
+    active_tasks = (
+        db.query(Task)
+        .filter(Task.status.in_(active_task_statuses))
+        .order_by(Task.priority, Task.sequence_no, Task.task_id)
+        .all()
+    )
+    recent_tasks_limit = max(0, 50 - len(active_tasks))
+    recent_tasks = (
+        db.query(Task)
+        .filter(Task.status.notin_(active_task_statuses))
+        .order_by(Task.task_id.desc())
+        .limit(recent_tasks_limit)
+        .all()
+        if recent_tasks_limit > 0
+        else []
+    )
+    tasks = active_tasks + recent_tasks
     products = db.query(Product).order_by(Product.product_id).all()
     pickup_slots = db.query(PickupSlot).order_by(PickupSlot.slot_id).all()
     exceptions = (
