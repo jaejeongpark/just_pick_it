@@ -139,6 +139,11 @@ fi
 echo "[web-setup] installing python packages"
 "$WEB_DIR/.venv/bin/pip" install -r "$WEB_DIR/requirements.txt"
 
+# 공용 DB 계층(just_pick_it_db: ORM 모델/세션/비즈니스 로직)을 editable 로 설치한다.
+# 웹과 Fleet Manager 가 같은 코드를 재사용한다. 자세한 내용은 docs/Control_Service_통합_계획.md 참고.
+echo "[web-setup] installing shared DB package (just_pick_it_db, editable)"
+"$WEB_DIR/.venv/bin/python" -m pip install -e "$WEB_DIR/../src/just_pick_it/just_pick_it_db"
+
 # .env가 없으면 예시 파일을 복사한다.
 # DB URL, host, port는 web/.env에서 조정한다.
 if [ ! -f "$WEB_DIR/.env" ]; then

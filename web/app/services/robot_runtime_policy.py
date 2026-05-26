@@ -1,17 +1,3 @@
-FINAL_TASK_STATUSES = ("SUCCESS", "FAILED", "CANCELLED")
-UNAVAILABLE_ROBOT_STATUSES = ("EMERGENCY_STOP", "ERROR", "OFFLINE")
+"""robot_runtime_policy re-export shim. 실제 구현은 just_pick_it_db.services.robot_runtime_policy (Phase 1 이전). Phase 4 제거 예정."""
 
-TASK_ROBOT_TYPE = {
-    "MOVE_TO_PRODUCT": "PICKY",
-    "MOVE_TO_PICKUP": "PICKY",
-    "MOVE_TO_STOCK": "PICKY",
-    "MOVE_TO_STORAGE": "PICKY",
-    "RETURN_HOME": "PICKY",
-    "DOCK_IN": "PICKY",
-    "CHARGE": "PICKY",
-    "SORTING_AND_LOAD": "COBOT",
-    "INSPECTION": "COBOT",
-    "UNLOAD": "COBOT",
-    "STOCKING_PICK": "COBOT",
-    "STOCKING_PLACE": "COBOT",
-}
+from just_pick_it_db.services.robot_runtime_policy import *  # noqa: F401,F403

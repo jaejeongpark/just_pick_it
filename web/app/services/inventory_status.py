@@ -1,20 +1,3 @@
-LOW_STOCK_MAX = 0
-WARNING_STOCK_QTY = 1
-NORMAL_STOCK_MIN = 2
+"""inventory_status re-export shim. 실제 구현은 just_pick_it_db.services.inventory_status (Phase 1 이전). Phase 4 제거 예정."""
 
-
-def stock_level(stock_qty: int) -> str:
-    if stock_qty <= LOW_STOCK_MAX:
-        return "low"
-
-    if stock_qty == WARNING_STOCK_QTY:
-        return "warning"
-
-    if stock_qty >= NORMAL_STOCK_MIN:
-        return "normal"
-
-    return "low"
-
-
-def is_low_stock(stock_qty: int) -> bool:
-    return stock_level(stock_qty) == "low"
+from just_pick_it_db.services.inventory_status import *  # noqa: F401,F403
