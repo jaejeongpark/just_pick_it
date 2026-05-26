@@ -9,8 +9,9 @@ PICKY/COBOT State Manager가 실제 로봇 쪽에서 지켜야 하는 실행 계
 ```text
 1. 전체 책임 경계
 2. 구현 상태 요약
-3. 본인이 수정한 모듈 섹션
-4. 다음 구현 시 확인할 것
+3. 전체 주문/입고/복귀 흐름
+4. 본인이 맡은 파일의 상세 리뷰 문서
+5. 다음 구현 시 확인할 것
 ```
 
 대상 파일은 다음이다.
@@ -27,6 +28,51 @@ PICKY/COBOT State Manager가 실제 로봇 쪽에서 지켜야 하는 실행 계
 - `web/app/services/workflow_service.py`
 
 `traffic_manager.py`, `robot_state_monitor.py`는 Traffic 담당 영역이므로 이 문서에서는 상태와 계약을 중심으로 리뷰한다.
+
+## 파일별 상세 리뷰 문서
+
+이 문서는 전체 구조를 빠르게 잡는 지도다.
+함수 단위로 코드를 뜯어볼 때는 아래 상세 리뷰 문서를 본다.
+
+```text
+src/just_pick_it/fleet_manager/reviews/
+  fleet_manager_node_review.md
+  control_server_client_review.md
+  task_manager_review.md
+  robot_command_gateway_review.md
+  traffic_manager_review.md
+  robot_state_monitor_review.md
+```
+
+권장 학습 순서:
+
+```text
+1. fleet_manager_node_review.md
+   -> 전체 조립 구조와 callback/timer/WebSocket 입구 확인
+
+2. control_server_client_review.md
+   -> Control Server API adapter와 order_work/stocking_work 정규화 확인
+
+3. task_manager_review.md
+   -> 주문/입고/task 생성/dispatch/result/복귀/충전 흐름 확인
+
+4. robot_command_gateway_review.md
+   -> MoveCommand/DockCommand/EmergencyControl 변환 확인
+
+5. traffic_manager_review.md
+   -> reserve_nearest_from/release_path/dock 예약 계약 확인
+
+6. robot_state_monitor_review.md
+   -> 현재 상태 입력 범위와 향후 battery/cobot_state 확장 위치 확인
+```
+
+팀원 리뷰 방식:
+
+```text
+- 처음 10분: 이 문서의 전체 책임 경계와 구현 상태 요약을 같이 본다.
+- 다음 20분: 본인 담당 파일의 상세 리뷰 문서를 본다.
+- 이후: task_manager_review.md의 전체 task 흐름을 기준으로 각자 인터페이스를 맞춘다.
+```
 
 ## 전체 책임 경계
 
