@@ -36,7 +36,7 @@ def generate_launch_description():
                 name="pi_camera_udp_publisher",
                 output="screen",
                 parameters=[
-                    {"target_port": 5001},
+                    {"dest_port": 5001},
                 ]
             ),
         ]
