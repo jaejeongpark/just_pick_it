@@ -3,14 +3,19 @@ Standalone UDP image receiver — ROS2 불필요, python3로 직접 실행.
 
 Usage:
     python3 udp_image_receiver.py [--port 9870]
+    spacebar: 현재 프레임 캡처 (~/img_capture/)
     q 키로 종료
 """
 import argparse
 import socket
 import struct
+from datetime import datetime
+from pathlib import Path
 
 import cv2
 import numpy as np
+
+CAPTURE_DIR = Path.home() / 'img_capture'
 
 HEADER_FMT = '>IHH'
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
@@ -53,10 +58,22 @@ def main():
                 del frames[fid]
 
             img = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
-            if img is not None:
-                cv2.imshow('UDP Stream', img)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
+            if img is None:
+                continue
+            img_rot = cv2.rotate(img, cv2.ROTATE_180)
+            img_rot_rgb = cv2.cvtColor(img_rot, cv2.COLOR_BGR2RGB)
+            cv2.imshow('UDP Stream', img_rot_rgb)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                break
+            elif key == ord(' '):
+                CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+                save_path = CAPTURE_DIR / f'capture_{timestamp}.png'
+                # PNG: 무손실 저장으로 UDP 디코딩 이후 픽셀 품질 유지
+                cv2.imwrite(str(save_path), img_rot_rgb)
+                print(f'캡처 저장: {save_path}')
 
     sock.close()
     cv2.destroyAllWindows()

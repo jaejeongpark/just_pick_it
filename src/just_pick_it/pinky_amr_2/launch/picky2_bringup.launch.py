@@ -28,6 +28,7 @@ def generate_launch_description():
             SetRemap(src="/joint_states", dst="/picky2/joint_states"),
             SetRemap(src="/battery/percent", dst="/picky2/battery/percent"),
             SetRemap(src="/battery/voltage", dst="/picky2/battery/voltage"),
+            SetRemap(src="/camera/image_raw", dst="/picky2/camera/image_raw"),
             IncludeLaunchDescription(AnyLaunchDescriptionSource(pinky_bringup_launch)),
         ]
     )
