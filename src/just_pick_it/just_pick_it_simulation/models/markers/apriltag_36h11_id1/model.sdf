@@ -1,12 +1,19 @@
 <?xml version="1.0"?>
 <sdf version="1.8">
   <model name="apriltag_36h11_id1">
+    <!--
+      AprilTag 36h11 ID 1
+      크기: 37.5 x 37.5 mm (이전 150x150 의 1/4 폭, 1/4 높이)
+      두께: 1mm
+      X축이 두께 방향 (이미지 면 normal). yaw 0 으로 spawn 하면
+      이미지가 +-X 방향을 향함.
+    -->
     <static>true</static>
     <link name="link">
       <visual name="visual">
         <geometry>
           <box>
-            <size>0.001 0.15 0.15</size>
+            <size>0.001 0.0375 0.0375</size>
           </box>
         </geometry>
         <material>
@@ -25,7 +32,7 @@
       <collision name="collision">
         <geometry>
           <box>
-            <size>0.001 0.15 0.15</size>
+            <size>0.001 0.0375 0.0375</size>
           </box>
         </geometry>
       </collision>
