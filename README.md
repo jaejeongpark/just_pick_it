@@ -137,11 +137,7 @@ cd just_pick_it
 6. colcon build --symlink-install 전체 빌드
 ```
 
-DB를 유지한 채 의존성/빌드만 다시 맞추려면:
-
-```bash
-RESET_DB=0 ./reset_ws.sh
-```
+팀원 환경을 맞출 때는 부분 초기화 옵션 없이 `./reset_ws.sh`를 그대로 실행합니다.
 
 ### 수동 의존성 설치 / 빌드
 

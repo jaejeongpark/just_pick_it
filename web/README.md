@@ -61,12 +61,7 @@ cd ~/just_pick_it
 - colcon build --symlink-install
 ```
 
-웹 venv만 다시 만들려면:
-
-```bash
-cd ~/just_pick_it
-RESET_VENV=1 web/scripts/setup.sh
-```
+팀원 환경을 맞출 때는 web venv만 따로 만지지 말고 루트 `./reset_ws.sh`로 전체 재세팅합니다.
 
 ## 실행
 

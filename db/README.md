@@ -23,11 +23,8 @@ cd ~/just_pick_it
 ./reset_ws.sh
 ```
 
-DB schema/seed는 `./reset_ws.sh` 기본 실행 때 다시 만듭니다. DB를 유지하려면:
-
-```bash
-RESET_DB=0 ./reset_ws.sh
-```
+DB schema/seed는 팀원 환경을 맞출 때 `./reset_ws.sh` 기본 실행으로 다시 만듭니다.
+부분 초기화 옵션은 팀 공통 절차로 안내하지 않습니다.
 
 ## 수동 적용
 
