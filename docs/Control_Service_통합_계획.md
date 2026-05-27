@@ -1,13 +1,23 @@
 # Control Service → Fleet Manager 통합 계획
 
 작성일: 2026-05-26
+갱신일: 2026-05-26 (토폴로지·DB 접근 방식 확정 반영)
 
 이 문서는 `System_Architecture ver_2.0`의 Software/System Architecture를 기준으로,
 현재 별도 웹서버로 편성된 **Control Service**의 책임을 **ROS2 Fleet Manager**로 통합하고
 **DB 소유권을 Fleet Manager로 옮기는** 작업의 방향성과 해야 할 일을 정리한다.
 
-결론을 한쪽으로 확정하지 않고, 토폴로지와 DB 접근 방식 각각에 대해 두 안을 비교한 뒤
-권고안과 단계별 작업 목록을 제시한다.
+---
+
+## 0. 확정된 방향 (요약)
+
+- **DB에 직접 접근하는 주체는 Fleet Manager 하나뿐이다** (읽기·쓰기 모두). DB 커넥션은 Fleet Manager 프로세스에만 존재한다.
+- **웹은 DB에 직접 연결하지 않는다.** 웹은 화면을 그리는 프레젠테이션 클라이언트이며, **읽기·쓰기 모두 Fleet Manager를 거친다.** (DB를 직접 읽지도 쓰지도 않음)
+- 웹은 별도 프로세스로 유지하되 **DB 접속 권한 자체를 갖지 않는다.** 조회는 Fleet Manager에 요청하고, 쓰기 동작은 Fleet Manager에 명령으로 위임한다.
+- **웹 ↔ Fleet Manager 전달 방식은 HTTP/REST API + WebSocket으로 확정**한다. Fleet Manager가 API 서버를 열고, 웹은 순수 HTTP/WS 클라이언트가 된다 (조회=GET, 명령=POST, 실시간 상태=WebSocket push).
+- DB 접근 코드는 **기존 SQLAlchemy 자산을 Fleet Manager 안으로 이사**시켜 재사용하고, **ORM을 유지**한다.
+
+이 구조는 "API 서버만 DB를 만지고 프런트엔드는 DB에 직접 붙지 않는다"는 일반적인 웹 서비스 표준을 그대로 따른 것이다.
 
 ---
 
@@ -52,108 +62,114 @@ HTTP 계약 양쪽에서 이중으로 신경 쓰게 만든다.
 ### 1.3 통합의 목표
 
 1. Control Service가 하던 일(DB CRUD, 상태 전이 로직, 스냅샷 생성)을 Fleet Manager로 흡수한다.
-2. **DB 쓰기 소유권을 Fleet Manager로 단일화**한다. Fleet Manager는 HTTP를 거치지 않고 DB에 직접 접근한다.
-3. 고객/관리자 UI는 계속 동작해야 한다 (이 부분의 처리 방식이 아래 토폴로지 선택의 핵심이다).
+2. **DB 소유권을 Fleet Manager로 단일화**한다. Fleet Manager는 HTTP를 거치지 않고 DB에 직접 접근하고, **다른 어떤 프로세스도 DB에 직접 붙지 않는다.**
+3. 고객/관리자 UI는 계속 동작해야 한다. 웹은 DB에 직접 접근하지 않는 프레젠테이션 클라이언트로 분리하고, 읽기·쓰기 모두 Fleet Manager를 경유한다.
 
 ---
 
-## 2. 통합 토폴로지 — 두 안 비교
+## 2. 목표 토폴로지
 
-웹 UI(브라우저 페이지, 고객/관리자 WebSocket 상태 송출, LLM/Vision 연동 창구)를 어디에 둘지에 따라 두 갈래로 나뉜다.
-
-### 안 A — FastAPI를 Fleet Manager 프로세스에 내장 (단일 프로세스)
-
-ROS2 노드 프로세스 안에서 uvicorn/FastAPI를 별도 스레드로 함께 띄운다.
-Control Service가 완전히 사라지고 Fleet Manager가 ROS2 + 웹 + DB를 모두 담당한다.
+### 2.1 확정 구조 — Fleet Manager 단독 DB 게이트웨이
 
 ```text
-Fleet Manager Process
+Fleet Manager Process (유일한 DB 소유자)
 ├ rclpy executor (Task/Traffic/StateMonitor/Gateway)
-├ FastAPI/uvicorn thread (Customer/Admin 페이지, REST, WS)
-└ DB 접근 계층 (단일 소유)
+├ DB 접근 계층 (읽기 + 쓰기, 단독)
+└ 웹 데이터 제공 인터페이스 (방식 추후 결정)
+        │  (HTTP/큐/캐시 등)
+        ▼
+Web Frontend Process (프레젠테이션 전용)
+├ Customer/Admin 페이지 렌더링
+└ DB 접속 권한 없음. 읽기·쓰기 모두 Fleet Manager 경유
+        │  PostgreSQL
+        ▼
+   DB ── Fleet Manager만 접속
 ```
 
-- **장점**
-  - 사용자가 말한 "전부 통합"에 가장 가깝다. 프로세스가 하나이므로 DB·상태를 메모리에서 공유한다.
-  - 상태 변경 → UI 브로드캐스트가 인프로세스 호출로 즉시 일어난다. WebSocket 이벤트 우회 경로(`/api/fleet/ws/events`)가 불필요해진다.
-  - 비즈니스 로직이 한 곳에만 존재한다.
-- **단점 / 리스크**
-  - rclpy executor와 asyncio(uvicorn) **두 이벤트 루프를 한 프로세스에서 공존**시켜야 한다. 스레드 경계·GIL·블로킹 호출 관리가 까다롭다.
-  - 웹 트래픽(브라우저 다수 접속)과 실시간 제어가 자원을 공유한다. 무거운 페이지 렌더링이 제어 루프를 방해하지 않도록 격리가 필요하다.
-  - 배포 단위가 커지고, 웹만 재시작/로봇만 재시작 같은 독립 운영이 어려워진다.
+- 웹은 별도 프로세스로 유지하되 **DB 연결 문자열·접속 권한을 갖지 않는다.**
+- 쓰기(주문 생성, emergency-stop 등)는 웹이 Fleet Manager에 명령을 전달하고 Fleet Manager가 DB에 쓴다.
+- 읽기(화면 표시)도 웹이 Fleet Manager에 조회를 요청한다. 즉 **읽기·쓰기 모두 Fleet Manager 경유**다.
 
-### 안 B — 웹은 얇은 read-only 프런트로 분리 유지
+### 2.2 이 구조의 장점
 
-Fleet Manager가 DB를 단독 소유/쓰기하고, 웹은 **같은 DB를 읽어 화면만 렌더링**하는 얇은 프런트로 축소한다.
-쓰기 경로의 HTTP(`/api/fleet/*` PATCH/POST)는 제거되지만 프로세스는 둘로 유지된다.
+- **DB 동시 접근 정합성 문제가 원천적으로 사라진다.** 커넥션이 한 프로세스에만 있으므로 race/덮어쓰기 위험이 없다.
+- 비즈니스 로직(상태 전이 규칙 등)이 Fleet Manager 한 곳에만 존재한다.
+- 제어 루프와 웹 서빙이 별도 프로세스라 부하·장애가 서로 격리된다. 웹/로봇을 독립적으로 재시작할 수 있다.
+
+### 2.3 웹↔Fleet 전달 방식 — HTTP/REST API + WebSocket (확정)
+
+웹은 DB에 직접 못 붙으므로 Fleet Manager가 데이터를 내주는 통로가 필요하다.
+**Fleet Manager가 HTTP/REST API 서버를 열고, 웹은 순수 HTTP/WS 클라이언트로 호출하는 방식으로 확정**한다.
 
 ```text
-Fleet Manager Process            Web Frontend Process
-├ rclpy executor                 ├ FastAPI (페이지/조회 REST/WS)
-└ DB 쓰기 + 읽기 (소유)   <----   └ DB 읽기 전용
-        같은 PostgreSQL
+브라우저 ──HTTP/WS──> 웹 프런트(페이지 렌더링) ──HTTP/WS──> Fleet Manager API ──> DB
 ```
 
-- **장점**
-  - 관심사 분리 유지: 제어 루프와 웹 서빙이 독립 프로세스라 장애·부하가 서로 격리된다.
-  - 이벤트 루프 공존 문제 없음. 각 프로세스가 자기 런타임만 신경 쓴다.
-  - 웹/로봇을 독립적으로 배포·재시작할 수 있다.
-  - 마이그레이션이 점진적이다. `ControlServerClient`의 쓰기 호출부터 DB 직접 호출로 바꾸고, 읽기 화면은 나중에 옮길 수 있다.
-- **단점 / 리스크**
-  - **DB가 두 프로세스에서 동시 접근**된다(웹=읽기, Fleet=쓰기). 쓰기 소유권을 Fleet으로 못박아야 정합성이 깨지지 않는다.
-  - 고객 주문 생성, 관리자 emergency-stop 등 **현재 웹이 직접 DB에 쓰는 동작**을 어떻게 처리할지 결정해야 한다
-    (Fleet Manager로 명령 전달 후 Fleet이 DB에 쓰게 하거나, 명령 테이블/큐를 통해 위임).
-  - "DB도 Fleet이 관리"라는 목표는 달성하지만, 웹이 별도 프로세스로 남아 "전부 통합"의 체감은 안 A보다 약하다.
+상호작용은 두 성격으로 나뉜다.
 
-### 토폴로지 권고
+| 성격 | 통로 | 예시 |
+|------|------|------|
+| 요청-응답 (조회) | `GET /api/...` | 주문/로봇/zone/재고/예외 목록 조회, 화면 로드 |
+| 요청-응답 (명령) | `POST /api/...` | 주문 생성, emergency-stop/resume, 상품/재고 수정, 입고 요청 |
+| 실시간 푸시 (스트림) | WebSocket | 로봇 위치·상태·주문 상태 변화 (현재 `realtime.py` 역할이 Fleet으로 이동) |
 
-- 단기 안정성·점진적 이행을 중시하면 **안 B**가 현실적이다. 쓰기 경로를 먼저 DB 직접화하여 비효율을 즉시 제거하고,
-  웹은 read-only로 격리해 리스크를 낮춘다.
-- 장기적으로 "단일 백엔드"를 지향하고 운영 단순성을 원하면 **안 A**가 목표 그림에 더 부합한다.
-- 절충안: **안 B로 먼저 이행(쓰기 DB 직접화 + 웹 read-only) → 안정화 후 안 A로 프로세스 합치기.**
-  공용 DB 접근 계층을 패키지로 분리해 두면 두 단계 모두에서 재사용되므로 이 경로가 손실이 적다.
+채택 이유:
+
+- 웹 프런트 ↔ 백엔드 서비스 사이에서 **가장 표준적인 3계층 패턴**이다(브라우저 → 웹 → 백엔드 API → DB).
+- 웹이 이미 FastAPI(HTTP)라 **변경 비용이 가장 작다.** "DB 직접 소유" → "Fleet API 호출"로만 바뀐다.
+- 주문·명령(요청-응답)과 상태 푸시(WebSocket)를 하나의 친숙한 스택으로 모두 커버한다.
+- 지금도 쓰던 HTTP를 **방향만 뒤집는 것**이라 학습 비용이 거의 없다.
+
+대안과의 비교(메시지 큐, ROS2 네이티브)는 부록 성격으로 6장 리스크/메모에 남긴다.
+로봇이 수십 대로 늘고 다수 서비스가 상태를 공유하게 되면 메시지 큐 재검토 여지가 있으나, 현재 2대 규모에선 과하다.
+
+> 주의: 이 방식은 Fleet Manager 프로세스 안에서 **rclpy executor와 asyncio(API 서버)가 공존**해야 한다.
+> uvicorn은 별도 스레드로 띄우고, HTTP 핸들러는 스레드별 DB 세션(`scoped_session`, 3.4)을 사용하며,
+> 로봇을 실제로 움직이는 동작은 HTTP 스레드에서 rclpy를 직접 호출하지 말고 **executor로 위임(큐/내부 ROS2 호출)**한다.
 
 ---
 
-## 3. DB 접근 방식 — 두 안 비교
+## 3. DB 접근 방식 (확정 + 근거)
 
-Fleet Manager가 DB에 직접 접근할 때 코드 자산을 어떻게 다룰지.
+### 3.1 코드 자산: 기존 SQLAlchemy 자산을 Fleet Manager로 이사 (재사용)
 
-### 안 ① 기존 SQLAlchemy 자산을 공용 패키지로 추출해 재사용
+`web/app/models.py`(테이블 정의)와 `web/app/services/*`(상태 전이·스냅샷 로직)은 **이미 동작하며 검증된 자산**이다.
+통합은 "이 코드를 어디서 실행하느냐"를 바꾸는 일이지 로직을 새로 발명하는 일이 아니다. 새로 작성하면 같은 버그를 다시 만들 위험만 커진다.
 
-`web/app/models.py`와 `web/app/services/*`(workflow/status/stocking/inventory/robot_runtime_policy)를
-웹/Fleet 양쪽이 import하는 공용 패키지(예: `just_pick_it_db`)로 분리한다.
+- 웹이 더 이상 DB를 쓰지 않으므로, 원래 고려했던 "웹·Fleet 공용 패키지로 공유" 대신
+  **DB 코드를 Fleet Manager 안으로 이사**시키면 된다. 웹에는 DB 코드가 0줄 남는다.
+- 대안(전용 DB 레이어 신설/재작성)은 상태 전이 규칙이 중복·재구현되어 회귀 버그 위험이 커지므로 채택하지 않는다.
 
-- **장점**
-  - 검증된 ORM 모델과 상태 전이 로직(`workflow_service`의 `ORDER_STATUS_BY_RUNNING_TASK`, `PICKY_STATE_BY_TASK` 등)을 그대로 옮긴다. 재구현 버그 위험이 작다.
-  - 비즈니스 규칙이 한 패키지에만 존재해 양쪽 동작이 자동으로 일치한다.
-- **단점 / 리스크**
-  - ROS2 패키지가 SQLAlchemy/psycopg 의존성을 갖게 된다 (colcon 빌드·rosdep·가상환경 정리 필요).
-  - 공용 패키지가 FastAPI 세션 수명주기(`get_db` 제너레이터)에 묶여 있던 부분을 ROS2 타이머/콜백 컨텍스트에 맞게 세션 관리로 다듬어야 한다.
+### 3.2 기술: ORM(SQLAlchemy) 유지
 
-### 안 ② Fleet Manager 전용 DB 레이어 신설
+- 이 스키마는 order ↔ order_item ↔ product ↔ task ↔ robot 처럼 **테이블 간 관계가 많다.** 관계 조회/갱신은 ORM이 raw SQL보다 안전하고 읽기 쉽다.
+- 이미 SQLAlchemy로 작성되어 있어 그대로 옮기면 된다.
+- raw SQL은 성능이 특히 중요한 일부 무거운 쿼리에만 부분적으로 섞는다. 전체를 raw로 가지 않는다.
 
-ROS2 쪽에 별도 DB 접근 모듈(psycopg 또는 독립 SQLAlchemy)을 새로 만들고 필요한 쿼리만 이식한다.
+### 3.3 구조: DAO/Repository 계층을 한 겹 둔다
 
-- **장점**
-  - Fleet Manager가 쓰는 쿼리만 가볍게 가져갈 수 있고, 웹 코드와의 결합이 없다.
-  - 제어 루프에 맞춘 커넥션 풀/세션 전략을 자유롭게 설계할 수 있다.
-- **단점 / 리스크**
-  - 상태 전이 규칙·스냅샷 생성 로직이 웹과 Fleet 두 곳에 중복되어, 한쪽만 고치면 정합성이 깨진다.
-  - 이미 검증된 로직을 재작성하므로 회귀 버그 위험이 크다.
+- `TaskManager` 같은 로직이 SQL·세션을 직접 만지지 않고, "주문 조회 / task 저장" 같은 함수만 부르게 한다.
+- 지금 `ControlServerClient`가 HTTP를 감춰주던 역할을, **같은 인터페이스로 DB를 감춰주는 계층**으로 바꾸면
+  `TaskManager` 변경을 최소화하면서 내부 구현만 HTTP → DB로 교체할 수 있다.
 
-### DB 접근 권고
+### 3.4 반드시 챙길 함정 — 스레드별 세션 관리
 
-- **안 ① (공용 패키지 추출)을 권고**한다. 핵심 자산은 `workflow_service`의 상태 전이 규칙과 `status_service`의 스냅샷 빌더인데,
-  이를 중복시키면 통합의 이점(로직 단일화)이 사라진다.
-- 단, `get_db` 같은 FastAPI 결합부는 공용 패키지에서 제거하고, 세션 팩토리만 노출하여
-  웹(요청 수명주기)과 Fleet(타이머/콜백 수명주기)이 각자 세션을 열도록 한다.
+Fleet Manager는 `MultiThreadedExecutor`로 동작한다(여러 콜백이 **여러 스레드에서 동시에** 실행됨, `fleet_manager_node.py`).
+그런데 **SQLAlchemy의 Session 객체는 스레드 안전하지 않다.** 하나의 Session을 여러 스레드가 공유하면 데이터가 깨진다.
+
+표준 해법:
+
+- **콜백/타이머마다 세션을 새로 열고 닫는다** (요청 단위로 세션을 쓰는 웹 `get_db`와 같은 발상).
+- 또는 **`scoped_session`**(스레드마다 자동으로 다른 세션을 주는 SQLAlchemy 기능)을 사용한다.
+- 커넥션 풀 크기를 executor 스레드 수에 맞춘다.
+- 웹의 `get_db()` 제너레이터는 FastAPI 요청 수명주기에 묶여 있으므로 그대로 가져오지 말고,
+  **세션 팩토리(`SessionLocal`)만 옮겨 와 ROS2 콜백 수명주기에 맞게 다시 감싼다.**
 
 ---
 
 ## 4. 통합 대상 인벤토리
 
-통합 시 "Control Service가 하던 일"을 분류한다.
+> 전제: 웹은 DB에 직접 접근하지 않는다. 아래 4.1~4.2는 모두 Fleet Manager가 DB를 만지고, 웹은 그 결과를 Fleet Manager 경유로만 주고받는다.
 
 ### 4.1 Fleet Manager로 흡수할 것 (DB 쓰기·로직)
 
@@ -177,70 +193,106 @@ ROS2 쪽에 별도 DB 접근 모듈(psycopg 또는 독립 SQLAlchemy)을 새로 
 - `web/app/services/status_service.py` — admin/customer 스냅샷 빌더.
 - `web/app/services/stocking_service.py`, `inventory_status.py`, `robot_runtime_policy.py`.
 
-### 4.2 처리 방식을 결정해야 할 것 (웹이 직접 DB에 쓰는 동작)
+### 4.2 Fleet Manager로 위임할 것 (현재 웹이 직접 DB에 쓰는 동작)
 
-- **고객 주문 생성** (`POST /api/orders`, `order_router.py`) — 외부(브라우저)에서 들어오는 쓰기.
-- **관리자 동작** — emergency-stop / resume / 상품 등록·재고 수정 / pickup-slot 생성 / 입고 요청(`admin_router.py`).
-- 안 A에서는 Fleet Manager 프로세스 내 FastAPI가 그대로 처리.
-- 안 B에서는 (1) 웹이 명령만 ROS2로 전달하고 DB 쓰기는 Fleet이 수행, 또는 (2) 주문/명령 입력 테이블에 웹이 쓰고 Fleet이 폴링/알림으로 소비하는 방식 중 택일.
+웹은 DB에 못 쓰므로, 아래 동작은 **웹이 Fleet Manager에 명령을 보내고 Fleet Manager가 DB에 쓴다** (전달 방식 추후 결정).
 
-### 4.3 그대로 남는 것 (UI / 외부 연동)
+- **고객 주문 생성** (`POST /api/orders`, `order_router.py`).
+- **관리자 동작** — emergency-stop / resume / 상품 등록·재고 수정 / pickup-slot 생성 / 입고 요청 (`admin_router.py`).
+
+### 4.3 웹에 남는 것 (UI / 외부 연동) — 단, DB 접근 없음 (읽기·쓰기 모두 Fleet 경유)
 
 - Customer/Admin HTML 페이지 (`page_router.py`, `templates/`).
-- 고객/관리자 WebSocket 상태 송출 (`realtime.py`의 `admin_websockets`, `customer_websockets`).
+- 고객/관리자 WebSocket 상태 송출 (`realtime.py`) — 표시할 데이터는 Fleet Manager에서 받아온다 (DB 직접 조회 아님).
 - AI Server(LLM/Vision) 연동 창구 (`llm_client.py` — 현재 stub).
 
 ---
 
 ## 5. 단계별 작업 목록
 
-아래는 절충 경로(안 B 먼저 → 추후 안 A) 기준의 작업 순서다. 안 ① DB 자산 추출을 전제로 한다.
-
 ### Phase 0 — 준비
 
-- [ ] 토폴로지(A vs B)와 DB 접근 방식(① vs ②) 최종 결정. 이 문서의 권고는 "안 B 우선 + 안 ①".
-- [ ] DB 동시 접근 정책 확정: **쓰기는 Fleet 단독, 웹은 읽기 전용**으로 명문화.
+- [x] 웹↔Fleet 전달 방식 확정: **HTTP/REST API + WebSocket** (2.3).
+- [x] Fleet Manager API 스펙 초안 작성 → `docs/Fleet_Manager_API_스펙_초안.md`.
+- [ ] DB 권한 정책 확정: **Fleet Manager 계정만 DB 접속**, 웹은 DB 접속 권한을 아예 갖지 않음 (읽기 권한도 부여하지 않음).
 - [ ] 운영 흐름 회귀 테스트 시나리오 정의 (주문 1건 end-to-end, 입고 1건, emergency/resume).
 
-### Phase 1 — 공용 DB 패키지 추출
+### Phase 1 — DB 코드 자산을 Fleet Manager로 이사 (완료)
 
-- [ ] `web/app/models.py` + `services/*`를 공용 패키지(예: `src/just_pick_it/just_pick_it_db` 또는 pip 설치 가능 모듈)로 이동.
-- [ ] FastAPI 결합부(`get_db` 제너레이터) 제거, 세션 팩토리(`SessionLocal`)와 순수 로직만 노출.
-- [ ] 웹(`web/`)이 공용 패키지를 import하도록 리팩터링. **기존 동작 무변경 확인** (회귀 테스트 통과).
-- [ ] ROS2 빌드에서 이 패키지 의존성 해결(rosdep/venv/`package.xml` 또는 `requirements`).
+- [x] `web/app/models.py` + DB 비결합 `services/*`(inventory_status, robot_runtime_policy, product_images, stocking_service, status_service, workflow_service)를 신설 ROS2 패키지 `src/just_pick_it/just_pick_it_db`로 이동. (`realtime.py`는 WebSocket 전송 계층이라 web 잔류)
+- [x] FastAPI 결합부(`get_db` 제너레이터)는 공용 패키지에 두지 않음. 세션 팩토리/`scoped_session`/`session_scope`만 노출(`just_pick_it_db/session.py`). 웹은 자신의 `get_db`만 얇게 유지.
+- [x] **스레드별 세션 관리** 적용: `get_scoped_session()` + `session_scope()` 컨텍스트 매니저, 풀 크기 env(`DB_POOL_SIZE`) 조정.
+- [x] ROS2 빌드 의존성 해결: `package.xml`에 `python3-sqlalchemy`/`python3-psycopg2`, `fleet_manager`가 `just_pick_it_db` 의존. colcon 빌드 성공, 시스템 Python·install 공간·web venv 양쪽 import 검증 완료.
+- [x] web 무회귀: 기존 `app.models`/`app.services.*` 경로를 re-export shim으로 유지(Phase 4 제거 예정). web venv editable 설치를 `web/scripts/setup.sh`에 추가.
 
-### Phase 2 — Fleet Manager 쓰기 경로 DB 직접화
+> 메모: 검증 중 실행 DB의 `orders.assigned_unit_id` 컬럼 부재(스키마 드리프트)를 확인했다.
+> 이는 Phase 1 변경과 무관한 사전 문제이며 `web/scripts/reset_demo_data.sh`로 스키마 재적용 시 해소된다.
 
-- [ ] Fleet Manager에 DB 세션 관리 도입 (커넥션 풀, 타이머/콜백당 세션 수명).
-- [ ] `ControlServerClient`의 **쓰기 메서드**(4.1 표)를 공용 로직 직접 호출로 대체.
-      `ControlServerClient`는 인터페이스를 유지한 채 내부 구현만 HTTP→DB로 교체하면 `TaskManager` 변경을 최소화할 수 있다.
-- [ ] 상태 전이는 반드시 공용 `workflow_service` 로직을 거치게 해 중복 규칙을 만들지 않는다.
-- [ ] 트랜잭션 경계 점검: `stocking/complete`처럼 다중 테이블을 함께 갱신하는 동작은 단일 트랜잭션으로 처리.
+### Phase 2 — Fleet Manager 쓰기 경로 DB 직접화 (완료)
 
-### Phase 3 — Fleet Manager 읽기 경로 DB 직접화
+- [x] DAO/Repository 계층 도입: `ControlServerClient`를 **`FleetRepository`**(`fleet_repository.py`)로 개명하고 내부 구현을 HTTP → DB(`just_pick_it_db`)로 교체. public 메서드 이름/시그니처/반환 형태 유지(무회귀).
+- [x] 4.1 표의 쓰기 메서드(`update_task_status`, `create_task_event`, `update_order_status`, `update_robot_state`, `update_pickup_slot_status`, `create_exception`, `update_stocking_item`, `create_tasks_bulk`)를 DB 직접 호출로 대체. 상태 전이는 공용 `workflow_service.apply_task_runtime_state`를 거친다.
+- [x] 다중 테이블 동시 갱신(`complete_stocking`)을 단일 `session_scope()` 트랜잭션으로 처리.
+- [x] not-found/검증 실패는 `_RepoError`로 잡아 `None`/빈 list 반환(이전 HTTP 4xx→None 계약 유지). `node`/`task_manager`의 `control_server`→`fleet_repo`, `self._control`→`self._repo` 개명.
+- [x] 실 DB 대상 읽기·쓰기 검증 완료(로봇 상태 변경, task 생성/전이, 이벤트, 예외 생성, 실패 케이스).
 
-- [ ] `get_snapshot/list_orders/list_zones/list_products/list_pickup_slots` 등 조회를 DB SELECT로 대체.
-- [ ] 주문/입고 감지를 HTTP polling → DB polling (또는 PostgreSQL `LISTEN/NOTIFY` 기반 이벤트)으로 전환해 왕복 제거.
-- [ ] `get_order_work`의 다회 HTTP 조회를 단일 트랜잭션 내 JOIN 조회로 통합.
+> 메모: 비상 정지/재개는 아직 Control Server WS(`/api/fleet/ws/events`) 경유로 남아 있다(명령 경로, Phase 4 대상). 데이터 read/write의 HTTP 의존은 제거됐다.
 
-### Phase 4 — 이벤트/명령 경로 정리
+### Phase 3 — Fleet Manager 읽기 경로 DB 직접화 (대부분 완료)
 
-- [ ] Emergency/Resume: 안 B에서는 웹이 명령 테이블에 쓰고 Fleet이 소비하거나, 웹이 ROS2로 직접 트리거.
-      `/api/fleet/ws/events` 우회 경로 제거 검토.
-- [ ] 고객 주문·관리자 명령의 DB 쓰기 주체를 4.2 결정에 맞게 구현.
-- [ ] 웹을 **read-only**로 전환하고 쓰기 코드 제거 또는 명령 위임으로 교체.
+- [x] `get_snapshot/list_orders/list_zones/list_products/list_pickup_slots/list_tasks/list_order_tasks/list_requested_stocking_items/get_order_detail` 등 조회를 DB SELECT로 대체(Phase 2에서 `FleetRepository`로 함께 전환). 데이터 조회의 HTTP/Control Server 의존 제거.
+- [x] `get_order_work`/`get_stocking_work`의 다회 조회(주문+상품맵+zone맵)를 **단일 `session_scope` 트랜잭션**으로 합침. 일관된 스냅샷 읽기 + 세션/커넥션 1회. 실 DB 검증 완료.
+- [ ] PostgreSQL `LISTEN/NOTIFY` 기반 이벤트화는 **Phase 4 이후로 의도적 보류**. 이유: Phase 4 에서 주문 생성이 Fleet Manager 로 위임되면 Fleet 이 주문을 직접 만들어 즉시 인지하므로, 외부 INSERT 감지를 위한 NOTIFY 자체가 불필요해질 가능성이 크다(현재 5초 polling 으로 충분).
 
-### Phase 5 — (선택) 단일 프로세스(안 A)로 합치기
+### Phase 4 — Fleet Manager API 서버 구축 (완료)
 
-- [ ] Fleet Manager 프로세스 안에 FastAPI/uvicorn 스레드 기동, rclpy executor와 이벤트 루프 공존 구조 설계.
-- [ ] 상태 변경 → UI 브로드캐스트를 인프로세스 호출로 전환, WebSocket 우회 제거.
-- [ ] 부하 격리(웹 트래픽이 제어 루프를 방해하지 않도록) 검증.
+- [x] **HTTP API 서버 골격**(`fleet_api_server.py`): ROS2 노드 프로세스 안에서 uvicorn 을 데몬 스레드로 기동(rclpy executor + asyncio 공존). 데몬 스레드 signal 핸들러 비활성화로 공존 문제 해결. 노드 `api_enabled/api_host/api_port` 파라미터, start/stop 수명주기 연결.
+- [x] 읽기 엔드포인트: `GET /api/health/db`, `/api/admin/status`, `/api/customer/status`, `/api/products`, `/api/orders`, `/api/orders/{id}`. 핸들러는 `FleetRepository`(스레드 안전)만 호출.
+- [x] DB 명령 엔드포인트: `POST /api/orders`(재고 검증/차감), `/api/orders/{id}/complete`, `POST/PATCH /api/admin/products`(+`/stock`), `POST /api/admin/pickup-slots`, `POST /api/admin/exceptions/{id}/resolve`. `RepoError(status_code)`로 404/400 매핑, 요청 검증은 `fleet_api_schemas.py`.
+- [x] ROS 핸드오프 명령(emergency-stop/resume): DB 전이(`FleetRepository.apply_emergency_stop/apply_resume`) + 노드 `trigger_emergency_stop`가 `RobotCommandGateway` 전파 + `task_manager.handle_*`를 묶음. WS listener 경로와 `_propagate_emergency` 공유.
+- [x] 실시간 WebSocket push: `WS /api/admin/ws/status`, `/api/customer/ws/status`. 연결 시 즉시 스냅샷 + 이벤트 루프 주기 push(`api_push_interval_sec`, DB 조회는 `run_in_executor`).
+- [ ] LLM 명령(`POST /api/admin/llm/messages`): `llm_client` stub 이 web 잔류. LLM 담당 연결과 함께 처리(보류, Phase 5.6).
 
-### Phase 6 — 정리
+> 검증: 각 증분을 TestClient + 실기동(uvicorn 스레드 바인드/응답/정지, 실 WebSocket 클라이언트) + 실 DB 로 확인.
 
-- [ ] 사용되지 않게 된 `/api/fleet/*` 엔드포인트와 `ControlServerClient` HTTP 코드 제거.
-- [ ] 아키텍처 문서(`docs/3_System_Architecture.pdf`) ver_3.0 갱신: Control Server 박스 제거 또는 read-only 프런트로 표기.
-- [ ] `TASK_PLAN.md` / `README.md`의 구조 설명 갱신.
+### Phase 5 — 웹을 Fleet API 클라이언트로 전환
+
+목표: 웹이 DB 에 직접 접근하지 않고, 읽기·쓰기 모두 Fleet API(Phase 4)를 경유하게 한다. 끝나면 웹에 DB 코드가 0줄 남는다.
+
+**5.0 전달 경로 결정 (선행)**
+- [ ] 브라우저 ↔ Fleet 연결 방식 확정. 두 안:
+  - (A) **웹 프록시**(권장): 브라우저는 지금처럼 웹의 `/api/*` 를 호출하고, 웹 핸들러가 DB 대신 Fleet API 로 forward. 템플릿/JS 무변경, CORS 불필요. 웹은 얇은 reverse-proxy + 템플릿 서버가 된다.
+  - (B) **브라우저 직결**: 브라우저 JS 가 Fleet host 를 직접 호출. 웹은 HTML/정적만 제공. Fleet 에 CORS 설정 + 템플릿/JS 수정 필요.
+- [ ] Fleet API base URL 을 웹 설정값으로 추가(`.env`).
+
+**5.1 웹에 Fleet API 클라이언트 도입**
+- [ ] `httpx` 기반 클라이언트 모듈(타임아웃/에러 매핑/base_url). Fleet 4xx/5xx 를 웹 HTTP 응답으로 전달.
+
+**5.2 읽기 라우터 전환**
+- [ ] `product_router`(GET /api/products), `order_router`(GET /api/orders, /{id}), `customer_router`/`admin_router`의 status GET 을 Fleet GET 호출로 교체.
+
+**5.3 쓰기 라우터 전환**
+- [ ] `order_router`(POST /api/orders, /{id}/complete), `admin_router`(상품 CRUD, pickup-slots, exceptions/resolve, emergency-stop/resume)를 Fleet POST/PATCH 위임으로 교체.
+
+**5.4 WebSocket 전환**
+- [ ] `customer`/`admin` 상태 WS 를 Fleet WS 프록시(A안) 또는 브라우저 직결(B안)로 교체. 웹 `realtime.py`의 broadcast/WebSocketManager 제거.
+
+**5.5 웹 DB 코드 제거**
+- [ ] `database.py`, `models.py`/`services/*` shim, `just_pick_it_db` 의존, `requirements.txt`의 sqlalchemy/psycopg2 제거. 웹 DB 코드 0줄.
+- [ ] DB 계정 권한 회수: 웹 계정은 DB 접속 권한 자체를 갖지 않음(읽기 권한도 없음).
+
+**5.6 LLM 명령 처리**
+- [ ] `POST /api/admin/llm/messages`: stub 파싱 후 STOCKING 이면 stocking_item 생성. Fleet API 로 옮길지(권장) web 잔류할지 결정. LLM 담당 연결과 함께.
+
+**5.7 무회귀 확인**
+- [ ] 고객 주문 end-to-end, 관리자 화면 실시간 갱신, emergency-stop/resume 흐름을 웹 UI 기준으로 검증.
+
+### Phase 6 — 잔재 제거 및 문서화
+
+- [ ] 웹 `fleet_router`(`/api/fleet/*`) 삭제: Fleet 이 더 이상 웹을 호출하지 않으므로 불필요.
+- [ ] 노드의 Fleet event WS listener(`_send_emergency_stop`, `_start_fleet_event_listener`, `/api/fleet/ws/events`) 제거: emergency 가 이제 Fleet API 로 직접 들어온다.
+- [ ] 아키텍처 문서(`docs/3_System_Architecture.pdf`) ver_3.0 갱신: Control Server 를 DB 비접근 프레젠테이션 프런트로 표기, DB 화살표는 Fleet Manager 에만 연결.
+- [ ] `TASK_PLAN.md` / `README.md` 구조 설명 갱신.
 
 ---
 
@@ -248,18 +300,21 @@ ROS2 쪽에 별도 DB 접근 모듈(psycopg 또는 독립 SQLAlchemy)을 새로 
 
 | 항목 | 내용 |
 |------|------|
-| DB 동시 접근 정합성 | 쓰기 소유권을 Fleet 단독으로 못박지 않으면 race/덮어쓰기 위험. 웹은 읽기 전용 커넥션 권한으로 강제 가능. |
-| 로직 중복 | DB 접근 방식 안 ②를 택하면 상태 전이 규칙이 이중화됨. 안 ① 권고 이유. |
-| 이벤트 루프 공존(안 A) | rclpy + asyncio 동시 운용은 블로킹/스레드 안전성 함정이 많음. Phase 5에서 충분한 검증 필요. |
-| 트랜잭션 경계 | HTTP 시절 엔드포인트 단위로 암묵 보장되던 원자성을 DB 직접화 후 명시적 트랜잭션으로 재현해야 함. |
-| 마이그레이션 중 이중 경로 | Phase 2~3 동안 일부는 HTTP, 일부는 DB 직접일 수 있음. `ControlServerClient` 인터페이스 유지로 전환 충격을 흡수. |
-| 단일 장애점 | 통합 후 Fleet Manager가 제어·DB·(안 A면)웹까지 담당 → 장애 시 영향 범위가 커짐. 모니터링/재시작 전략 필요. |
+| 스레드 세션 안전성 | `MultiThreadedExecutor` + SQLAlchemy Session은 공유 시 데이터 손상. `scoped_session`/콜백당 세션 필수 (3.4). |
+| API 서버·rclpy 공존 | HTTP/REST 방식(확정) 때문에 한 프로세스에서 uvicorn(asyncio)과 rclpy executor가 공존. uvicorn은 별도 스레드, 로봇 제어 동작은 executor로 위임 (2.3). |
+| 전달 방식 확장성 | 로봇 다수·다중 서비스로 커지면 메시지 큐 재검토 여지. 현재 2대 규모에선 HTTP/REST로 충분. |
+| 트랜잭션 경계 | HTTP 엔드포인트 단위로 암묵 보장되던 원자성을 DB 직접화 후 명시적 트랜잭션으로 재현해야 함. |
+| 마이그레이션 중 이중 경로 | Phase 2~3 동안 일부는 HTTP, 일부는 DB 직접일 수 있음. `ControlServerClient` 인터페이스 유지로 전환 충격 흡수. |
+| 단일 장애점 | 통합 후 Fleet Manager가 제어 + DB + 웹 데이터 제공을 담당 → 장애 영향 범위 확대. 모니터링/재시작 전략 필요. |
+| 권한 강제 | 웹의 DB 비접근을 코드 규칙이 아니라 **DB 계정 권한**으로 못박는다. 웹에는 읽기 권한조차 부여하지 않아 실수로도 DB에 직접 붙을 수 없게 한다. |
 
 ---
 
 ## 7. 요약 권고
 
-1. **토폴로지**: 안 B(웹 read-only 분리)로 먼저 이행해 비효율을 제거하고, 안정화 후 필요 시 안 A(단일 프로세스)로 합친다.
-2. **DB 접근**: 안 ①(기존 SQLAlchemy 자산을 공용 패키지로 추출)로 로직 단일화를 유지한다.
-3. **쓰기 소유권**: DB 쓰기는 Fleet Manager 단독, 웹은 읽기 전용.
-4. **이행 순서**: 공용 패키지 추출 → 쓰기 DB 직접화 → 읽기 DB 직접화 → 이벤트/명령 정리 → (선택)프로세스 통합 → HTTP 잔재 제거.
+1. **토폴로지**: Fleet Manager가 DB 단독 게이트웨이. 웹은 DB 비접근 프레젠테이션 클라이언트로 분리, **읽기·쓰기 모두 Fleet Manager 경유**.
+2. **전달 방식**: **HTTP/REST API + WebSocket** 확정. Fleet Manager가 API 서버를 열고 웹은 HTTP/WS 클라이언트 (조회 GET, 명령 POST, 실시간 WebSocket).
+2. **DB 접근 코드**: 기존 SQLAlchemy 자산을 Fleet Manager로 이사해 재사용. 재작성하지 않는다.
+3. **기술**: ORM(SQLAlchemy) 유지, DAO/Repository 계층으로 감싼다.
+4. **필수 안전장치**: 스레드별 세션 관리 + DB 계정 권한으로 웹 쓰기 차단.
+5. **이행 순서**: DB 코드 이사 → 쓰기 DB 직접화 → 읽기 DB 직접화 → 웹 read-only 전환/명령 위임 → HTTP 잔재 제거.
