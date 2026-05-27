@@ -168,7 +168,7 @@ class TaskManager:
     def handle_emergency_stop(self) -> None:
         """Fleet emergency stop 수신 시 신규 dispatch를 막는다.
 
-        Control Server가 DB의 robot/task 상태 전이는 담당한다. TaskManager는
+        Fleet API가 DB의 robot/task 상태 전이는 담당한다. TaskManager는
         emergency 상태 동안 polling이나 task result 후속 처리에서 새 task를
         로봇으로 보내지 않도록 내부 gate만 닫는다.
         """
@@ -178,7 +178,7 @@ class TaskManager:
     def handle_resume(self) -> None:
         """Fleet resume 수신 시 실행 가능한 task 흐름을 즉시 재개한다.
 
-        Control Server가 PAUSED task를 ASSIGNED로 되돌리는 정책이면 여기서 바로
+        Fleet API가 PAUSED task를 ASSIGNED로 되돌리는 정책이면 여기서 바로
         dispatch된다. 이미 RUNNING으로 복구되는 정책이면 로봇 emergency service
         해제 후 기존 action이 이어지고, 이 함수는 대기 작업/누락 보정만 수행한다.
         """
@@ -384,7 +384,7 @@ class TaskManager:
         return later_tasks[0]
 
     def _find_task_by_id(self, task_id: int) -> dict[str, Any] | None:
-        """Control Server task 목록에서 task_id 하나를 찾는다."""
+        """Fleet API task 목록에서 task_id 하나를 찾는다."""
         for task in self._repo.list_tasks():
             if int(task.get("task_id") or 0) == task_id:
                 return task
@@ -433,7 +433,7 @@ class TaskManager:
         """작업 가능한 unit이 있을 때만 신규 주문/입고 polling을 수행한다.
 
         scheduler cycle 자체는 주기적으로 호출될 수 있지만, 모든 PICKY/COBOT unit이 BUSY이거나
-        배터리/housekeeping 조건 때문에 새 작업을 받을 수 없으면 Control Server의
+        배터리/housekeeping 조건 때문에 새 작업을 받을 수 없으면 Fleet API의
         ORDER_WAIT/REQUESTED 목록을 조회하지 않는다.
 
         단, 기존 task advance/dispatch/charge fallback 정리는 cycle 뒤쪽에서 수행할 수 있으므로
@@ -1124,7 +1124,7 @@ class TaskManager:
         status: str = "ASSIGNED",
         result_message: str | None = None,
     ) -> dict[str, Any]:
-        """Control Server의 `/api/fleet/tasks/bulk` payload 1개를 만든다."""
+        """Fleet API의 `/api/fleet/tasks/bulk` payload 1개를 만든다."""
         zone_map = self._repo.get_zone_map()
         source_zone = zone_map.get(source_zone_name or "")
         target_zone = zone_map.get(target_zone_name or "")
@@ -1632,7 +1632,7 @@ class TaskManager:
         battery_level이 기준치를 넘으면 해당 PICKY의 RUNNING CHARGE task를 즉시
         SUCCESS 처리하고, 새 작업이 대기 중이면 다음 polling 주기를 기다리지 않고 바로 배정/dispatch한다.
 
-        RobotStateMonitor는 별도로 Control Server에 battery_level을 보고하고,
+        RobotStateMonitor는 별도로 Fleet API에 battery_level을 보고하고,
         이 함수에는 같은 값만 전달하면 된다.
         """
         with self._scheduler_lock:

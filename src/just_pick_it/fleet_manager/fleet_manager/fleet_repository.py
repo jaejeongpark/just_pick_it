@@ -28,7 +28,10 @@ from just_pick_it_db.services.status_service import (
     build_task_summary,
     build_zone_pose,
 )
-from just_pick_it_db.services.stocking_service import build_stocking_item_summary
+from just_pick_it_db.services.stocking_service import (
+    build_stocking_item_summary,
+    create_stocking_item_record,
+)
 from just_pick_it_db.services.workflow_service import (
     ORDER_PRIORITY,
     apply_task_runtime_state,
@@ -38,12 +41,15 @@ from just_pick_it_db.services.workflow_service import (
 from just_pick_it_db.session import session_scope
 
 
+_UNSET = object()
+
+
 class RepoError(Exception):
     """Repository 의 not-found / 검증 실패를 표현하는 예외.
 
     두 가지 방식으로 쓰인다.
     - 내부 조회/상태 변경 메서드(TaskManager 호출용): 메서드 경계에서 잡아 경고 로그 +
-      None(또는 빈 list)로 변환한다. 이전 ControlServerClient 의 HTTP 4xx→None 계약 유지.
+      None(또는 빈 list)로 변환한다. 이전 FleetRepository 의 HTTP 4xx→None 계약 유지.
     - 명령 메서드(API 서버 호출용): 잡지 않고 그대로 던진다. API 핸들러가 status_code 로
       HTTP 상태를 매핑한다.
     """
@@ -60,12 +66,12 @@ class FleetRepository:
     역할:
     - Fleet Manager 내부 모듈(TaskManager 등)이 주문/작업/로봇/zone/입고 데이터를
       읽고 쓰는 단일 진입점이다.
-    - 이전에는 Control Server HTTP API 를 호출했으나, 통합(Phase 2) 이후에는
+    - 이전에는 Fleet API HTTP API 를 호출했으나, 통합(Phase 2) 이후에는
       just_pick_it_db 를 통해 PostgreSQL 에 직접 접근한다.
     - 비즈니스 로직(상태 전이, 스냅샷 빌드)은 just_pick_it_db.services 를 재사용한다.
 
     계약:
-    - public 메서드의 이름/시그니처/반환 형태는 이전 ControlServerClient 와 동일하다.
+    - public 메서드의 이름/시그니처/반환 형태는 이전 FleetRepository 와 동일하다.
       not-found / 검증 실패 시 None(또는 빈 list)을 반환한다.
     - 각 메서드는 session_scope() 로 스레드 안전한 Session 을 열고 닫는다.
       (MultiThreadedExecutor 환경에서 안전)
@@ -496,11 +502,17 @@ class FleetRepository:
         order_id: int,
         *,
         status: str | None = None,
-        assigned_unit_id: int | None = None,
-        pickup_slot_id: int | None = None,
+        assigned_unit_id: int | None | object = _UNSET,
+        pickup_slot_id: int | None | object = _UNSET,
+        item_quantities: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         """주문 상태, 담당 robot_unit, pickup_slot 배정을 갱신한다."""
-        if status is None and assigned_unit_id is None and pickup_slot_id is None:
+        if (
+            status is None
+            and assigned_unit_id is _UNSET
+            and pickup_slot_id is _UNSET
+            and item_quantities is None
+        ):
             self._log().warn(f"[FleetRepository] order_id={order_id} 상태 변경 인자 없음")
             return None
 
@@ -512,15 +524,71 @@ class FleetRepository:
 
                 previous_slot_id = order.pickup_slot_id
 
+                if item_quantities is not None:
+                    if order.status not in {"ORDER_RECEIVED", "ORDER_WAIT"}:
+                        raise RepoError("진행 중이거나 완료된 주문은 상품 수량을 변경할 수 없습니다")
+
+                    if db.query(Task).filter(Task.order_id == order.order_id).first():
+                        raise RepoError("작업이 생성된 주문은 상품 수량을 변경할 수 없습니다")
+
+                    quantities_by_item_id: dict[int, int] = {}
+                    for item_update in item_quantities:
+                        item_id = int(item_update["item_id"])
+                        if item_id in quantities_by_item_id:
+                            raise RepoError("duplicate order item update")
+                        quantities_by_item_id[item_id] = int(item_update["quantity"])
+
+                    if quantities_by_item_id:
+                        order_items = (
+                            db.query(OrderItem)
+                            .filter(
+                                OrderItem.order_id == order.order_id,
+                                OrderItem.item_id.in_(quantities_by_item_id.keys()),
+                            )
+                            .with_for_update()
+                            .all()
+                        )
+
+                        if len(order_items) != len(quantities_by_item_id):
+                            raise RepoError("order item not found")
+
+                        products = (
+                            db.query(Product)
+                            .filter(Product.product_id.in_([item.product_id for item in order_items]))
+                            .with_for_update()
+                            .all()
+                        )
+                        products_by_id = {product.product_id: product for product in products}
+
+                        for item in order_items:
+                            product = products_by_id.get(item.product_id)
+                            new_quantity = quantities_by_item_id[item.item_id]
+                            stock_delta = new_quantity - item.quantity
+
+                            if product is None:
+                                raise RepoError("product not found")
+                            if stock_delta > 0 and product.stock_qty < stock_delta:
+                                raise RepoError("not enough stock")
+
+                        for item in order_items:
+                            product = products_by_id[item.product_id]
+                            new_quantity = quantities_by_item_id[item.item_id]
+                            stock_delta = new_quantity - item.quantity
+                            product.stock_qty -= stock_delta
+                            item.quantity = new_quantity
+
                 if status is not None:
                     order.status = status
 
-                if pickup_slot_id is not None:
+                if pickup_slot_id is not _UNSET and pickup_slot_id is not None:
                     if not db.get(PickupSlot, pickup_slot_id):
                         raise RepoError("pickup slot not found")
+
+                if pickup_slot_id is not _UNSET:
                     order.pickup_slot_id = pickup_slot_id
 
-                if assigned_unit_id is not None:
+                if assigned_unit_id is not _UNSET:
+                    self._validate_robot_unit(db, assigned_unit_id)
                     order.assigned_unit_id = assigned_unit_id
 
                 self._sync_order_pickup_slot(db, order, previous_slot_id)
@@ -534,13 +602,13 @@ class FleetRepository:
         robot_name: str,
         *,
         robot_status: str | None = None,
-        picky_state: str | None = None,
-        cobot_state: str | None = None,
-        current_task_id: int | None = None,
-        battery_level: int | None = None,
-        pos_x: float | None = None,
-        pos_y: float | None = None,
-        pos_theta: float | None = None,
+        picky_state: str | None | object = _UNSET,
+        cobot_state: str | None | object = _UNSET,
+        current_task_id: int | None | object = _UNSET,
+        battery_level: int | None | object = _UNSET,
+        pos_x: float | None | object = _UNSET,
+        pos_y: float | None | object = _UNSET,
+        pos_theta: float | None | object = _UNSET,
     ) -> dict[str, Any] | None:
         """로봇의 런타임 상태를 갱신한다."""
         try:
@@ -552,28 +620,30 @@ class FleetRepository:
                 if robot_status is not None:
                     robot.robot_status = robot_status
 
-                if picky_state is not None:
-                    if robot.robot_type != "PICKY":
+                if picky_state is not _UNSET:
+                    if robot.robot_type != "PICKY" and picky_state is not None:
                         raise RepoError("picky_state is only for PICKY")
                     robot.picky_state = picky_state
 
-                if cobot_state is not None:
-                    if robot.robot_type != "COBOT":
+                if cobot_state is not _UNSET:
+                    if robot.robot_type != "COBOT" and cobot_state is not None:
                         raise RepoError("cobot_state is only for COBOT")
                     robot.cobot_state = cobot_state
 
-                if current_task_id is not None:
+                if current_task_id is not _UNSET and current_task_id is not None:
                     if not db.get(Task, current_task_id):
                         raise RepoError("task not found")
                     robot.current_task_id = current_task_id
+                elif current_task_id is not _UNSET:
+                    robot.current_task_id = None
 
-                if battery_level is not None:
+                if battery_level is not _UNSET:
                     robot.battery_level = battery_level
-                if pos_x is not None:
+                if pos_x is not _UNSET:
                     robot.pos_x = pos_x
-                if pos_y is not None:
+                if pos_y is not _UNSET:
                     robot.pos_y = pos_y
-                if pos_theta is not None:
+                if pos_theta is not _UNSET:
                     robot.pos_theta = pos_theta
 
                 return {"status": "ok"}
@@ -585,13 +655,22 @@ class FleetRepository:
         self,
         task_id: int,
         *,
-        status: str,
+        status: str | None = None,
         current_status: str | None = None,
-        assigned_robot_id: int | str | None = None,
-        assigned_robot_name: str | None = None,
+        assigned_robot_id: int | str | None | object = _UNSET,
+        assigned_robot_name: str | None | object = _UNSET,
         result_message: str | None = None,
     ) -> dict[str, Any] | None:
         """task 상태를 갱신한다(상태 전이는 apply_task_runtime_state 를 거친다)."""
+        if (
+            status is None
+            and assigned_robot_id is _UNSET
+            and assigned_robot_name is _UNSET
+            and result_message is None
+        ):
+            self._log().warn(f"[FleetRepository] task_id={task_id} 상태 변경 인자 없음")
+            return None
+
         try:
             with session_scope() as db:
                 task = (
@@ -609,15 +688,17 @@ class FleetRepository:
                     )
 
                 previous_status = task.status
-                task.status = status
 
-                robot = self._resolve_robot(
-                    db,
-                    robot_id=assigned_robot_id,
-                    robot_name=assigned_robot_name,
-                )
-                if robot is not None:
-                    task.assigned_robot_id = robot.robot_id
+                if status is not None:
+                    task.status = status
+
+                if assigned_robot_id is not _UNSET or assigned_robot_name is not _UNSET:
+                    robot = self._resolve_robot(
+                        db,
+                        robot_id=None if assigned_robot_id is _UNSET else assigned_robot_id,
+                        robot_name=None if assigned_robot_name is _UNSET else assigned_robot_name,
+                    )
+                    task.assigned_robot_id = robot.robot_id if robot is not None else None
 
                 if result_message is not None:
                     task.result_message = result_message
@@ -635,7 +716,8 @@ class FleetRepository:
                         )
                     )
 
-                apply_task_runtime_state(db, task, previous_status=previous_status)
+                if previous_status != task.status:
+                    apply_task_runtime_state(db, task, previous_status=previous_status)
                 return {
                     "status": "ok",
                     "previous_status": previous_status,
@@ -781,6 +863,50 @@ class FleetRepository:
             )
         return result
 
+    def delete_task(self, task_id: int, *, force: bool = False) -> dict[str, Any] | None:
+        """관리자 UI 테스트/정리용 task 삭제를 처리한다.
+
+        RUNNING/PAUSED task 는 실 로봇 동작과 엮일 수 있으므로 기본적으로 삭제하지 않는다.
+        강제 삭제가 필요한 테스트 상황에서는 force=True 를 명시한다.
+        """
+        try:
+            with session_scope() as db:
+                task = (
+                    db.query(Task)
+                    .filter(Task.task_id == task_id)
+                    .with_for_update()
+                    .one_or_none()
+                )
+                if not task:
+                    raise RepoError("task not found", 404)
+
+                previous_status = task.status
+                if previous_status in ("RUNNING", "PAUSED") and not force:
+                    raise RepoError("running or paused task cannot be deleted without force=true", 409)
+
+                robots_with_task = db.query(Robot).filter(Robot.current_task_id == task.task_id).all()
+                for robot in robots_with_task:
+                    robot.current_task_id = None
+                    if robot.robot_status in ("BUSY", "CHARGING"):
+                        robot.robot_status = "IDLE"
+
+                db.query(ExceptionLog).filter(ExceptionLog.task_id == task.task_id).update(
+                    {ExceptionLog.task_id: None},
+                    synchronize_session=False,
+                )
+                db.query(TaskEvent).filter(TaskEvent.task_id == task.task_id).delete(
+                    synchronize_session=False,
+                )
+                db.delete(task)
+                return {
+                    "status": "ok",
+                    "previous_status": previous_status,
+                    "current_status": None,
+                }
+        except RepoError as exc:
+            self._log().warn(f"[FleetRepository] task_id={task_id} 삭제 실패: {exc}")
+            raise
+
     # ==================================================================
     # Exception
     # ==================================================================
@@ -836,6 +962,45 @@ class FleetRepository:
                 .all()
             )
             return [build_stocking_item_summary(db, item) for item in stocking_items]
+
+    def create_stocking_item(
+        self,
+        *,
+        product_id: int,
+        requested_quantity: int | None = None,
+        detected_quantity: int | None = None,
+        stock_delta: int | None = None,
+        stocking_policy: str | None = None,
+        assigned_unit_id: int | None = None,
+    ) -> dict[str, Any]:
+        """입고 요청 stocking_item 을 생성한다.
+
+        Web Gateway 의 LLM client 가 STOCKING 명령을 파싱하면 이 메서드를 통해
+        REQUESTED 상태의 stocking_item 을 만든다. 이후 TaskManager 가 idle/polling 때
+        list_requested_stocking_items() 로 가져가 입고 task 를 생성한다.
+        """
+        with session_scope() as db:
+            if not db.get(Product, product_id):
+                raise RepoError("product not found", 404)
+            if assigned_unit_id is not None:
+                self._validate_robot_unit(db, assigned_unit_id)
+
+            try:
+                stocking_item = create_stocking_item_record(
+                    db,
+                    product_id=product_id,
+                    requested_quantity=requested_quantity,
+                    detected_quantity=detected_quantity,
+                    stock_delta=stock_delta,
+                    stocking_policy=stocking_policy,
+                    status="REQUESTED",
+                    assigned_unit_id=assigned_unit_id,
+                )
+            except ValueError as exc:
+                raise RepoError(str(exc), 400) from exc
+
+            db.flush()
+            return build_stocking_item_summary(db, stocking_item)
 
     def update_stocking_item(
         self,
@@ -1173,7 +1338,7 @@ class FleetRepository:
             return {"status": "ok", "resumed_task_ids": resumed_task_ids}
 
     # ==================================================================
-    # 정규화 helpers (이전 ControlServerClient 와 동일, 저수준 조회만 DB 기반)
+    # 정규화 helpers (이전 FleetRepository 와 동일, 저수준 조회만 DB 기반)
     # ==================================================================
 
     def get_order_work(self, order_id: int) -> dict[str, Any] | None:

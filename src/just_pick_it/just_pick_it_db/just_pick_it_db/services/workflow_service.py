@@ -39,9 +39,8 @@ COBOT_TASKS_REQUIRING_PICKY_WAIT = frozenset(COBOT_STATE_BY_TASK)
 def create_order_workflow(_db: Session, order: Order) -> None:
     """Move a newly created order into the Fleet Manager waiting queue.
 
-    Task creation and robot assignment are owned by Fleet Manager. The Control
-    Server only stores the order and order_item rows, then exposes them through
-    snapshot/event APIs.
+    Task creation and robot assignment are owned by Fleet Manager. This service
+    only moves the order into the DB waiting state that TaskManager polls.
     """
 
     order.status = "ORDER_WAIT"

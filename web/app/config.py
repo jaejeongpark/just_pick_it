@@ -4,16 +4,33 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
+# =====================================
+# Paths
+# =====================================
+
 WEB_DIR = Path(__file__).resolve().parents[1]
 APP_DIR = Path(__file__).resolve().parent
+
+
+# =====================================
+# Environment
+# =====================================
+
 load_dotenv(WEB_DIR / ".env")
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://just_pick_it_user:just_pick_it_pw@localhost:5432/just_pick_it",
-)
 
-# 공용 패키지의 product_images 가 정적 이미지 존재 여부를 확인할 디렉터리를 웹 static 경로로 지정한다.
-os.environ.setdefault("JUST_PICK_IT_STATIC_IMG_DIR", str(APP_DIR / "static" / "img"))
+# =====================================
+# Web Gateway
+# =====================================
+
 APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
 APP_PORT = int(os.getenv("APP_PORT", "8000"))
+
+
+# =====================================
+# Fleet API upstream
+# =====================================
+
+# Web Gateway는 DB를 직접 만지지 않고 Fleet Manager API 앞단 프록시로 동작한다.
+FLEET_API_BASE_URL = os.getenv("FLEET_API_BASE_URL", "http://localhost:8100")
+FLEET_API_WS_BASE_URL = os.getenv("FLEET_API_WS_BASE_URL", "ws://localhost:8100")

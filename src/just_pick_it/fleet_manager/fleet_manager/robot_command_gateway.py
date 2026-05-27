@@ -407,7 +407,7 @@ class RobotCommandGateway:
             enabled: True면 emergency stop, False면 resume.
             reason: emergency/resume 요청 사유.
             task_id: 관련 task가 있으면 task_id, 없으면 0.
-            request_id: Control Server/Fleet Manager 로그 추적용 id.
+            request_id: Fleet API/Fleet Manager 로그 추적용 id.
 
         Returns:
             robot_name별 service 호출 요청 성공 여부.
@@ -459,7 +459,7 @@ class RobotCommandGateway:
         return True
 
     def _get_emergency_client(self, robot_name: str) -> Any:
-        """robot_name에 대응되는 EmergencyControl Service Client를 lazy 생성한다."""
+        """robot_name에 대응되는 EmergencyFleet API Client를 lazy 생성한다."""
         client = self._emergency_clients.get(robot_name)
         if client is not None:
             return client
