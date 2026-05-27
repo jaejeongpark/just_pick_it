@@ -101,6 +101,12 @@ const TASK_TYPE_SEQUENCE = [
   "DOCK_IN",
   "CHARGE",
 ];
+const STOCKING_TASK_TYPES = new Set([
+  "MOVE_TO_STOCK",
+  "STOCKING_PICK",
+  "MOVE_TO_STORAGE",
+  "STOCKING_PLACE",
+]);
 const ROBOT_DISPLAY_NAMES = {
   PICKY1: "PICKY 1",
   PICKY2: "PICKY 2",
@@ -319,6 +325,10 @@ function taskProductName(task) {
   return task?.product_name || orderItem?.product_name || null;
 }
 
+function isStockingTaskType(taskType) {
+  return STOCKING_TASK_TYPES.has(taskType);
+}
+
 function taskDisplayTitle(task) {
   const productName = taskProductName(task);
 
@@ -336,6 +346,61 @@ function taskDisplayTitle(task) {
   };
 
   return productTaskLabels[task.task_type] || label(task.task_type);
+}
+
+function taskTargetLabel(task) {
+  if (task?.order_no) {
+    return task.order_no;
+  }
+
+  if (task?.order_id) {
+    return `주문 #${task.order_id}`;
+  }
+
+  if (task?.stocking_item_id) {
+    return `입고 #${task.stocking_item_id}`;
+  }
+
+  return `Task #${task?.task_id ?? "-"}`;
+}
+
+function taskReferenceLabel(task) {
+  if (task?.order_item_id) {
+    return `order_item #${task.order_item_id}`;
+  }
+
+  if (task?.stocking_item_id) {
+    return `stocking_item #${task.stocking_item_id}`;
+  }
+
+  return "단독 작업";
+}
+
+function taskRouteLabel(task) {
+  return `${task?.source_zone_name || "출발 미정"} → ${task?.target_zone_name || "목표 미정"}`;
+}
+
+function taskQuantityLabel(task) {
+  const productName = taskProductName(task);
+  const quantity = task?.product_quantity;
+
+  if (productName && quantity !== null && quantity !== undefined) {
+    return `${productName} ${quantity}개`;
+  }
+
+  if (productName) {
+    return productName;
+  }
+
+  if (quantity !== null && quantity !== undefined) {
+    return `${quantity}개`;
+  }
+
+  return "-";
+}
+
+function recommendedTaskPriority(taskType, stockingItemId = null) {
+  return isStockingTaskType(taskType) || Boolean(stockingItemId) ? 1 : 2;
 }
 
 function productStorageLabel(product) {
@@ -586,7 +651,7 @@ function renderTaskOptions(selectedTaskId) {
       .map(
         (task) => `
         <option value="${task.task_id}" ${sameId(task.task_id, selectedTaskId) ? "selected" : ""}>
-          #${task.task_id} ${taskDisplayTitle(task)}
+          #${task.task_id} ${taskDisplayTitle(task)} · ${taskTargetLabel(task)}
         </option>
       `,
       )
@@ -1317,7 +1382,7 @@ function renderRobotManagementDetail(robot) {
   const displayName = robotDisplayName(robot);
   const status = robotStatusValue(robot);
   const currentTask = task
-    ? `${task.order_no || `Task #${task.task_id}`} · ${taskDisplayTitle(task)}`
+    ? `${taskTargetLabel(task)} · ${taskDisplayTitle(task)}`
     : "작업 없음";
 
   robotDetailPanel.innerHTML = `
@@ -1421,7 +1486,7 @@ function renderRobotManagement(robots) {
               <span><span class="state-badge ${statusClass(status)}">${label(status)}</span></span>
               <span>${robotStateLabel(robot)}</span>
               <span>${renderBatteryMeter(robot.battery_level)}</span>
-              <span class="task-cell">${task ? `${task.order_no || `Task #${task.task_id}`} · ${taskDisplayTitle(task)}` : "-"}</span>
+              <span class="task-cell">${task ? `${taskTargetLabel(task)} · ${taskDisplayTitle(task)}` : "-"}</span>
               <span class="location-cell">${robotLocationText(robot)}</span>
             </div>
           `;
@@ -1471,7 +1536,7 @@ function renderRobots(robots) {
               <span class="robot-name-cell" title="#${robot.robot_id}"><i class="${robotTypeClass}"></i>${displayName}</span>
               <span><span class="state-badge ${statusClass(status)}">${label(status)}</span></span>
               <span>${robotStateLabel(robot)}</span>
-              <span class="task-cell">${task ? `${task.order_no || `Task #${task.task_id}`} · ${taskDisplayTitle(task)}` : "-"}</span>
+              <span class="task-cell">${task ? `${taskTargetLabel(task)} · ${taskDisplayTitle(task)}` : "-"}</span>
               <span>${renderBatteryMeter(robot.battery_level)}</span>
             </button>
           `;
@@ -1727,11 +1792,11 @@ function renderMainTaskTableRow(task) {
       <span>#${task.task_id}</span>
       <span class="task-cell-stack">
         <strong>${taskDisplayTitle(task)}</strong>
-        <small>${task.source_zone_name || "출발 미정"} → ${task.target_zone_name || "목표 미정"}</small>
+        <small>${taskRouteLabel(task)}</small>
       </span>
       <span class="task-cell-stack">
-        <strong>${task.order_no || (task.stocking_item_id ? `입고 #${task.stocking_item_id}` : "주문 없음")}</strong>
-        <small>${task.order_item_id ? `order_item #${task.order_item_id}` : task.stocking_item_id ? "입고 작업" : "단독 작업"}</small>
+        <strong>${taskTargetLabel(task)}</strong>
+        <small>${taskReferenceLabel(task)}</small>
       </span>
       <span>${assignedRobotLabel(task)}</span>
       <span><i class="state-badge ${statusClass(task.status)}">${label(task.status)}</i></span>
@@ -2076,30 +2141,30 @@ function renderTaskDetail(task) {
   return `
     <div class="modal-summary">
       <div>
-        <span>Task</span>
-        <strong>#${task.task_id}</strong>
-      </div>
-      <div>
         <span>작업</span>
         <strong>${taskDisplayTitle(task)}</strong>
       </div>
       <div>
-        <span>상태</span>
-        <strong>${label(task.status)}</strong>
-      </div>
-    </div>
-    <div class="modal-summary">
-      <div>
-        <span>주문</span>
-        <strong>${task.order_no || "주문 없음"}</strong>
+        <span>상태/우선순위</span>
+        <strong>${label(task.status)} / P${task.priority ?? "-"}</strong>
       </div>
       <div>
         <span>로봇</span>
         <strong>${assignedRobotLabel(task)}</strong>
       </div>
+    </div>
+    <div class="modal-summary">
       <div>
-        <span>결과</span>
-        <strong>${task.result_message || "-"}</strong>
+        <span>대상</span>
+        <strong>${taskTargetLabel(task)}</strong>
+      </div>
+      <div>
+        <span>상품/수량</span>
+        <strong>${taskQuantityLabel(task)}</strong>
+      </div>
+      <div>
+        <span>경로</span>
+        <strong>${taskRouteLabel(task)}</strong>
       </div>
     </div>
     <div class="state-editor-form">
@@ -2156,7 +2221,7 @@ function renderTaskCreateForm(zones) {
       </div>
       <div>
         <label for="new-task-priority">priority</label>
-        <input id="new-task-priority" type="number" min="1" value="2">
+        <input id="new-task-priority" type="number" min="1" value="${recommendedTaskPriority("MOVE_TO_PRODUCT")}">
       </div>
       <div>
         <label for="new-task-source-zone-id">출발 zone</label>
@@ -2173,6 +2238,25 @@ function renderTaskCreateForm(zones) {
       <button class="small-action-button" type="button" data-create-task>작업 생성</button>
     </div>
   `;
+}
+
+function syncTaskCreatePriorityDefault({ force = false } = {}) {
+  const taskType = modalBody?.querySelector("#new-task-type")?.value;
+  const stockingItemId = modalBody
+    ?.querySelector("#new-task-stocking-item-id")
+    ?.value.trim();
+  const priorityInput = modalBody?.querySelector("#new-task-priority");
+
+  if (!priorityInput) {
+    return;
+  }
+
+  const recommended = String(recommendedTaskPriority(taskType, stockingItemId));
+  const current = priorityInput.value;
+
+  if (force || current === "" || current === "1" || current === "2") {
+    priorityInput.value = recommended;
+  }
 }
 
 function renderTaskManager(tasks) {
@@ -2200,9 +2284,9 @@ function renderTaskManager(tasks) {
             <div class="task-main">
               <div class="task-title-line">
                 <strong>${taskDisplayTitle(task)}</strong>
-                <span>${task.order_no || "주문 없음"}</span>
+                <span>${taskTargetLabel(task)}</span>
               </div>
-              <span>${assignedRobotLabel(task)}</span>
+              <span>${assignedRobotLabel(task)} · ${taskReferenceLabel(task)}</span>
             </div>
             <div class="task-side">
               ${renderTaskHistoryStatusControl(task)}
@@ -2235,11 +2319,19 @@ function taskSearchText(task) {
     task.task_id,
     taskDisplayTitle(task),
     task.task_type,
+    taskTargetLabel(task),
+    taskReferenceLabel(task),
     task.order_no,
+    task.order_id,
+    task.order_item_id,
+    task.stocking_item_id,
     assignedRobotLabel(task),
     task.status,
     label(task.status),
     task.product_name,
+    task.product_quantity,
+    task.priority,
+    task.sequence_no,
     task.source_zone_name,
     task.target_zone_name,
   ]
@@ -2366,11 +2458,7 @@ async function openTaskCreate() {
   resetModalHeaderActions();
   const zones = await loadZoneOptions();
   openModal("Task 생성", renderTaskCreateForm(zones));
-}
-
-async function openTaskCreate() {
-  const zones = await loadZoneOptions();
-  openModal("Task 생성", renderTaskCreateForm(zones));
+  syncTaskCreatePriorityDefault({ force: true });
 }
 
 function openTaskDetail(taskId) {
@@ -2506,7 +2594,7 @@ function renderRobotTaskQueue(robot) {
                 <strong>${taskDisplayTitle(task)}</strong>
                 <span>Task #${task.task_id}</span>
               </div>
-              <span>${task.order_no || "주문 없음"}</span>
+              <span>${taskTargetLabel(task)} · ${taskReferenceLabel(task)}</span>
             </div>
             <div class="task-side">
               <div class="state-badge ${statusClass(task.status)}">${label(task.status)}</div>
@@ -2826,6 +2914,8 @@ function taskIntegerOrNull(
 }
 
 async function createTask() {
+  syncTaskCreatePriorityDefault();
+
   const resultMessage = modalBody
     .querySelector("#new-task-result-message")
     ?.value.trim();
@@ -3409,6 +3499,11 @@ taskCreateButton?.addEventListener("click", () => {
 });
 taskViewButton?.addEventListener("click", openTaskManager);
 modalBody?.addEventListener("input", (event) => {
+  if (event.target.id === "new-task-stocking-item-id") {
+    syncTaskCreatePriorityDefault();
+    return;
+  }
+
   const input = event.target.closest("[data-task-history-filter]");
 
   if (!input) {
@@ -3419,6 +3514,11 @@ modalBody?.addEventListener("input", (event) => {
 });
 
 modalBody?.addEventListener("change", (event) => {
+  if (event.target.id === "new-task-type") {
+    syncTaskCreatePriorityDefault({ force: true });
+    return;
+  }
+
   const statusFilter = event.target.closest(
     "[data-task-history-status-filter]",
   );

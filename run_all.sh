@@ -18,6 +18,8 @@ FLEET_API_BASE_URL="${FLEET_API_BASE_URL:-http://localhost:8100}"
 FLEET_API_WAIT_TIMEOUT="${FLEET_API_WAIT_TIMEOUT:-30}"
 DATABASE_URL="${DATABASE_URL:-postgresql://just_pick_it_user:just_pick_it_pw@localhost:5432/just_pick_it}"
 FLEET_PID=""
+WEB_PID=""
+STARTED_FLEET=0
 
 log() {
   echo "[run-all] $*"
@@ -34,6 +36,12 @@ source_if_exists() {
 
 cleanup() {
   local code=$?
+  trap - EXIT INT TERM
+  if [ -n "$WEB_PID" ] && kill -0 "$WEB_PID" >/dev/null 2>&1; then
+    log "stopping Web Gateway"
+    kill "$WEB_PID" >/dev/null 2>&1 || true
+    wait "$WEB_PID" >/dev/null 2>&1 || true
+  fi
   if [ -n "$FLEET_PID" ] && kill -0 "$FLEET_PID" >/dev/null 2>&1; then
     log "stopping Fleet Manager"
     kill "$FLEET_PID" >/dev/null 2>&1 || true
@@ -78,8 +86,25 @@ else
   log "starting Fleet Manager"
   ros2 launch fleet_manager fleet_manager.launch.xml &
   FLEET_PID="$!"
+  STARTED_FLEET=1
   wait_for_fleet_api
 fi
 
 log "starting Web Gateway"
-exec "$WEB_DIR/scripts/run.sh"
+"$WEB_DIR/scripts/run.sh" &
+WEB_PID="$!"
+
+while true; do
+  if [ -n "$WEB_PID" ] && ! kill -0 "$WEB_PID" >/dev/null 2>&1; then
+    wait "$WEB_PID"
+    exit $?
+  fi
+
+  if [ "$STARTED_FLEET" -eq 1 ] && [ -n "$FLEET_PID" ] && ! kill -0 "$FLEET_PID" >/dev/null 2>&1; then
+    echo "[run-all] Fleet Manager exited unexpectedly." >&2
+    wait "$FLEET_PID" || true
+    exit 1
+  fi
+
+  sleep 1
+done

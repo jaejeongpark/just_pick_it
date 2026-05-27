@@ -40,6 +40,8 @@ COBOT_TASK_TYPES = {
 
 FINAL_TASK_STATUSES = {"SUCCESS", "FAILED", "CANCELLED"}
 CHARGE_BATTERY_THRESHOLD = 40
+DEFAULT_ORDER_PRIORITY = 2
+DEFAULT_STOCKING_PRIORITY = 1
 
 
 @dataclass(frozen=True)
@@ -92,7 +94,7 @@ class TaskManager:
         self._fleet_paused = False
 
         # task_id -> TrafficManager가 예약한 zone 목록.
-        # Move task는 MoveCommand waypoint로, DOCK_IN은 dock zone 선택/예약으로 사용한다.
+        # 상세 경로는 충돌 회피/예약용이며, MoveCommand에는 최종 목적지 zone만 보낸다.
         self._move_waypoints_by_task: dict[int, tuple[str, ...]] = {}
         self._completed_move_target_by_task: dict[int, str] = {}
         self._unsupported_task_warned: set[int] = set()
@@ -138,12 +140,14 @@ class TaskManager:
 
         처리 순서:
         0. 충전 완료 조건을 만족한 CHARGE task 정리
-        1. ORDER_WAIT 주문 polling
-        2. 중복 task 없는 주문 처리
-        3. REQUESTED stocking_item polling
-        4. 입고 task 생성
-        5. 경로 차단 등으로 멈춰 있던 기존 주문/입고 flow 재시도
-        6. 새로 생성됐거나 이미 ASSIGNED 상태인 실행 가능 task를 dispatch
+        1. 이미 시작된 주문/입고 flow의 다음 task 생성 또는 막힌 flow 재시도
+        2. 새 작업을 받을 수 있는 unit이 있으면 ORDER_WAIT/REQUESTED를 priority queue로 처리
+        3. 새로 생성됐거나 이미 ASSIGNED 상태인 실행 가능 task를 dispatch
+
+        새 작업 priority:
+        - 숫자가 낮을수록 먼저 처리한다.
+        - 입고는 기본 priority=1, 주문은 기본 priority=2로 둔다.
+        - 이미 시작된 flow는 검수/하차 또는 입고 place까지 끊지 않고 이어간다.
 
         정상 task 연결은 handle_task_result()에서 즉시 처리한다. 이 함수는 기존 task를
         진행시키는 메인 루프가 아니라, 새 작업과 막혀 있던 작업을 다시 확인하는 polling 진입점이다.
@@ -158,9 +162,9 @@ class TaskManager:
 
         try:
             self._complete_ready_charge_tasks()
-            self._process_waiting_work_if_unit_available()
             self._advance_existing_orders()
             self._advance_existing_stocking_items()
+            self._process_waiting_work_if_unit_available()
             self._dispatch_ready_tasks()
         finally:
             self._scheduler_lock.release()
@@ -185,9 +189,9 @@ class TaskManager:
         with self._scheduler_lock:
             self._fleet_paused = False
             self._complete_ready_charge_tasks()
-            self._process_waiting_work_if_unit_available()
             self._advance_existing_orders()
             self._advance_existing_stocking_items()
+            self._process_waiting_work_if_unit_available()
             self._dispatch_ready_tasks()
 
     # ==================================================================
@@ -507,7 +511,7 @@ class TaskManager:
         return False
 
     def _process_waiting_work(self) -> None:
-        """ORDER_WAIT 주문과 REQUESTED 입고 요청을 하나의 priority queue로 처리한다."""
+        """ORDER_WAIT 주문과 REQUESTED 입고 요청을 priority queue 순서로 처리한다."""
         for request in self._collect_waiting_work():
             if request.kind == "ORDER":
                 self._process_new_order(request.payload)
@@ -515,7 +519,11 @@ class TaskManager:
                 self._process_new_stocking_item(request.payload)
 
     def _collect_waiting_work(self) -> list[WorkRequest]:
-        """아직 task가 없는 주문/입고 요청을 priority 기준 대기열로 모은다."""
+        """아직 task가 없는 주문/입고 요청을 priority 기준 대기열로 모은다.
+
+        현재 DB schema에서는 주문만 priority 컬럼을 가진다. 입고는 운영 정책상
+        주문보다 높은 우선순위로 보고 기본 priority=1로 둔다.
+        """
         requests: list[WorkRequest] = []
 
         for order in self._repo.list_waiting_orders():
@@ -533,7 +541,7 @@ class TaskManager:
                 WorkRequest(
                     kind="ORDER",
                     work_id=int(order_id),
-                    priority=int(order.get("priority") or 2),
+                    priority=int(order.get("priority") or DEFAULT_ORDER_PRIORITY),
                     payload=order,
                 )
             )
@@ -552,7 +560,7 @@ class TaskManager:
                 WorkRequest(
                     kind="STOCKING",
                     work_id=int(stocking_item_id),
-                    priority=int(stocking_item.get("priority") or 2),
+                    priority=int(stocking_item.get("priority") or DEFAULT_STOCKING_PRIORITY),
                     payload=stocking_item,
                 )
             )
@@ -1142,6 +1150,25 @@ class TaskManager:
             "target_zone_id": target_zone.get("zone_id") if target_zone else None,
             "result_message": result_message,
         }
+
+    def _move_command_waypoints_for_task(self, task: dict[str, Any]) -> tuple[str, ...]:
+        """MoveCommand에는 실제 로봇이 가야 할 목적지 waypoint만 넘긴다.
+
+        TrafficManager의 상세 graph 경로는 충돌 회피/예약용 내부 데이터다.
+        로봇 State Machine은 목표 zone pose를 받아 로컬 navigation을 수행하고,
+        Fleet은 task 결과 시점에 TrafficManager 예약을 해제한다.
+        """
+        target_zone = task.get("target_zone_name")
+        if target_zone:
+            return (str(target_zone),)
+
+        task_id = int(task["task_id"])
+        reserved_waypoints = self._move_waypoints_by_task.get(task_id) or ()
+        if reserved_waypoints:
+            return (str(reserved_waypoints[-1]),)
+
+        source_zone = task.get("source_zone_name")
+        return (str(source_zone),) if source_zone else ()
 
     # ==================================================================
     # 기존 주문 진행 / 다음 task 생성
@@ -1896,7 +1923,7 @@ class TaskManager:
             robot_name=robot_name,
             task_id=task_id,
             task_type=task_type,
-            waypoints=self._move_waypoints_by_task[task_id],
+            waypoints=self._move_command_waypoints_for_task(task),
             zone_map=self._repo.get_zone_map(),
             feedback_callback=self.handle_move_feedback,
             result_callback=self.handle_task_result,
