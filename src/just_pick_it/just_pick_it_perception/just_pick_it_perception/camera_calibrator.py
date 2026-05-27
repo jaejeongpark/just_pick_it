@@ -41,9 +41,8 @@ class CameraCalibrator(Node):
         self.declare_parameter('board_width', 8)
         self.declare_parameter('board_height', 6)
         self.declare_parameter('square_size', 0.025)
-        self.declare_parameter(
-            'output_file',
-            os.path.join(_DEFAULT_RESULT_DIR, 'camera_calibration.yaml'))
+        self.declare_parameter('robot_name', '')
+        self.declare_parameter('output_file', '')
         self.declare_parameter('show_preview', False)
 
         self._image_dir = os.path.expanduser(
@@ -51,9 +50,17 @@ class CameraCalibrator(Node):
         self._board_w = self.get_parameter('board_width').get_parameter_value().integer_value
         self._board_h = self.get_parameter('board_height').get_parameter_value().integer_value
         self._square_size = self.get_parameter('square_size').get_parameter_value().double_value
-        self._output_file = os.path.expanduser(
-            self.get_parameter('output_file').get_parameter_value().string_value)
         self._show_preview = self.get_parameter('show_preview').get_parameter_value().bool_value
+        self._robot_name = self.get_parameter('robot_name').get_parameter_value().string_value
+
+        output_file_param = self.get_parameter('output_file').get_parameter_value().string_value
+        if output_file_param:
+            self._output_file = os.path.expanduser(output_file_param)
+        elif self._robot_name:
+            self._output_file = os.path.join(
+                _DEFAULT_RESULT_DIR, self._robot_name, 'camera_calibration.yaml')
+        else:
+            self._output_file = os.path.join(_DEFAULT_RESULT_DIR, 'camera_calibration.yaml')
 
         self.get_logger().info(f'이미지 디렉터리: {self._image_dir}')
         self.get_logger().info(
@@ -150,7 +157,7 @@ class CameraCalibrator(Node):
         calib = {
             'image_width': img_size[0],
             'image_height': img_size[1],
-            'camera_name': 'pinky_camera',
+            'camera_name': self._robot_name if self._robot_name else 'pinky_camera',
             'distortion_model': 'plumb_bob',
             'camera_matrix': {
                 'rows': 3, 'cols': 3,

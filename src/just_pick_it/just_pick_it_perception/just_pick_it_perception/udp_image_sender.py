@@ -61,13 +61,9 @@ class UdpCameraSenderNode(Node):
         )
 
     def timer_cb(self):
-        # Picamera2 output: RGB
         frame_rgb = self.picam2.capture_array()
-
-        # OpenCV JPEG 인코딩은 RGB/BGR 둘 다 가능하지만,
-        # 일반 OpenCV 표시/처리 기준에 맞추기 위해 BGR로 변환
         frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-
+        frame_bgr = cv2.rotate(frame_bgr, cv2.ROTATE_180)
         self.send_udp_image(frame_bgr)
 
     def send_udp_image(self, frame_bgr):
