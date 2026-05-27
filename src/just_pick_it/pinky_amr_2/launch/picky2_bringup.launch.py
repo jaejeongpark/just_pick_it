@@ -10,7 +10,7 @@ from launch import LaunchDescription
 from launch.actions import GroupAction, IncludeLaunchDescription
 from launch.launch_description_sources import AnyLaunchDescriptionSource
 from launch.substitutions import PathJoinSubstitution
-from launch_ros.actions import SetRemap
+from launch_ros.actions import SetRemap, Node
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -30,6 +30,15 @@ def generate_launch_description():
             SetRemap(src="/battery/voltage", dst="/picky2/battery/voltage"),
             SetRemap(src="/camera/image_raw", dst="/picky2/camera/image_raw"),
             IncludeLaunchDescription(AnyLaunchDescriptionSource(pinky_bringup_launch)),
+            Node(
+                package="just_pick_it_perception",
+                executable="udp_image_sender",
+                name="pi_camera_udp_publisher",
+                output="screen",
+                parameters=[
+                    {"target_port": 5002},
+                ]
+            ),
         ]
     )
 

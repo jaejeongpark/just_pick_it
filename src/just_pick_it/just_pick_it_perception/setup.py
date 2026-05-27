@@ -38,9 +38,8 @@ setup(
             'apriltag_map_tf_publisher = just_pick_it_perception.apriltag_map_tf_publisher:main',
             'detection_tracker = just_pick_it_perception.detection_tracker_node:main',
             'target_manager = just_pick_it_perception.target_manager_node:main',
-            'udp_image_sender = just_pick_it_perception.udp_image_sender_node:main',
+            'udp_image_sender = just_pick_it_perception.udp_image_sender:main',
             'udp_image_receiver = just_pick_it_perception.udp_image_receiver:main',
-            'camera_publisher_node = just_pick_it_perception.camera_publisher_node:main',
         ],
     },
 )
