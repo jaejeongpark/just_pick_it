@@ -25,6 +25,8 @@ def main():
     parser.add_argument('--port', type=int, default=9870)
     parser.add_argument('--save-dir', type=str, default=None,
                         help='Directory for captured images (default: ~/img_capture)')
+    parser.add_argument('--robot-name', type=str, default='UDP Stream',
+                        help='Window title (e.g. picky_1, picky_2)')
     args = parser.parse_args()
 
     capture_dir = Path(args.save_dir).expanduser() if args.save_dir \
@@ -73,7 +75,7 @@ def main():
             overlay = img.copy()
             cv2.putText(overlay, f'captured: {img_count}  Space: save  q: quit',
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-            cv2.imshow('UDP Stream', overlay)
+            cv2.imshow(args.robot_name, overlay)
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):

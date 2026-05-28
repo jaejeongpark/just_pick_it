@@ -69,7 +69,7 @@ echo "Point the camera at the checkerboard."
 echo "Press Space to capture, q to finish and start calibration."
 echo ""
 
-python3 "$RECEIVER" --port "$PORT" --save-dir "$SAVE_DIR"
+python3 "$RECEIVER" --port "$PORT" --save-dir "$SAVE_DIR" --robot-name "$ROBOT"
 
 IMG_COUNT=$(find "$SAVE_DIR" -maxdepth 1 -name '*.png' | wc -l)
 echo ""
