@@ -17,7 +17,13 @@ default_size_m: 0.15
 
 tags:
   0:
-    group: APPLE
-    size_m: 0.15
-    pose: { x: 0.73, y: 0.0, z: 0.2 }
+    group: CHARGING_DOCK_1
+    size_m: 0.05
+    pose: { x: 0.12, y: 0.66, z: 0.045 }
+    normal: [-1.0, 0.0, 0.0]   # 태그 면이 -x 방향(카메라 쪽)을 향함. 실제 설치 방향에 맞게 수정 필요
+
+  1:
+    group: CHARGING_DOCK_2
+    size_m: 0.05
+    pose: { x: 0.29, y: 0.66, z: 0.045 }
     normal: [-1.0, 0.0, 0.0]   # 태그 면이 -x 방향(카메라 쪽)을 향함. 실제 설치 방향에 맞게 수정 필요
