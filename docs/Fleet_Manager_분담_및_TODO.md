@@ -64,19 +64,21 @@
 > - battery: 드라이버는 `battery/percent`,`battery/voltage`(Float32)만 발행한다. State Manager가 구독하던 `battery_state`(BatteryState)는 발행 측이 없어 dead. **`battery/percent`를 권위 출처**로 쓴다.
 
 **State Manager**
-- [ ] `_report_to_server` HTTP PATCH + `server_base_url` 파라미터 제거(아키텍처 위반 경로 제거).
-- [ ] 기존 `picky_state` 발행 유지. battery/pose는 재발행하지 않는다(소비자가 원시 토픽 직접 구독).
-- [ ] (선택) 쓰이지 않는 `battery_state`(BatteryState) 구독 정리.
+- [x] `_report_to_server` HTTP PATCH + `server_base_url` 파라미터 제거(아키텍처 위반 경로 제거). launch의 `server_base_url` arg도 제거.
+- [x] 기존 `picky_state` 발행 유지. battery/pose는 재발행하지 않는다(소비자가 원시 토픽 직접 구독). `report_interval_sec` → `state_publish_interval_sec`로 개명(heartbeat publish 전용).
+- [ ] (선택) HTTP 제거로 이제 write-only가 된 `_battery_pct`/`_pos_*`/`_update_pose`(10Hz TF)/`battery_state` 구독 정리 — 후속 cleanup.
 
 **Robot State Monitor** — 구독 확장 + 1Hz coalesce 반영
-- [ ] picky_state / battery(`battery/percent`) / pose(`amcl_pose`) 구독 추가. robot별 최신값만 캐시.
-- [ ] picky_state 콜백은 **즉시** `traffic_manager.notify_state()` 호출(경로/도크 자동 해제는 지연되면 안 됨). 기존 동작 유지.
-- [ ] 1Hz 타이머로 캐시값을 `FleetRepository.update_robot_state(picky_state=..., battery_level=..., pos_x/y/theta=...)`로 한 번에 반영(고빈도 pose가 DB를 때리지 않게 coalesce). **`robot_status`는 인자로 넘기지 않는다(D2).**
-- [ ] battery 값 변동 시 타이머에서 `task_manager.handle_battery_update(robot_name, level)` 호출(이명제 [S3]과 시그니처 확인).
+- [x] picky_state / battery(`battery/percent`) / pose(`amcl_pose`) 구독 추가. robot별 최신값만 캐시.
+- [x] picky_state 콜백은 **즉시** `traffic_manager.notify_state()` 호출(경로/도크 자동 해제는 지연되면 안 됨). 기존 동작 유지.
+- [x] 1Hz 타이머로 캐시값을 `FleetRepository.update_robot_state(picky_state=..., battery_level=..., pos_x/y/theta=...)`로 변경분만 한 번에 반영(coalesce). **`robot_status`는 인자로 넘기지 않는다(D2).**
+- [x] battery 값 변동 시 타이머에서 `task_manager.handle_battery_update(robot_name, level)` 호출.
 - [ ] (선택) 일정 시간(예: 5s) telemetry 미수신 시 `robot_status=OFFLINE` 처리할지 — D2 예외로 별도 합의.
 
 **Fleet Repository**
-- [ ] `update_robot_state`는 picky_state/battery/pos를 이미 지원 — 변경 최소. 1Hz 호출이라 세션 비용 문제 없음. 필요 시 값이 바뀐 robot만 기록.
+- [x] `update_robot_state`는 picky_state/battery/pos를 이미 지원 — 변경 없음. 1Hz 호출이라 세션 비용 문제 없음.
+
+> 진행(2026-05-28): 위 코드 반영 완료. `fleet_manager_node`에서 TaskManager를 RobotStateMonitor보다 먼저 생성하도록 순서 변경 + battery hook 배선. 새 파라미터 `robot_state_flush_period_sec`(기본 1.0, `fleet_manager.yaml`) 추가. 빌드(fleet_manager·pinky_amr_1)·모듈 import·traffic 테스트 54개 통과. 실로봇 검증(amcl_pose 토픽 확인, robot_status가 IDLE로 유지되는지)은 남음.
 
 **회색지대 (이명제와 협의, D3 연계)**
 - [ ] `fleet_api_server`의 `PATCH /api/fleet/robots/{id}`를 로봇 보고 용도에서 제거. admin UI 수동 보정용으로 남길지는 별도 명시.

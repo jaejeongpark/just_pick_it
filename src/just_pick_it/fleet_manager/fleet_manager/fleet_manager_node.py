@@ -39,8 +39,9 @@ class FleetManagerNode(Node):
         self.fleet_repo = FleetRepository(self)
         self.robot_gateway = RobotCommandGateway(self)
         self.traffic_manager = self._create_traffic_manager(picky_robot_ids)
-        self.robot_state_monitor = self._create_robot_state_monitor(picky_robot_ids)
+        # TaskManager 를 먼저 만들어 RobotStateMonitor 의 battery hook 으로 넘긴다.
         self.task_manager = self._create_task_manager()
+        self.robot_state_monitor = self._create_robot_state_monitor(picky_robot_ids, config)
         self.task_timer = self.create_timer(
             config["waiting_work_poll_period_sec"],
             self._poll_waiting_work_if_picky_idle,
@@ -60,6 +61,7 @@ class FleetManagerNode(Node):
     def _declare_parameters(self) -> None:
         self.declare_parameter('robot_ids', ['PICKY1', 'PICKY2', 'COBOT1', 'COBOT2'])
         self.declare_parameter('waiting_work_poll_period_sec', 5.0)
+        self.declare_parameter('robot_state_flush_period_sec', 1.0)
         self.declare_parameter('api_enabled', True)
         self.declare_parameter('api_host', '0.0.0.0')
         self.declare_parameter('api_port', 8100)
@@ -69,6 +71,7 @@ class FleetManagerNode(Node):
         return {
             "robot_ids": self.get_parameter('robot_ids').value,
             "waiting_work_poll_period_sec": self.get_parameter('waiting_work_poll_period_sec').value,
+            "robot_state_flush_period_sec": self.get_parameter('robot_state_flush_period_sec').value,
             "api_enabled": self.get_parameter('api_enabled').value,
             "api_host": self.get_parameter('api_host').value,
             "api_port": self.get_parameter('api_port').value,
@@ -96,11 +99,18 @@ class FleetManagerNode(Node):
             zone_coords=zone_coords or None,
         )
 
-    def _create_robot_state_monitor(self, picky_robot_ids: list[str]) -> RobotStateMonitor:
+    def _create_robot_state_monitor(
+        self,
+        picky_robot_ids: list[str],
+        config: dict,
+    ) -> RobotStateMonitor:
         return RobotStateMonitor(
             self,
             robot_ids=picky_robot_ids,
+            fleet_repo=self.fleet_repo,
             on_state_change=self.traffic_manager.notify_state,
+            on_battery_update=self.task_manager.handle_battery_update,
+            db_flush_period_sec=config["robot_state_flush_period_sec"],
         )
 
     def _create_task_manager(self) -> TaskManager:
