@@ -262,7 +262,7 @@ amr_2 폴더는 이명제 담당이며 amr_1 측에서는 수정하지 않는다
 
 **관련 외부 변경**
 
-같은 날 `fleet_manager/TRAFFIC_MANAGER_API.md` 도 갱신:
+같은 날 TrafficManager API 계약 문서(현재 `docs/Fleet_manager_interface.md` §7로 통합)도 갱신:
 
 - 책임 경계 표에 "DB / 외부 state 수정 — TrafficManager / TaskManager 모두 X"
   명문화.
