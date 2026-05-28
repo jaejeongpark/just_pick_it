@@ -31,18 +31,18 @@ def generate_launch_description():
             SetRemap(src="/camera/image_raw", dst="/picky2/camera/image_raw"),
             IncludeLaunchDescription(AnyLaunchDescriptionSource(pinky_bringup_launch)),
             Node(
-            package="just_pick_it_perception",
-            executable="udp_image_sender",
-            name="pi_camera_udp_publisher",
-            output="screen",
-            parameters=[
-                {"dest_port": 5002},
-                {"dest_ip": "192.168.1.21"},
-                {"width": 1280},
-                {"height": 720},
-                {"fps": 30},
-                {"jpeg_quality": 80},
-            ],
+                package="just_pick_it_perception",
+                executable="udp_image_sender",
+                name="pi_camera_udp_publisher",
+                output="screen",
+                parameters=[
+                    {"dest_port": 5001},
+                    {"dest_ip": "192.168.1.73"},
+                    {"width": 1280},
+                    {"height": 720},
+                    {"fps": 30},
+                    {"jpeg_quality": 80},
+                ]
             ),
         ]
     )

@@ -68,6 +68,8 @@ def main():
             if img is None:
                 continue
 
+            img = cv2.flip(img, 0)
+
             overlay = img.copy()
             cv2.putText(overlay, f'captured: {img_count}  Space: save  q: quit',
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
