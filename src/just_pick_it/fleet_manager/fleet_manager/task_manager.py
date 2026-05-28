@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import threading
+from time import monotonic
 from typing import Any
 
 from rclpy.node import Node
@@ -42,6 +43,7 @@ FINAL_TASK_STATUSES = {"SUCCESS", "FAILED", "CANCELLED"}
 CHARGE_BATTERY_THRESHOLD = 40
 DEFAULT_ORDER_PRIORITY = 2
 DEFAULT_STOCKING_PRIORITY = 1
+COBOT_DISPATCH_WARN_INTERVAL_SEC = 10.0
 
 
 @dataclass(frozen=True)
@@ -97,7 +99,7 @@ class TaskManager:
         # 상세 경로는 충돌 회피/예약용이며, MoveCommand에는 최종 목적지 zone만 보낸다.
         self._move_waypoints_by_task: dict[int, tuple[str, ...]] = {}
         self._completed_move_target_by_task: dict[int, str] = {}
-        self._unsupported_task_warned: set[int] = set()
+        self._cobot_dispatch_warned_at: dict[tuple[str, str], float] = {}
         self._housekeeping_stopped_flows: set[tuple[str, int]] = set()
 
         # cobot_task_id -> STOWING_ARM 중 미리 생성한 다음 task id 목록.
@@ -568,12 +570,6 @@ class TaskManager:
         requests.sort(key=lambda item: (item.priority, item.work_id, item.kind))
         return requests
 
-    def _process_waiting_orders(self) -> None:
-        """호환용 wrapper. 신규 구현은 _process_waiting_work()를 사용한다."""
-        for request in self._collect_waiting_work():
-            if request.kind == "ORDER":
-                self._process_new_order(request.payload)
-
     def _process_new_order(self, order: dict[str, Any]) -> None:
         """주문 1건을 robot unit에 배정하고 첫 상품 task를 생성한다."""
         order_id = int(order["order_id"])
@@ -1000,22 +996,6 @@ class TaskManager:
     # ==================================================================
     # 입고 task 생성
     # ==================================================================
-
-    def _process_requested_stocking_items(self) -> None:
-        """REQUESTED stocking_item을 조회하고 task가 없는 항목을 처리한다."""
-        stocking_items = self._repo.list_requested_stocking_items()
-
-        for stocking_item in stocking_items:
-            stocking_item_id = stocking_item.get("stocking_item_id")
-            if stocking_item_id is None:
-                continue
-            if self._stocking_item_has_tasks(int(stocking_item_id)):
-                self._node.get_logger().debug(
-                    f"[TaskManager] stocking_item_id={stocking_item_id} 기존 task 존재, 생성 skip"
-                )
-                continue
-
-            self._process_new_stocking_item(stocking_item)
 
     def _stocking_item_has_tasks(self, stocking_item_id: int) -> bool:
         """stocking_item에 이미 task가 생성되어 있는지 확인한다."""
@@ -2081,29 +2061,26 @@ class TaskManager:
         """COBOT task를 RobotCommandGateway로 보낸다.
 
         현재 저장소에는 ExecuteTask.action이 없으므로 Gateway가 False를 반환한다.
-        이 경우 task 상태는 ASSIGNED로 유지해서 인터페이스 확정 후 재시도 가능하게 둔다.
+        이 경우 task 상태는 ASSIGNED로 유지하고 다음 dispatch cycle에서 다시 시도한다.
         """
         if self._robot_gateway is None:
             return False
 
         task_id = int(task["task_id"])
         robot_name = str(task.get("assigned_robot_name") or "")
-        if task_id in self._unsupported_task_warned:
-            return False
+        task_type = str(task.get("task_type") or "")
 
         sent = self._robot_gateway.send_cobot_task(
             robot_name=robot_name,
             task=task,
             result_callback=self.handle_task_result,
         )
-        if not sent and task_id not in self._unsupported_task_warned:
-            self._unsupported_task_warned.add(task_id)
-            self._node.get_logger().warn(
-                f"[TaskManager] task_id={task_id} COBOT 실행 인터페이스 대기 중, 상태는 ASSIGNED 유지"
-            )
+        if not sent:
+            self._warn_cobot_dispatch_waiting(robot_name, task_type, task_id)
             return False
 
         if sent:
+            self._cobot_dispatch_warned_at.pop((robot_name, task_type), None)
             self._repo.update_task_status(
                 task_id,
                 status="RUNNING",
@@ -2117,6 +2094,29 @@ class TaskManager:
             return True
 
         return False
+
+    def _warn_cobot_dispatch_waiting(
+        self,
+        robot_name: str,
+        task_type: str,
+        task_id: int,
+    ) -> None:
+        """COBOT action server 대기 로그만 제한하고 dispatch 재시도는 막지 않는다."""
+        key = (robot_name, task_type)
+        now = monotonic()
+        last_warned_at = self._cobot_dispatch_warned_at.get(key)
+
+        if (
+            last_warned_at is not None
+            and now - last_warned_at < COBOT_DISPATCH_WARN_INTERVAL_SEC
+        ):
+            return
+
+        self._cobot_dispatch_warned_at[key] = now
+        self._node.get_logger().warn(
+            f"[TaskManager] task_id={task_id} {robot_name} {task_type} "
+            "COBOT 실행 인터페이스 대기 중, 상태는 ASSIGNED 유지 후 재시도"
+        )
 
     def _mark_task_failed_before_dispatch(
         self,
@@ -2220,13 +2220,16 @@ class TaskManager:
                 task_id=task_id,
                 detail=message,
             )
+            self._cleanup_finished_flow_memory(task)
             return
 
         if self._fleet_paused:
+            self._cleanup_finished_flow_memory(task)
             return
 
         self._advance_flow_after_task_success(task)
         self._dispatch_ready_tasks()
+        self._cleanup_finished_flow_memory(task)
 
     def _advance_flow_after_task_success(self, task: dict[str, Any]) -> None:
         """성공한 task가 속한 주문/입고 흐름만 즉시 다음 단계로 넘긴다."""
@@ -2238,3 +2241,54 @@ class TaskManager:
         stocking_item_id = task.get("stocking_item_id")
         if stocking_item_id is not None:
             self._advance_stocking_item_by_id_if_ready(int(stocking_item_id))
+
+    def _cleanup_finished_flow_memory(self, task: dict[str, Any]) -> None:
+        """완료된 주문/입고 흐름의 TaskManager 임시 메모리를 정리한다."""
+        flow_key = self._flow_key_for_task(task)
+        if flow_key is None:
+            return
+
+        flow_tasks = self._tasks_for_flow_key(flow_key)
+        if not flow_tasks:
+            return
+        if any(item.get("status") not in FINAL_TASK_STATUSES for item in flow_tasks):
+            return
+
+        flow_task_ids = {
+            int(item["task_id"])
+            for item in flow_tasks
+            if item.get("task_id") is not None
+        }
+
+        for flow_task_id in flow_task_ids:
+            self._move_waypoints_by_task.pop(flow_task_id, None)
+            self._completed_move_target_by_task.pop(flow_task_id, None)
+
+        self._housekeeping_stopped_flows.discard(flow_key)
+        self._cleanup_preplanned_memory(flow_task_ids)
+
+    def _tasks_for_flow_key(self, flow_key: tuple[str, int]) -> list[dict[str, Any]]:
+        """주문/입고 flow key에 연결된 task 목록을 반환한다."""
+        flow_kind, flow_id = flow_key
+        if flow_kind == "order":
+            return self._repo.list_order_tasks(flow_id)
+
+        return [
+            task for task in self._repo.list_tasks()
+            if task.get("stocking_item_id") is not None
+            and int(task["stocking_item_id"]) == flow_id
+        ]
+
+    def _cleanup_preplanned_memory(self, flow_task_ids: set[int]) -> None:
+        """완료된 flow에 묶인 COBOT preplan 임시 메모리를 제거한다."""
+        for trigger_task_id, created_task_ids in list(
+            self._preplanned_created_tasks_by_trigger.items()
+        ):
+            if trigger_task_id in flow_task_ids or created_task_ids & flow_task_ids:
+                self._preplanned_created_tasks_by_trigger.pop(trigger_task_id, None)
+
+        for trigger_task_id, move_task_ids in list(
+            self._preplanned_move_tasks_by_trigger.items()
+        ):
+            if trigger_task_id in flow_task_ids or move_task_ids & flow_task_ids:
+                self._preplanned_move_tasks_by_trigger.pop(trigger_task_id, None)
