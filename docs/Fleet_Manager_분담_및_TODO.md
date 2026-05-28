@@ -86,8 +86,10 @@
 
 재기동되면 `TrafficManager`의 예약 상태가 비어 있는데 DB엔 RUNNING task가 남는다. (이명제 [R1]과 한 쌍)
 
+> **설계 논의 문서**: `docs/R1_재시작_복구_설계_논의.md` (A/A′/A″/B 검토, A″ 권장, 회의 안건 §8). 방향 확정 후 아래 항목을 구체화한다.
+
 **관련**: `traffic_manager.py:165-180`.
-- [ ] 시작 시 DB의 RUNNING MOVE/DOCK task로 예약을 재구성하는 진입점(예: `rebuild_reservation(robot_id, waypoints, task_id)`) 노출. 호출은 Task Manager reconcile에서 들어온다.
+- [ ] (방향 확정 후) 로봇 현재 위치 기준 점유 복원 + 텔레메트리 완료 재동기(A″) 구현. Traffic `nearest_zone`/`reserve_path` 재사용, `rebuild_dock`, repo `list_recovery_tasks` 등.
 
 ### [Q1] Fleet Repository / Traffic Manager 테스트
 
