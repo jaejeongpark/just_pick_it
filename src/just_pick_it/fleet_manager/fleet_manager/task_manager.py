@@ -44,6 +44,16 @@ CHARGE_BATTERY_THRESHOLD = 40
 DEFAULT_ORDER_PRIORITY = 2
 DEFAULT_STOCKING_PRIORITY = 1
 COBOT_DISPATCH_WARN_INTERVAL_SEC = 10.0
+RECOVERY_ARRIVAL_TIMEOUT_SEC = 120.0
+
+# 재시작 복구 시 MOVE task 도착 판정용 picky_state (State Manager ARRIVAL_STATE 계약과 동일).
+RECOVERY_ARRIVAL_STATE = {
+    "MOVE_TO_PRODUCT": "WAITING_FOR_COBOT",
+    "MOVE_TO_PICKUP": "WAITING_FOR_COBOT",
+    "MOVE_TO_STOCK": "WAITING_FOR_COBOT",
+    "MOVE_TO_STORAGE": "WAITING_FOR_COBOT",
+    "RETURN_HOME": "STANDBY",
+}
 
 
 @dataclass(frozen=True)
@@ -79,6 +89,7 @@ class TaskManager:
         fleet_repo: FleetRepository,
         traffic_manager: TrafficManager,
         robot_gateway: Any | None = None,
+        recovery_timeout_sec: float = RECOVERY_ARRIVAL_TIMEOUT_SEC,
     ) -> None:
         """TaskManager를 초기화한다.
 
@@ -87,6 +98,7 @@ class TaskManager:
             fleet_repo: DB 접근 Repository.
             traffic_manager: 경로 탐색/예약 담당 객체.
             robot_gateway: ROS2 Action 송신 담당 객체. 초기 task 생성 단계에서는 None 가능.
+            recovery_timeout_sec: 재시작 복구 시 도착 재동기 대기 한계(초). 초과 시 FAILED 처리.
         """
         self._node = node
         self._repo = fleet_repo
@@ -94,6 +106,12 @@ class TaskManager:
         self._robot_gateway = robot_gateway
         self._scheduler_lock = threading.RLock()
         self._fleet_paused = False
+        # 재시작 복구(R1/A''): node가 arm 하면 reconcile 전까지 poll/dispatch 게이트를 닫는다.
+        # 테스트는 arm 하지 않으므로 게이트가 열린 상태로 동작한다(무회귀).
+        self._reconcile_pending = False
+        # 복구로 점유만 다시 세운 RUNNING task_id -> 도착 재동기 deadline(monotonic).
+        self._recovering: dict[int, float] = {}
+        self._recovery_timeout_sec = recovery_timeout_sec
 
         # task_id -> TrafficManager가 예약한 zone 목록.
         # 상세 경로는 충돌 회피/예약용이며, MoveCommand에는 최종 목적지 zone만 보낸다.
@@ -163,6 +181,9 @@ class TaskManager:
             return
 
         try:
+            if self._reconcile_pending:
+                return
+            self._resync_recovering_tasks()
             self._complete_ready_charge_tasks()
             self._advance_existing_orders()
             self._advance_existing_stocking_items()
@@ -195,6 +216,256 @@ class TaskManager:
             self._advance_existing_stocking_items()
             self._process_waiting_work_if_unit_available()
             self._dispatch_ready_tasks()
+
+    # ==================================================================
+    # 재시작 복구 (R1 / A'')
+    # ==================================================================
+
+    def arm_reconcile(self) -> None:
+        """노드가 호출: reconcile_on_startup 이 끝나기 전까지 poll/dispatch 게이트를 닫는다.
+
+        테스트는 이걸 호출하지 않으므로 게이트가 열린 상태로 동작한다(무회귀).
+        """
+        with self._scheduler_lock:
+            self._reconcile_pending = True
+
+    def reconcile_on_startup(self) -> None:
+        """재시작 복구(A''): RUNNING task 점유를 로봇 현재 위치 기준으로 재구성한다.
+
+        - 로봇은 건드리지 않는다(액션 goal 은 로봇 State Manager 가 계속 수행 중).
+        - EMERGENCY 상태였으면 게이트를 닫은 채 종료(재개는 admin resume).
+        - MOVE/DOCK/COBOT 은 도착 재동기/타임아웃 대상(_recovering)으로 등록(소비는 poll, Step 4).
+        - 점유 복원 후 게이트를 열고 ASSIGNED 를 정상 dispatch.
+        노드 one-shot 타이머에서 executor spin 이후 1회 호출한다(중복/미arm 호출은 무시).
+        """
+        with self._scheduler_lock:
+            if not self._reconcile_pending:
+                return
+
+            recovery_tasks: list[dict[str, Any]] = []
+            emergency = False
+            try:
+                recovery_tasks = self._repo.list_recovery_tasks()
+                emergency = self._repo.has_emergency_robots()
+                if emergency:
+                    self._fleet_paused = True
+                    self._node.get_logger().warn(
+                        "[TaskManager] 재시작 복구: EMERGENCY 감지 → dispatch 게이트 유지(재개 대기)"
+                    )
+                else:
+                    for task in recovery_tasks:
+                        self._recover_running_task(task)
+            except Exception as exc:  # noqa: BLE001 - 복구 오류가 게이트를 영구히 닫지 않게 한다
+                self._node.get_logger().error(f"[TaskManager] 재시작 복구 중 오류: {exc}")
+            finally:
+                self._reconcile_pending = False
+
+            if not self._fleet_paused:
+                self._dispatch_ready_tasks()
+
+        self._node.get_logger().info(
+            f"[TaskManager] 재시작 복구 완료: RUNNING {len(recovery_tasks)}건, emergency={emergency}"
+        )
+
+    def _recover_running_task(self, task: dict[str, Any]) -> None:
+        """RUNNING task 1건의 점유를 로봇 현재 위치 기준으로 다시 세운다(로봇 미개입)."""
+        task_id = int(task["task_id"])
+        task_type = str(task.get("task_type") or "")
+        robot_name = task.get("robot_name")
+        if not robot_name:
+            return
+        robot_name = str(robot_name)
+        current_zone = self._recovery_current_zone(task, robot_name)
+
+        if task_type in MOVE_TASK_TYPES:
+            self._recover_move_occupancy(
+                task_id, task_type, robot_name, current_zone, task.get("target_zone_name")
+            )
+            self._register_recovering(task_id)
+        elif task_type in DOCK_TASK_TYPES:
+            self._recover_dock_occupancy(task_id, robot_name, current_zone, task)
+            self._register_recovering(task_id)
+        elif task_type == "CHARGE":
+            dock = self._recovery_nearest_dock(task)
+            if dock is not None:
+                self._traffic.rebuild_dock(robot_name, dock)
+        else:
+            # COBOT 등: PICKY 정차 점유는 정상 동작과 동일(별도 예약 없음). 완료 재동기만 등록.
+            self._register_recovering(task_id)
+
+    def _recover_move_occupancy(
+        self,
+        task_id: int,
+        task_type: str,
+        robot_name: str,
+        current_zone: str | None,
+        target_zone_name: Any,
+    ) -> None:
+        """현재 위치 -> 목적지로 MOVE 점유를 재예약한다(로봇엔 명령 안 보냄)."""
+        if not current_zone:
+            self._node.get_logger().warn(
+                f"[TaskManager] 복구: task_id={task_id} 현재 zone 미상, 점유 복원 skip"
+            )
+            return
+
+        if task_type == "RETURN_HOME":
+            result = self._traffic.reserve_return_home_path(
+                robot_id=robot_name, task_id=task_id, source_zone=current_zone
+            )
+        else:
+            if not target_zone_name:
+                self._node.get_logger().warn(
+                    f"[TaskManager] 복구: task_id={task_id} target 미상, 점유 복원 skip"
+                )
+                return
+            result = self._traffic.reserve_path(
+                robot_id=robot_name,
+                task_id=task_id,
+                source_zone=current_zone,
+                target_zone=str(target_zone_name),
+            )
+
+        if result.ok:
+            self._move_waypoints_by_task[task_id] = tuple(result.waypoints)
+            self._node.get_logger().info(
+                f"[TaskManager] 복구: task_id={task_id} {robot_name} 점유 재예약 "
+                f"{current_zone} -> {result.waypoints[-1]}"
+            )
+        else:
+            self._node.get_logger().warn(
+                f"[TaskManager] 복구: task_id={task_id} 점유 재예약 실패: {result.reason}"
+            )
+
+    def _recover_dock_occupancy(
+        self,
+        task_id: int,
+        robot_name: str,
+        current_zone: str | None,
+        task: dict[str, Any],
+    ) -> None:
+        """DOCK_IN 점유를 현재 위치 기준으로 재예약한다."""
+        dock = self._recovery_nearest_dock(task)
+        if dock is None or not current_zone:
+            source = current_zone or self._default_source_zone(
+                self._unit_id_from_robot_name(robot_name)
+            )
+            result = self._traffic.reserve_dock_path(
+                robot_id=robot_name, task_id=task_id, source_zone=source
+            )
+            if result.ok:
+                self._move_waypoints_by_task[task_id] = tuple(result.waypoints)
+            return
+
+        self._traffic.rebuild_dock(robot_name, dock)
+        result = self._traffic.reserve_path(
+            robot_id=robot_name, task_id=task_id, source_zone=current_zone, target_zone=dock
+        )
+        if result.ok:
+            self._move_waypoints_by_task[task_id] = tuple(result.waypoints)
+            self._node.get_logger().info(
+                f"[TaskManager] 복구: task_id={task_id} {robot_name} 도크 점유 재예약 -> {dock}"
+            )
+
+    def _recovery_current_zone(self, task: dict[str, Any], robot_name: str) -> str | None:
+        """로봇 pose -> 그래프 노드. 없으면 task source_zone, 그래도 없으면 기본 zone."""
+        pos_x = task.get("pos_x")
+        pos_y = task.get("pos_y")
+        if pos_x is not None and pos_y is not None:
+            zone = self._traffic.nearest_zone(float(pos_x), float(pos_y))
+            if zone:
+                return zone
+        source = task.get("source_zone_name")
+        if source:
+            return str(source)
+        return self._default_source_zone(self._unit_id_from_robot_name(robot_name))
+
+    def _recovery_nearest_dock(self, task: dict[str, Any]) -> str | None:
+        """로봇 pose 기준 가장 가까운 충전 도크. pose 없으면 None."""
+        pos_x = task.get("pos_x")
+        pos_y = task.get("pos_y")
+        if pos_x is None or pos_y is None:
+            return None
+        return self._traffic.nearest_dock(float(pos_x), float(pos_y))
+
+    def _register_recovering(self, task_id: int) -> None:
+        """도착 재동기/타임아웃 대상으로 등록한다(소비는 _resync_recovering_tasks)."""
+        self._recovering[task_id] = monotonic() + self._recovery_timeout_sec
+
+    def _resync_recovering_tasks(self) -> None:
+        """복구로 점유만 세운 RUNNING task를 텔레메트리/타임아웃으로 마무리한다.
+
+        - 더 이상 RUNNING이 아니면 추적 종료.
+        - 로봇이 도착 상태(picky_state)면 SUCCESS로 마무리하고 다음 단계로 진행.
+        - 도착 신호 없이 deadline 초과면 FAILED로 정리(재계획은 후속 advance/poll이 담당).
+        check_waiting_work(5s poll)에서 호출한다. handle_task_result를 재사용하므로
+        traffic 해제/flow 진행/예외 기록이 정상 경로와 동일하게 처리된다.
+        """
+        if not self._recovering:
+            return
+
+        running_by_id = {
+            int(task["task_id"]): task
+            for task in self._repo.list_recovery_tasks()
+            if task.get("task_id") is not None
+        }
+        now = monotonic()
+
+        for task_id in list(self._recovering):
+            deadline = self._recovering.get(task_id)
+            rec = running_by_id.get(task_id)
+            if rec is None:
+                self._recovering.pop(task_id, None)
+                continue
+            if self._recovery_arrived(rec):
+                self._recovering.pop(task_id, None)
+                self._node.get_logger().info(
+                    f"[TaskManager] 복구: task_id={task_id} 도착 감지 → SUCCESS 처리"
+                )
+                self._complete_recovered_task(rec, success=True, message="recovered: arrival detected")
+            elif deadline is not None and now >= deadline:
+                self._recovering.pop(task_id, None)
+                self._node.get_logger().warn(
+                    f"[TaskManager] 복구: task_id={task_id} 도착 신호 없음, 타임아웃 → FAILED"
+                )
+                self._complete_recovered_task(
+                    rec, success=False, message="recovery timeout: no arrival signal"
+                )
+
+    def _complete_recovered_task(self, rec: dict[str, Any], *, success: bool, message: str) -> None:
+        """복구 task를 정상 result 경로(handle_task_result)로 마무리한다."""
+        self.handle_task_result(
+            {
+                "task_id": int(rec["task_id"]),
+                "robot_name": rec.get("robot_name"),
+                "task_type": rec.get("task_type"),
+                "success": success,
+                "message": message,
+            }
+        )
+
+    def _recovery_arrived(self, rec: dict[str, Any]) -> bool:
+        """복구 중인 task의 로봇이 목적지에 도착했는지 텔레메트리로 판정한다."""
+        task_type = rec.get("task_type")
+        state = rec.get("picky_state")
+
+        if task_type in MOVE_TASK_TYPES:
+            expected = RECOVERY_ARRIVAL_STATE.get(str(task_type))
+            if expected is not None and state == expected:
+                return True
+            return self._recovery_at_target(rec)
+        if task_type in DOCK_TASK_TYPES:
+            return state == "CHARGING"
+        # COBOT 등은 picky_state 도착 신호가 없으므로 액션 결과 또는 타임아웃으로 처리.
+        return False
+
+    def _recovery_at_target(self, rec: dict[str, Any]) -> bool:
+        """로봇 현재 위치가 목적지 zone에 도달했는지(보조 판정)."""
+        target = rec.get("target_zone_name")
+        pos_x = rec.get("pos_x")
+        pos_y = rec.get("pos_y")
+        if not target or pos_x is None or pos_y is None:
+            return False
+        return self._traffic.nearest_zone(float(pos_x), float(pos_y)) == target
 
     # ==================================================================
     # COBOT STOWING_ARM lookahead planning
@@ -1643,6 +1914,8 @@ class TaskManager:
         이 함수에는 같은 값만 전달하면 된다.
         """
         with self._scheduler_lock:
+            if self._reconcile_pending:
+                return
             completed = self._complete_charge_tasks_for_robot(robot_name, battery_level)
             if not completed:
                 return
@@ -1795,6 +2068,8 @@ class TaskManager:
 
     def _dispatch_ready_tasks(self) -> None:
         """ASSIGNED task 중 순서상 실행 가능한 task를 로봇으로 보낸다."""
+        if self._reconcile_pending:
+            return
         if self._fleet_paused:
             self._node.get_logger().debug(
                 "[TaskManager] dispatch skip: fleet emergency paused"

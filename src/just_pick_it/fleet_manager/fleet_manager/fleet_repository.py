@@ -1265,6 +1265,59 @@ class FleetRepository:
             return {"status": "ok", "resumed_task_ids": resumed_task_ids}
 
     # ==================================================================
+    # 재시작 복구 (R1 / A'')
+    # ==================================================================
+
+    def list_recovery_tasks(self) -> list[dict[str, Any]]:
+        """재시작 복구용: RUNNING task와 담당 로봇의 현재 pose/state를 함께 조회한다.
+
+        TaskManager 가 (1) 로봇 현재 위치 기준 점유 재예약(`pos_x/pos_y` + target),
+        (2) emergency 게이트, (3) CHARGING 로봇 도크 추론에 사용한다.
+        in-flight goal 이 소실되는 대상은 RUNNING task 뿐이라 RUNNING 만 반환한다.
+        ASSIGNED 는 정상 dispatch 가 재예약하므로 포함하지 않는다.
+        """
+        with session_scope() as db:
+            tasks = (
+                db.query(Task)
+                .filter(Task.status == "RUNNING")
+                .order_by(Task.assigned_robot_id, Task.sequence_no, Task.task_id)
+                .all()
+            )
+
+            result: list[dict[str, Any]] = []
+            for task in tasks:
+                robot = db.get(Robot, task.assigned_robot_id) if task.assigned_robot_id else None
+                source_zone = db.get(Zone, task.source_zone_id) if task.source_zone_id else None
+                target_zone = db.get(Zone, task.target_zone_id) if task.target_zone_id else None
+                result.append(
+                    {
+                        "task_id": task.task_id,
+                        "task_type": task.task_type,
+                        "status": task.status,
+                        "sequence_no": task.sequence_no,
+                        "order_id": task.order_id,
+                        "stocking_item_id": task.stocking_item_id,
+                        "source_zone_name": source_zone.zone_name if source_zone else None,
+                        "target_zone_name": target_zone.zone_name if target_zone else None,
+                        "robot_name": robot.robot_name if robot else None,
+                        "robot_type": robot.robot_type if robot else None,
+                        "pos_x": robot.pos_x if robot else None,
+                        "pos_y": robot.pos_y if robot else None,
+                        "pos_theta": robot.pos_theta if robot else None,
+                        "picky_state": robot.picky_state if robot else None,
+                        "robot_status": robot.robot_status if robot else None,
+                    }
+                )
+            return result
+
+    def has_emergency_robots(self) -> bool:
+        """EMERGENCY_STOP 상태 로봇이 하나라도 있는지 확인한다(재시작 게이트 판단)."""
+        with session_scope() as db:
+            return (
+                db.query(Robot).filter(Robot.robot_status == "EMERGENCY_STOP").first() is not None
+            )
+
+    # ==================================================================
     # 정규화 helpers (이전 FleetRepository 와 동일, 저수준 조회만 DB 기반)
     # ==================================================================
 

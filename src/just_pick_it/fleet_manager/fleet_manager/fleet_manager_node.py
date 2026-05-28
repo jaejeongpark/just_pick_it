@@ -41,12 +41,19 @@ class FleetManagerNode(Node):
         self.traffic_manager = self._create_traffic_manager(picky_robot_ids)
         # TaskManager 를 먼저 만들어 RobotStateMonitor 의 battery hook 으로 넘긴다.
         self.task_manager = self._create_task_manager()
+        # 재시작 복구(R1) 전까지 poll/dispatch 게이트를 닫는다. reconcile_timer 가 1회 해제한다.
+        self.task_manager.arm_reconcile()
         self.robot_state_monitor = self._create_robot_state_monitor(picky_robot_ids, config)
         self.task_timer = self.create_timer(
             config["waiting_work_poll_period_sec"],
             self._poll_waiting_work_if_picky_idle,
         )
         self.api_server = self._create_api_server(config)
+        # executor spin 이후(action server 탐색·텔레메트리 도착 보장) 1회 재시작 복구 수행.
+        self.reconcile_timer = self.create_timer(
+            config["reconcile_delay_sec"],
+            self._run_startup_reconcile_once,
+        )
 
         self.get_logger().info(
             f"[FleetManager] 노드 시작 — robots={self.robot_ids}, "
@@ -62,6 +69,7 @@ class FleetManagerNode(Node):
         self.declare_parameter('robot_ids', ['PICKY1', 'PICKY2', 'COBOT1', 'COBOT2'])
         self.declare_parameter('waiting_work_poll_period_sec', 5.0)
         self.declare_parameter('robot_state_flush_period_sec', 1.0)
+        self.declare_parameter('reconcile_delay_sec', 2.0)
         self.declare_parameter('api_enabled', True)
         self.declare_parameter('api_host', '0.0.0.0')
         self.declare_parameter('api_port', 8100)
@@ -72,6 +80,7 @@ class FleetManagerNode(Node):
             "robot_ids": self.get_parameter('robot_ids').value,
             "waiting_work_poll_period_sec": self.get_parameter('waiting_work_poll_period_sec').value,
             "robot_state_flush_period_sec": self.get_parameter('robot_state_flush_period_sec').value,
+            "reconcile_delay_sec": self.get_parameter('reconcile_delay_sec').value,
             "api_enabled": self.get_parameter('api_enabled').value,
             "api_host": self.get_parameter('api_host').value,
             "api_port": self.get_parameter('api_port').value,
@@ -145,6 +154,11 @@ class FleetManagerNode(Node):
         if not self.task_manager.has_idle_picky_for_waiting_work():
             return
         self.task_manager.check_waiting_work()
+
+    def _run_startup_reconcile_once(self) -> None:
+        """executor spin 이후 1회만 재시작 복구(R1)를 수행하고 타이머를 멈춘다."""
+        self.reconcile_timer.cancel()
+        self.task_manager.reconcile_on_startup()
 
     # =====================================
     # Emergency/resume

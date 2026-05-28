@@ -11,3 +11,4 @@ fleet_manager:
     api_push_interval_sec: 1.0
     waiting_work_poll_period_sec: 5.0
     robot_state_flush_period_sec: 1.0
+    reconcile_delay_sec: 2.0
