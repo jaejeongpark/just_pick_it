@@ -39,8 +39,10 @@ class RobotStateMonitor:
       한 번에 DB에 반영한다(coalesce). picky_state도 같은 주기에 함께 반영한다.
     - **robot_status는 절대 기록하지 않는다.** robot_status는 task 전이(workflow_service)
       전용이며, 텔레메트리는 picky_state / battery_level / pos_* 만 갱신한다.
-    - battery_level이 바뀌면 `on_battery_update`(TaskManager.handle_battery_update)를 호출해
-      충전 완료를 즉시 반영할 수 있게 한다.
+    - battery_level이 임계값(기본 40%)을 **초과하는 구간에서 robot별 1회만**
+      `on_battery_update`(TaskManager.handle_battery_update)를 호출한다(충전 완료 트리거).
+      임계값 이하로 떨어지면 플래그가 해제되어 다음 초과 진입 때 다시 1회 호출된다.
+      구간당 1회만 호출하므로 scheduler lock 경합이 사실상 없다.
     """
 
     def __init__(
@@ -51,17 +53,24 @@ class RobotStateMonitor:
         on_state_change: StateCallback,
         on_battery_update: BatteryCallback | None = None,
         db_flush_period_sec: float = 1.0,
+        battery_notify_threshold: int = 40,
     ) -> None:
         self._node = node
         self._repo = fleet_repo
         self._on_state_change = on_state_change
         self._on_battery_update = on_battery_update
+        # battery_level 이 이 값을 "초과"하는 구간에서 robot 별 1회만 on_battery_update 를 호출한다.
+        # (TaskManager.CHARGE_BATTERY_THRESHOLD 와 동일 기준)
+        self._battery_threshold = battery_notify_threshold
         self._lock = threading.Lock()
 
         # robot_id -> 최신 수신 캐시 {picky_state, battery_level, pos_x, pos_y, pos_theta}
         self._latest: dict[str, dict[str, Any]] = {rid: {} for rid in robot_ids}
         # robot_id -> 마지막으로 DB에 기록한 값. 변경분만 쓰기 위함.
         self._last_written: dict[str, dict[str, Any]] = {rid: {} for rid in robot_ids}
+        # battery_threshold 초과 구간에서 on_battery_update 를 이미 1회 호출한 robot 집합.
+        # threshold 이하로 떨어지면 제거되어, 다음 초과 진입 때 다시 1회 호출된다.
+        self._battery_notified: set[str] = set()
 
         for robot_id in robot_ids:
             ns = robot_id.lower()
@@ -120,23 +129,33 @@ class RobotStateMonitor:
     # ==================================================================
 
     def _flush_to_db(self) -> None:
-        """캐시된 최신값 중 변경분만 robot 별로 DB에 한 번에 반영한다."""
+        """변경분만 robot 별로 DB에 한 번에 반영하고, battery 임계 통과를 알린다."""
         for robot_id in list(self._latest):
             with self._lock:
                 latest = dict(self._latest[robot_id])
                 written = self._last_written[robot_id]
                 changed = {key: value for key, value in latest.items() if written.get(key) != value}
 
-            if not changed:
-                continue
+            if changed:
+                updated = self._repo.update_robot_state(robot_id, **changed)
+                if updated is not None:
+                    with self._lock:
+                        self._last_written[robot_id].update(changed)
+                # not-found 등으로 실패하면 written 을 갱신하지 않아 다음 주기에 다시 시도한다.
 
-            updated = self._repo.update_robot_state(robot_id, **changed)
-            if updated is None:
-                # not-found 등으로 실패하면 다음 주기에 다시 시도한다(written 갱신 안 함).
-                continue
+            self._maybe_notify_battery(robot_id, latest.get('battery_level'))
 
-            with self._lock:
-                self._last_written[robot_id].update(changed)
+    def _maybe_notify_battery(self, robot_id: str, level: Any) -> None:
+        """battery 임계 초과 구간에서 robot 별 1회만 on_battery_update 를 호출한다.
 
-            if self._on_battery_update is not None and 'battery_level' in changed:
-                self._on_battery_update(robot_id, int(changed['battery_level']))
+        예: 39%(미호출) -> 41%(1회 호출, 플래그 set) -> 45%/80%(플래그 set, skip)
+            -> 40% 이하(플래그 해제) -> 41%(다시 1회 호출).
+        """
+        if self._on_battery_update is None or level is None:
+            return
+        if level > self._battery_threshold:
+            if robot_id not in self._battery_notified:
+                self._battery_notified.add(robot_id)
+                self._on_battery_update(robot_id, int(level))
+        else:
+            self._battery_notified.discard(robot_id)

@@ -6,7 +6,7 @@ from fleet_manager.fleet_api_server import FleetApiServer
 from fleet_manager.fleet_repository import FleetRepository
 from fleet_manager.robot_command_gateway import RobotCommandGateway
 from fleet_manager.robot_state_monitor import RobotStateMonitor
-from fleet_manager.task_manager import TaskManager
+from fleet_manager.task_manager import CHARGE_BATTERY_THRESHOLD, TaskManager
 from fleet_manager.traffic_manager import TrafficManager
 
 
@@ -111,6 +111,7 @@ class FleetManagerNode(Node):
             on_state_change=self.traffic_manager.notify_state,
             on_battery_update=self.task_manager.handle_battery_update,
             db_flush_period_sec=config["robot_state_flush_period_sec"],
+            battery_notify_threshold=CHARGE_BATTERY_THRESHOLD,
         )
 
     def _create_task_manager(self) -> TaskManager:

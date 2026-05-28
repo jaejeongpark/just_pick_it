@@ -1,6 +1,6 @@
 # Fleet Manager 정리 — 담당 분담 및 TODO
 
-작성일: 2026-05-28 (결정 D1·D2 및 S1 토픽 구성 확정 반영)
+작성일: 2026-05-28 (결정 D1·D2·D3·D4 및 S1 토픽 구성 확정 반영)
 
 코드/문서 교차 점검 결과 발견한 항목을 담당 경계에 맞춰 사람별 할 일로 정리한다.
 
@@ -32,15 +32,14 @@
 |---|------|------|
 | **D1** | 로봇 텔레메트리 단일 경로 = **ROS2 토픽** | State Manager 발행 → RobotStateMonitor 구독 → DB. HTTP 보고 경로 제거. |
 | **D2** | `robot_status` 소유권 = **task 전이 전용** | `workflow_service`만 `robot_status`를 기록. 로봇 텔레메트리는 `picky_state`/battery/pose만 갱신. |
+| **D3** | `/api/fleet/*` 표면 = **유지** | admin UI → Fleet API → FleetRepository → DB 경로라 web이 DB를 직접 만지지 않아 DB 소유권 정책에 위배 아님. 검증 테스트 시 UI에서 task를 바꿔 보기 위한 운영/디버그용. 스펙 초안 §4의 "제거" 표기는 문서 갱신 필요(C1). |
+| **D4** | 입고 완료 시 재고 반영 = **계획값** | `stocking_item.stock_delta` 기반(현 동작 유지). STOCKING_PLACE SUCCESS → `apply_stocking_success`. 비전 랙 체크 미구현이므로 `complete_stocking`(detected_quantity 경로)은 dead code로 **제거 완료**. |
 
 **D1 근거 (System Architecture 준수)**: `docs/3_System_Architecture.pdf`(ver_2.0)의 Software/System Architecture 다이어그램에서 **Fleet Manager ↔ AMR/Cobot Controller = ROS2(빨간색)**, HTTP(파란색)는 Browser ↔ Web Service ↔ Fleet Manager 구간 전용이다. 현재 State Manager의 HTTP `PATCH /api/fleet/robots/{id}` 보고는 이 구조를 거스르므로 ROS2 토픽 통일이 아키텍처 준수 요건이다.
 
-### 미정 (회의 필요)
+### 미정
 
-| # | 결정 | 선택지 | 관련 |
-|---|------|--------|------|
-| **D3** | `/api/fleet/*` 표면 유지 여부 | (유지+문서 갱신) vs (제거 후 정식 `/api/admin/*`로 대체) | C1, S1 회색지대 |
-| **D4** | 입고 완료 시 재고 반영 출처 | 계획값(`stocking_item.stock_delta`, 현 동작) vs 비전 실측값(`complete_stocking`) | 입고 흐름 |
+현재 없음. D1·D2·D3·D4 모두 확정.
 
 ---
 
@@ -72,7 +71,7 @@
 - [x] picky_state / battery(`battery/percent`) / pose(`amcl_pose`) 구독 추가. robot별 최신값만 캐시.
 - [x] picky_state 콜백은 **즉시** `traffic_manager.notify_state()` 호출(경로/도크 자동 해제는 지연되면 안 됨). 기존 동작 유지.
 - [x] 1Hz 타이머로 캐시값을 `FleetRepository.update_robot_state(picky_state=..., battery_level=..., pos_x/y/theta=...)`로 변경분만 한 번에 반영(coalesce). **`robot_status`는 인자로 넘기지 않는다(D2).**
-- [x] battery 값 변동 시 타이머에서 `task_manager.handle_battery_update(robot_name, level)` 호출.
+- [x] battery 임계값(40%, `CHARGE_BATTERY_THRESHOLD`) **초과 구간에서 robot별 1회만** `handle_battery_update` 호출. robot별 flag(`_battery_notified`)로 게이팅: 40% 이하로 떨어지면 flag 해제 → 다음 초과 진입 때 다시 1회. 구간당 1회라 scheduler lock 경합 없음(Task Manager 요구사항).
 - [ ] (선택) 일정 시간(예: 5s) telemetry 미수신 시 `robot_status=OFFLINE` 처리할지 — D2 예외로 별도 합의.
 
 **Fleet Repository**
@@ -80,8 +79,8 @@
 
 > 진행(2026-05-28): 위 코드 반영 완료. `fleet_manager_node`에서 TaskManager를 RobotStateMonitor보다 먼저 생성하도록 순서 변경 + battery hook 배선. 새 파라미터 `robot_state_flush_period_sec`(기본 1.0, `fleet_manager.yaml`) 추가. 빌드(fleet_manager·pinky_amr_1)·모듈 import·traffic 테스트 54개 통과. 실로봇 검증(amcl_pose 토픽 확인, robot_status가 IDLE로 유지되는지)은 남음.
 
-**회색지대 (이명제와 협의, D3 연계)**
-- [ ] `fleet_api_server`의 `PATCH /api/fleet/robots/{id}`를 로봇 보고 용도에서 제거. admin UI 수동 보정용으로 남길지는 별도 명시.
+**회색지대 (D3 확정: 유지)**
+- [x] `PATCH /api/fleet/robots/{id}` 등 `/api/fleet/*`는 admin UI 검증/디버그용으로 **유지**(D3). 로봇 HTTP 보고 용도는 S1에서 이미 제거됐고, 엔드포인트 자체는 admin UI 수동 조작용으로 남긴다.
 
 ### [R1] 재시작 시 RUNNING task 경로 예약 복구 (Traffic 측)
 
@@ -133,7 +132,7 @@
 
 ### [Web] Web Service
 
-- [ ] D3 결정에 따라 `admin.js`의 `/api/fleet/*` 호출 정리(유지/대체).
+- [x] `admin.js`의 `/api/fleet/*` 호출은 D3 확정(유지)에 따라 그대로 둔다(변경 없음).
 - [ ] LLM parser 실제 구현(`web/app/services/llm_client.py`).
 
 ---
@@ -143,8 +142,7 @@
 | 항목 | 내용 | 관련 파일 |
 |------|------|-----------|
 | [B3] emergency-stop가 HTTP 스레드에서 rclpy 직접 호출 | 통합계획 2.3/3.4 위배. executor로 위임 필요. 전파는 Gateway(이명제), 위임 mechanism은 node(회색) | `fleet_manager_node.py:164`, `robot_command_gateway.py:394` |
-| [D4] 입고 완료 재고 반영 출처 | `complete_stocking`(박서우, Fleet Repo) 호출 여부 / 비전 detected_quantity 연결. 호출 지점은 Task Manager(이명제) 또는 비전 | `fleet_repository.py:1054`, `workflow_service.py:294` |
-| [C1/D3] `/api/fleet/*` 제거 미이행 | 스펙 초안 §4·통합계획과 코드 불일치 | `fleet_api_server.py:172-283`, admin.js |
+| [C1] `/api/fleet/*` 문서 갱신 | D3 확정(유지)에 맞춰 스펙 초안 §4·통합계획의 "제거" 표기를 "admin/검증용 유지"로 수정 | API 스펙 초안 §4, `Control_Service_통합_계획.md` |
 | [C2] 워크플로 문서 갱신 | `전체_워크플로.md` "Robot 상태 반영" 절이 실제 흐름과 다름 | `docs/전체_워크플로.md:454-474` |
 | WebSocket push 방식 | 1초 전체 스냅샷 폴링 → 이벤트 기반 전환 여지 | `fleet_api_server.py:415` |
 | `just_pick_it_db/services/*` | 상태 전이 규칙 변경 시 양측 합의 필요 | `workflow_service.py` 등 |
@@ -153,8 +151,8 @@
 
 ## 5. 권장 순서
 
-1. ~~D1·D2 합의~~ **확정(ROS2 토픽 통일).** 남은 결정 **D3·D4는 회의 후 결정.**
+1. ~~결정 합의~~ **D1·D2·D3·D4 모두 확정** (D1 ROS2 토픽 통일 / D2 robot_status task 전이 전용 / D3 `/api/fleet/*` 유지 / D4 입고 재고=계획값).
 2. 박서우 **[S1]**, 이명제 **[S2]** 동시 진행 (서로 독립).
 3. **[S3] + battery hook 연결** — 박서우가 RobotStateMonitor에서 호출 연결, 이명제가 동작/시그니처 확인.
 4. **[R1] 재시작 reconcile** — 박서우(Traffic 인터페이스) + 이명제(reconcile 정책) 합의.
-5. [R2] / [B3] / [D4] / 문서([C1]·[C2]) / 테스트([Q1]·[Q2]).
+5. [R2] / [B3] / 문서([C1]·[C2]) / 테스트([Q1]·[Q2]).
