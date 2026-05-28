@@ -61,10 +61,8 @@ class UdpCameraSenderNode(Node):
         )
 
     def timer_cb(self):
-        frame_rgb = self.picam2.capture_array()
-        frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-        frame_bgr = cv2.rotate(frame_bgr, cv2.ROTATE_180)
-        self.send_udp_image(frame_bgr)
+        frame = self.picam2.capture_array()
+        self.send_udp_image(frame)
 
     def send_udp_image(self, frame_bgr):
         ok, buf = cv2.imencode(

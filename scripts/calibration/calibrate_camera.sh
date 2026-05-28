@@ -47,6 +47,8 @@ if [[ ! -f "$ROS_SETUP" ]]; then
     echo "ROS2 setup not found at $ROS_SETUP" >&2
     exit 1
 fi
+# ROS2 setup scripts reference variables not yet set; disable -u around source calls
+set +u
 # shellcheck source=/dev/null
 source "$ROS_SETUP"
 
@@ -57,6 +59,7 @@ else
     echo "Workspace not built. Run 'colcon build' from $WS_ROOT first." >&2
     exit 1
 fi
+set -u
 
 mkdir -p "$SAVE_DIR" "$RESULT_DIR"
 
