@@ -17,6 +17,8 @@ setup(
             glob('config/*.yaml') + glob('config/*.rviz')),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.xml')),
         (os.path.join('share', package_name, 'result'), glob('result/*.yaml')),
+        (os.path.join('share', package_name, 'result', 'picky_1'), glob('result/picky_1/*.yaml')),
+        (os.path.join('share', package_name, 'result', 'picky_2'), glob('result/picky_2/*.yaml')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -40,6 +42,7 @@ setup(
             'target_manager = just_pick_it_perception.target_manager_node:main',
             'udp_image_sender = just_pick_it_perception.udp_image_sender:main',
             'udp_image_receiver = just_pick_it_perception.udp_image_receiver:main',
+            'apriltag_detector_real = just_pick_it_perception.apriltag_detector_real:main',
         ],
     },
 )
