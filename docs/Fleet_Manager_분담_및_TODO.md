@@ -66,7 +66,7 @@
 **State Manager**
 - [x] `_report_to_server` HTTP PATCH + `server_base_url` 파라미터 제거(아키텍처 위반 경로 제거). launch의 `server_base_url` arg도 제거.
 - [x] 기존 `picky_state` 발행 유지. battery/pose는 재발행하지 않는다(소비자가 원시 토픽 직접 구독). `report_interval_sec` → `state_publish_interval_sec`로 개명(heartbeat publish 전용).
-- [ ] (선택) HTTP 제거로 이제 write-only가 된 `_battery_pct`/`_pos_*`/`_update_pose`(10Hz TF)/`battery_state` 구독 정리 — 후속 cleanup.
+- [x] HTTP 제거로 write-only가 된 `_battery_pct`/`_pos_*`/`_update_pose`(10Hz TF)/`battery`(percent·voltage·battery_state) 구독 + 관련 파라미터(`battery_full/empty_voltage`)·import(Time/BatteryState/Float32/tf2) 정리. (49줄 제거)
 
 **Robot State Monitor** — 구독 확장 + 1Hz coalesce 반영
 - [x] picky_state / battery(`battery/percent`) / pose(`amcl_pose`) 구독 추가. robot별 최신값만 캐시.

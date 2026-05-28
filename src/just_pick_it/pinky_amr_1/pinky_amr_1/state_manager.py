@@ -8,12 +8,9 @@ from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from rclpy.time import Time
 
 from geometry_msgs.msg import Twist
-from sensor_msgs.msg import BatteryState
-from std_msgs.msg import Float32, String
-from tf2_ros import Buffer, TransformListener
+from std_msgs.msg import String
 
 from just_pick_it_interfaces.action import DockCommand, MoveCommand
 
@@ -68,8 +65,6 @@ class StateManager(Node):
         self.declare_parameter('robot_id', 'PICKY1')
         self.declare_parameter('state_publish_interval_sec', 1.0)
         self.declare_parameter('dock_departure_distance', 0.08)
-        self.declare_parameter('battery_full_voltage', 8.4)
-        self.declare_parameter('battery_empty_voltage', 6.8)
 
         # 충전 도크별 ArUco 마커 ID와 도크의 절대 좌표(map frame).
         # DockCommand goal 의 dock_name 으로 lookup 한다.
@@ -84,8 +79,6 @@ class StateManager(Node):
 
         self._robot_id = self.get_parameter('robot_id').value
         self._depart_dist = self.get_parameter('dock_departure_distance').value
-        self._bat_full = self.get_parameter('battery_full_voltage').value
-        self._bat_empty = self.get_parameter('battery_empty_voltage').value
 
         # dock_name → (marker_id, map_x, map_y, map_yaw)
         self._dock_pose_by_name: dict[str, tuple[int, float, float, float]] = {
@@ -108,10 +101,6 @@ class StateManager(Node):
 
         self._lock = threading.Lock()
         self._picky_state = 'CHARGING'
-        self._battery_pct = 100
-        self._pos_x = 0.0
-        self._pos_y = 0.0
-        self._pos_theta = 0.0
 
         # Action과 타이머를 동시에 처리하기 위해 ReentrantCallbackGroup 사용
         cb_group = ReentrantCallbackGroup()
@@ -143,15 +132,6 @@ class StateManager(Node):
             cancel_callback=self._on_dock_cancel,
             callback_group=cb_group,
         )
-
-        # 배터리 구독 (pinky_bringup 이 namespace remap 으로 /picky{N}/battery/* 에 publish)
-        self.create_subscription(Float32, 'battery/voltage', self._battery_voltage_cb, 10)
-        self.create_subscription(BatteryState, 'battery_state', self._battery_state_cb, 10)
-
-        # TF
-        self._tf_buffer = Buffer()
-        self._tf_listener = TransformListener(self._tf_buffer, self, spin_thread=False)
-        self.create_timer(0.1, self._update_pose, callback_group=cb_group)
 
         # 주기 상태 publish 타이머 (late subscriber 를 위한 picky_state heartbeat)
         interval = self.get_parameter('state_publish_interval_sec').value
@@ -307,34 +287,6 @@ class StateManager(Node):
         self._set_state('CHARGING')
         goal_handle.succeed()
         return DockCommand.Result(success=True, message=f'docked at {dock_name}')
-
-    # ── 센서 / TF 콜백 ────────────────────────────────────────────────
-
-    def _update_pose(self) -> None:
-        try:
-            trans = self._tf_buffer.lookup_transform('map', 'base_link', Time())
-            t = trans.transform
-            with self._lock:
-                self._pos_x = t.translation.x
-                self._pos_y = t.translation.y
-                self._pos_theta = quat_to_yaw(t.rotation)
-        except Exception:
-            pass
-
-    def _battery_voltage_cb(self, msg: Float32) -> None:
-        with self._lock:
-            self._battery_pct = self._voltage_to_pct(msg.data)
-
-    def _battery_state_cb(self, msg: BatteryState) -> None:
-        with self._lock:
-            self._battery_pct = self._voltage_to_pct(msg.voltage)
-
-    def _voltage_to_pct(self, voltage: float) -> int:
-        span = self._bat_full - self._bat_empty
-        if span <= 0:
-            return 100
-        pct = int((voltage - self._bat_empty) / span * 100)
-        return max(0, min(100, pct))
 
     # ── 주기 상태 publish ──────────────────────────────────────────────
 
