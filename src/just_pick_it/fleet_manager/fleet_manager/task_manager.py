@@ -2343,7 +2343,7 @@ class TaskManager:
     def _dispatch_cobot_task(self, task: dict[str, Any]) -> bool:
         """COBOT task를 RobotCommandGateway로 보낸다.
 
-        현재 저장소에는 ExecuteTask.action이 없으므로 Gateway가 False를 반환한다.
+        ExecuteTask.action 생성 전이거나 action server가 없으면 Gateway가 False를 반환한다.
         이 경우 task 상태는 ASSIGNED로 유지하고 다음 dispatch cycle에서 다시 시도한다.
         """
         if self._robot_gateway is None:
@@ -2356,6 +2356,7 @@ class TaskManager:
         sent = self._robot_gateway.send_cobot_task(
             robot_name=robot_name,
             task=task,
+            feedback_callback=self.handle_cobot_feedback,
             result_callback=self.handle_task_result,
         )
         if not sent:
@@ -2449,6 +2450,17 @@ class TaskManager:
             current_waypoint_index,
         )
 
+    def handle_cobot_feedback(self, feedback: dict[str, Any]) -> None:
+        """COBOT ExecuteTask feedback을 처리한다."""
+        if str(feedback.get("status") or "") != "STOWING_ARM":
+            return
+
+        task_id = feedback.get("task_id")
+        if task_id is None:
+            return
+
+        self.preplan_after_cobot_stowing(int(task_id))
+
     def handle_task_result(self, result: dict[str, Any]) -> None:
         """RobotCommandGateway가 전달한 task result를 처리한다."""
         self._scheduler_lock.acquire()
@@ -2474,6 +2486,9 @@ class TaskManager:
             return
 
         next_status = "SUCCESS" if success else "FAILED"
+        if success and task_type in COBOT_TASK_TYPES:
+            self._apply_cobot_result_payload(task, result)
+
         self._repo.update_task_status(
             task_id,
             status=next_status,
@@ -2513,6 +2528,38 @@ class TaskManager:
         self._advance_flow_after_task_success(task)
         self._dispatch_ready_tasks()
         self._cleanup_finished_flow_memory(task)
+
+    def _apply_cobot_result_payload(
+        self,
+        task: dict[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        """COBOT result의 진열 수량 정보를 display_item에 반영한다."""
+        display_item_id = task.get("display_item_id")
+        if display_item_id is None:
+            return
+
+        updates: dict[str, int] = {}
+        detected_quantity = self._positive_int_or_none(result.get("detected_quantity"))
+        stock_delta = self._positive_int_or_none(result.get("stock_delta"))
+
+        if detected_quantity is not None:
+            updates["detected_quantity"] = detected_quantity
+        if stock_delta is not None:
+            updates["stock_delta"] = stock_delta
+
+        if updates:
+            self._repo.update_display_item(int(display_item_id), **updates)
+
+    def _positive_int_or_none(self, value: Any) -> int | None:
+        """0/None 기본값은 미보고로 보고 양수만 반환한다."""
+        if value is None:
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
 
     def _advance_flow_after_task_success(self, task: dict[str, Any]) -> None:
         """성공한 task가 속한 주문/진열 흐름만 즉시 다음 단계로 넘긴다."""

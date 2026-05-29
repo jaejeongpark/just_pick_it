@@ -62,7 +62,9 @@ C3 수정 문서:
 - [ ] Q: `fleet_repository`(상태 전이/트랜잭션) 단위 테스트 추가. recovery/traffic 테스트는 `test/test_recovery.py`에 존재.
 
 **이명제**
-- [ ] COBOT `ExecuteTask.action` 정의 + `send_cobot_task` 연결 + STOWING_ARM 감지 → `preplan_after_cobot_stowing` 호출. (현재 미연결 메서드: `preplan_after_cobot_stowing`)
+- [x] Fleet 측 COBOT `send_cobot_task` 연결 준비 + STOWING_ARM 감지 → `preplan_after_cobot_stowing` 호출.
+- [ ] `just_pick_it_interfaces` COBOT action 메시지 최종 정의 반영.
+- [ ] COBOT State Manager가 `/{cobot_ns}/execute_task` action server를 실제 패키지에서 제공하는지 통합 확인.
 - [ ] Web LLM parser 실제 구현(`web/app/services/llm_client.py`).
 - [ ] Q: `task_manager` 추가 흐름 테스트, `fleet_api_server` 엔드포인트 테스트.
 

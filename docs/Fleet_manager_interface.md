@@ -97,7 +97,7 @@ WS /api/customer/ws/status   연결 시 즉시 스냅샷 1회 + 주기 push(buil
 | 이동 | `/{ns}/move_command` `just_pick_it_interfaces/action/MoveCommand` | MOVE_TO_PRODUCT/PICKUP/STOCK/DISPLAY, RETURN_HOME | goal=목적지 pose만, feedback=`current_waypoint_index` |
 | 도킹 | `/{ns}/dock_command` `just_pick_it_interfaces/action/DockCommand` | DOCK_IN | goal=`task_id`,`dock_name`,`start_zone_name` |
 | 비상 | `/{ns}/emergency_control` `just_pick_it_interfaces/srv/EmergencyControl` | (전체) | 표준 SetBool 아님 |
-| COBOT 작업 | `ExecuteTask.action` (미정의) | SORTING_AND_LOAD/INSPECTION/UNLOAD/DISPLAY_SCAN/DISPLAY_PLACE | 정의 후 `send_cobot_task` 연결 |
+| COBOT 작업 | `/{ns}/execute_task` `just_pick_it_interfaces/action/ExecuteTask` (정의 대기) | SORTING_AND_LOAD/INSPECTION/UNLOAD/DISPLAY_SCAN/DISPLAY_PLACE | feedback `status=STOWING_ARM`이면 다음 PICKY 이동 선계획 |
 | 충전 | (액션 없음) | CHARGE | 배터리 상태로 완료 판단하는 logical task |
 
 `EmergencyControl.srv`:
@@ -112,7 +112,7 @@ bool accepted / string status / string message
 ```text
 PICKY feedback -> Gateway -> TaskManager.handle_move_feedback() -> TrafficManager.update_path_progress()
 PICKY/COBOT result -> Gateway -> TaskManager.handle_task_result() -> FleetRepository.update_task_status() -> WS push
-COBOT STOWING_ARM feedback -> Gateway/Monitor -> TaskManager.preplan_after_cobot_stowing()  (연동 대기)
+COBOT STOWING_ARM feedback -> Gateway -> TaskManager.preplan_after_cobot_stowing()
 ```
 
 ---
@@ -147,7 +147,7 @@ COBOT STOWING_ARM feedback -> Gateway/Monitor -> TaskManager.preplan_after_cobot
 
 `SORTING_AND_LOAD`는 주문(`order_item`)과 진열(`display_item`) 양쪽에서 재사용한다. 진열 흐름에서도 현재 Fleet 계약상 cobot_state는 `SORTING`으로 기록한다(`LOADING` 세분화는 COBOT feedback 확정 후 반영).
 
-`ExecuteTask.action`은 아직 미정의. 정의되면 `RobotCommandGateway.send_cobot_task()`에 연결한다(현재는 False 반환, task는 ASSIGNED 유지하며 매 dispatch cycle 재시도).
+`ExecuteTask.action` goal은 task/order/display/product/zone id와 수량 정보를 전달한다. 현재 action 메시지 정의는 COBOT 담당 확정 대기 상태다. `RobotCommandGateway.send_cobot_task()`는 `ExecuteTask.action`이 아직 생성되지 않았거나 `/{cobot_ns}/execute_task` action server가 없으면 False를 반환하고, 이 경우 task는 ASSIGNED로 유지되어 다음 dispatch cycle에 재시도된다.
 
 규칙: goal 수신 → cobot_state 전이 → 작업 수행 → 본동작 후 바로 SUCCESS 금지, `STOWING_ARM` 전이 + STOWING_ARM 시작 feedback → 팔 완전 복귀 후 result `success=true`. COBOT SUCCESS는 STOWING_ARM 완료를 의미. 실패를 숨기고 SUCCESS 보내면 안 된다.
 

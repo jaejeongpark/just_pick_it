@@ -93,12 +93,20 @@ class FakeGateway:
         self.cobot_send_result = cobot_send_result
         self.cobot_calls = []
 
-    def send_cobot_task(self, *, robot_name, task, result_callback=None):
+    def send_cobot_task(
+        self,
+        *,
+        robot_name,
+        task,
+        feedback_callback=None,
+        result_callback=None,
+    ):
         self.cobot_calls.append(
             {
                 "robot_name": robot_name,
                 "task_id": task.get("task_id"),
                 "task_type": task.get("task_type"),
+                "feedback_callback": feedback_callback,
                 "result_callback": result_callback,
             }
         )
@@ -192,6 +200,18 @@ def test_dispatch_cobot_task_retries_when_gateway_is_not_ready(mock_node):
     assert [call["task_id"] for call in gateway.cobot_calls] == [11, 11]
     assert repo.updated_tasks == []
     assert task["status"] == "ASSIGNED"
+
+
+def test_cobot_stowing_feedback_triggers_preplan(mock_node):
+    repo = FakeRepo()
+    manager = make_manager(mock_node, repo)
+    manager.preplan_after_cobot_stowing = MagicMock(return_value=True)
+
+    manager.handle_cobot_feedback({"task_id": 11, "status": "RUNNING"})
+    manager.preplan_after_cobot_stowing.assert_not_called()
+
+    manager.handle_cobot_feedback({"task_id": 11, "status": "STOWING_ARM"})
+    manager.preplan_after_cobot_stowing.assert_called_once_with(11)
 
 
 def test_charge_task_completes_only_above_threshold(mock_node):
