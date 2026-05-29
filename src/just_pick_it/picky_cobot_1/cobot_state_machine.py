@@ -12,6 +12,9 @@ from std_msgs.msg import String
 from just_pick_it_interfaces.action import ExecuteCobotTask
 from just_pick_it_interfaces.srv import EmergencyControl
 
+# [확정 필요] Vision Service ROS2 인터페이스 타입 임포트
+# from just_pick_it_interfaces.srv import VisionScanService
+
 
 # task_type → 작업 단계에서 순서대로 거치는 cobot_state 목록.
 # STOWING_ARM 은 모든 task 에서 공통으로 마지막에 발행된다.
@@ -37,6 +40,7 @@ class CobotStateManager(Node):
       Action Server  : execute_cobot_task  (just_pick_it_interfaces/ExecuteCobotTask)
       Service Server : emergency_control   (just_pick_it_interfaces/EmergencyControl)
       Publisher      : cobot_state         (std_msgs/String)
+      Service Client : vision_service_name 파라미터로 지정한 Vision Service
     """
 
     def __init__(self) -> None:
@@ -44,12 +48,20 @@ class CobotStateManager(Node):
 
         self.declare_parameter('robot_id', 'COBOT1')
         self.declare_parameter('state_publish_interval_sec', 1.0)
+        # Vision Service 는 Local AI Server 에서 실행되며 ROS2 cross-machine 으로 연결된다.
+        # 두 머신의 ROS_DOMAIN_ID 가 동일해야 한다.
+        self.declare_parameter('vision_service_name', '/vision/scan_empty_slot')  # [확정 필요]
+        self.declare_parameter('vision_service_timeout_sec', 30.0)
 
-        self._robot_id = self.get_parameter('robot_id').value
+        self._robot_id       = self.get_parameter('robot_id').value
+        self._vision_timeout = self.get_parameter('vision_service_timeout_sec').value
 
         self._lock = threading.Lock()
-        self._cobot_state = 'STANDBY'
+        self._cobot_state  = 'STANDBY'
         self._emergency_stop = False
+        # DISPLAY_SCAN 에서 받은 좌표를 DISPLAY_PLACE task 까지 보관한다.
+        # 두 task 가 별도 Action goal 로 전달되므로 노드 내부에서 유지한다.
+        self._scan_result = None
 
         # Action 과 서비스, 타이머를 동시에 처리하기 위해 ReentrantCallbackGroup 사용
         cb_group = ReentrantCallbackGroup()
@@ -77,6 +89,15 @@ class CobotStateManager(Node):
             callback_group=cb_group,
         )
 
+        # Vision Service 클라이언트 (Local AI Server, ROS2 cross-machine)
+        # [확정 필요] VisionScanService 인터페이스 타입이 확정되면 주석 해제
+        # vision_service_name = self.get_parameter('vision_service_name').value
+        # self._vision_client = self.create_client(
+        #     VisionScanService,
+        #     vision_service_name,
+        #     callback_group=cb_group,
+        # )
+
         # 주기 상태 publish 타이머 (late subscriber 를 위한 cobot_state heartbeat)
         interval = self.get_parameter('state_publish_interval_sec').value
         self.create_timer(interval, self._periodic_publish, callback_group=cb_group)
@@ -102,6 +123,37 @@ class CobotStateManager(Node):
         msg = String()
         msg.data = state
         self._state_pub.publish(msg)
+
+    # ── Vision Service 호출 ───────────────────────────────────────────
+
+    def _call_vision_service(self, request) -> tuple[bool, object]:
+        """
+        Vision Service 에 ROS2 서비스 요청을 보내고 응답을 기다린다.
+        Local AI Server 와 cross-machine ROS2 로 통신한다.
+        반환값: (success, response)
+        """
+        if not self._vision_client.wait_for_service(timeout_sec=3.0):
+            self.get_logger().error(
+                '[CobotStateManager] Vision Service 연결 불가 — '
+                'Local AI Server 의 ROS_DOMAIN_ID 와 네트워크 연결을 확인하세요'
+            )
+            return False, None
+
+        future = self._vision_client.call_async(request)
+
+        # MultiThreadedExecutor 안에서 future 를 기다리기 위해 threading.Event 사용.
+        # rclpy.spin_until_future_complete 는 이미 spin 중인 executor 와 충돌하므로 사용하지 않는다.
+        event = threading.Event()
+        future.add_done_callback(lambda f: event.set())
+
+        if not event.wait(timeout=self._vision_timeout):
+            self.get_logger().error(
+                f'[CobotStateManager] Vision Service 응답 타임아웃 '
+                f'({self._vision_timeout}s)'
+            )
+            return False, None
+
+        return True, future.result()
 
     # ── ExecuteCobotTask Action 콜백 ──────────────────────────────────
 
@@ -254,11 +306,35 @@ class CobotStateManager(Node):
             pass
 
         elif phase == 'SCANNING':
-            # [구현 필요] DISPLAY_SCAN — 진열대 빈자리 탐색 수행
+            # Vision Service (Local AI Server) 에 ROS2 서비스로 좌표 요청
+            # [확정 필요] VisionScanService 인터페이스 타입 확정 후 주석 해제
+            #
+            # req = VisionScanService.Request()
+            # req.task_id          = request.task_id           # [확정 필요] 요청 필드
+            # req.target_zone_name = request.target_zone_name  # [확정 필요] 요청 필드
+            #
+            # success, response = self._call_vision_service(req)
+            # if not success:
+            #     return False, 0
+            #
+            # self._scan_result = response  # PLACING task 에서 사용
+            # self.get_logger().info(
+            #     f'[CobotStateManager] SCANNING 완료 — 좌표 수신: {response}'
+            # )
             pass
 
         elif phase == 'PLACING':
-            # [구현 필요] DISPLAY_PLACE — 진열 상품 진열 동작 수행
+            # DISPLAY_SCAN task 에서 저장한 좌표로 팔 제어
+            # [확정 필요] 팔 제어 인터페이스 확정 후 주석 해제
+            #
+            # if self._scan_result is None:
+            #     self.get_logger().error(
+            #         '[CobotStateManager] SCANNING 결과 없음 — PLACING 불가'
+            #     )
+            #     return False, 0
+            #
+            # [구현 필요] self._scan_result 좌표로 팔 이동 → 집기 → 내려놓기
+            # self._scan_result = None  # 사용 완료 후 초기화
             pass
 
         detected_qty = 0  # [구현 필요] 실제 인식 수량 반환
