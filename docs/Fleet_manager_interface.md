@@ -97,7 +97,7 @@ WS /api/customer/ws/status   연결 시 즉시 스냅샷 1회 + 주기 push(buil
 | 이동 | `/{ns}/move_command` `just_pick_it_interfaces/action/MoveCommand` | MOVE_TO_PRODUCT/PICKUP/STOCK/STORAGE, RETURN_HOME | goal=목적지 pose만, feedback=`current_waypoint_index` |
 | 도킹 | `/{ns}/dock_command` `just_pick_it_interfaces/action/DockCommand` | DOCK_IN | goal=`task_id`,`dock_name`,`start_zone_name` |
 | 비상 | `/{ns}/emergency_control` `just_pick_it_interfaces/srv/EmergencyControl` | (전체) | 표준 SetBool 아님 |
-| COBOT 작업 | `ExecuteTask.action` (미정의) | SORTING_AND_LOAD/INSPECTION/UNLOAD/STOCKING_PICK/STOCKING_PLACE | 정의 후 `send_cobot_task` 연결 |
+| COBOT 작업 | `ExecuteTask.action` (미정의) | SORTING_AND_LOAD/INSPECTION/UNLOAD/DISPLAY_SCAN/DISPLAY_PLACE | 정의 후 `send_cobot_task` 연결 |
 | 충전 | (액션 없음) | CHARGE | 배터리 상태로 완료 판단하는 logical task |
 
 `EmergencyControl.srv`:
@@ -121,7 +121,7 @@ COBOT STOWING_ARM feedback -> Gateway/Monitor -> TaskManager.preplan_after_cobot
 
 | task_type | picky_state(이동) | 도착 시 picky_state |
 |---|---|---|
-| MOVE_TO_PRODUCT/PICKUP/STOCK/STORAGE | MOVING_TO_* | `WAITING_FOR_COBOT` |
+| MOVE_TO_PRODUCT/PICKUP/STOCK/DISPLAY | MOVING_TO_* | `WAITING_FOR_COBOT` |
 | RETURN_HOME | RETURNING | `STANDBY` |
 | DOCK_IN | DOCKING | (도킹 완료 후) `CHARGING` |
 
@@ -142,8 +142,10 @@ COBOT STOWING_ARM feedback -> Gateway/Monitor -> TaskManager.preplan_after_cobot
 | SORTING_AND_LOAD | SORTING/LOADING | STOWING_ARM |
 | INSPECTION | INSPECTING | STOWING_ARM |
 | UNLOAD | UNLOADING | STOWING_ARM |
-| STOCKING_PICK | STOCKING_SORTING/LOADING | STOWING_ARM |
-| STOCKING_PLACE | STOCKING_PLACING | STOWING_ARM |
+| DISPLAY_SCAN | SCANNING | STOWING_ARM |
+| DISPLAY_PLACE | PLACING | STOWING_ARM |
+
+`SORTING_AND_LOAD`는 주문(`order_item`)과 진열(`stocking_item`) 양쪽에서 재사용한다. 진열 흐름에서도 cobot_state는 동일하게 SORTING/LOADING이다.
 
 `ExecuteTask.action`은 아직 미정의. 정의되면 `RobotCommandGateway.send_cobot_task()`에 연결한다(현재는 False 반환, task는 ASSIGNED 유지하며 매 dispatch cycle 재시도).
 
@@ -153,9 +155,9 @@ COBOT STOWING_ARM feedback -> Gateway/Monitor -> TaskManager.preplan_after_cobot
 
 | STOWING_ARM trigger | 선계획 |
 |---|---|
-| SORTING_AND_LOAD | 남은 상품 있으면 다음 MOVE_TO_PRODUCT/SORTING_AND_LOAD, 없으면 MOVE_TO_PICKUP/INSPECTION/UNLOAD |
-| STOCKING_PICK | 다음 MOVE_TO_STORAGE 경로 선예약 |
-| INSPECTION/UNLOAD/STOCKING_PLACE | 이동 선계획 없음 |
+| SORTING_AND_LOAD (주문) | 남은 상품 있으면 다음 MOVE_TO_PRODUCT/SORTING_AND_LOAD, 없으면 MOVE_TO_PICKUP/INSPECTION/UNLOAD |
+| SORTING_AND_LOAD (진열) | 남은 진열 상품 있으면 다음 SORTING_AND_LOAD(이동 없음), 없으면 MOVE_TO_DISPLAY 경로 선예약 |
+| INSPECTION/UNLOAD/DISPLAY_SCAN/DISPLAY_PLACE | 이동 선계획 없음 |
 
 **실패 보상**: COBOT이 STOWING_ARM까지 갔다 최종 실패하면 — 미리 생성한 후속 task CANCELLED, 미리 예약한 path release, 실패 task FAILED, exception 기록.
 
@@ -198,7 +200,7 @@ class PathResult:
 - path 미등록: 차단 없음.
 - **도메인 제약**: 같은 노드에 두 로봇이 동시에 머물 수 없으므로 차단된 노드는 목적지여도 도달 불가.
 
-`MOVING_STATES = {MOVING_TO_PRODUCT/PICKUP/STOCK/STORAGE, RETURNING, DOCKING}`, `OCCUPYING_STATES = {WAITING_FOR_COBOT}`.
+`MOVING_STATES = {MOVING_TO_PRODUCT/PICKUP/STOCK/DISPLAY, RETURNING, DOCKING}`, `OCCUPYING_STATES = {WAITING_FOR_COBOT}`.
 
 ### 표준 호출 순서
 1. **단일 이동**: `reserve_path` → (feedback마다) `update_path_progress` → (종료) `release_path`.
@@ -230,10 +232,12 @@ zone 그래프/좌표는 `traffic_manager.py`의 `ZONE_GRAPH`/`DEFAULT_ZONE_COOR
 10. UNLOAD           RUNNING -> STOWING_ARM -> SUCCESS   order=PICKUP_READY, slot=OCCUPIED
 ```
 
-### 입고
+### 입고(진열)
 ```text
-1. MOVE_TO_STOCK   RUNNING -> SUCCESS (PICKY WAITING_FOR_COBOT)
-2. STOCKING_PICK   RUNNING -> STOWING_ARM(MOVE_TO_STORAGE 선예약) -> SUCCESS
-3. MOVE_TO_STORAGE RUNNING -> SUCCESS
-4. STOCKING_PLACE  RUNNING -> STOWING_ARM -> SUCCESS   stocking_item=COMPLETED, stock_qty 반영(계획값)
+1. MOVE_TO_STOCK    RUNNING -> SUCCESS (PICKY WAITING_FOR_COBOT)
+2. SORTING_AND_LOAD RUNNING -> STOWING_ARM -> SUCCESS   (진열 상품 수만큼 반복, stocking_item 기준)
+3. (마지막) SORTING_AND_LOAD STOWING_ARM -> MOVE_TO_DISPLAY 선예약
+4. MOVE_TO_DISPLAY  RUNNING -> SUCCESS (PICKY WAITING_FOR_COBOT)
+5. DISPLAY_SCAN     RUNNING -> STOWING_ARM -> SUCCESS
+6. DISPLAY_PLACE    RUNNING -> STOWING_ARM -> SUCCESS   stocking_item=COMPLETED, stock_qty 반영(계획값)
 ```

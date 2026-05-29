@@ -1,6 +1,6 @@
 # Fleet Manager 작업 현황 (담당 · 결정 · TODO)
 
-갱신: 2026-05-28. 설계·동작은 `docs/Fleet_manager.md`, 인터페이스 계약은 `docs/Fleet_manager_interface.md`.
+갱신: 2026-05-29. 설계·동작은 `docs/Fleet_manager.md`, 인터페이스 계약은 `docs/Fleet_manager_interface.md`.
 
 심각도: **S**(기능 결함) / **R**(견고성) / **C**(문서·정합) / **Q**(테스트).
 
@@ -11,8 +11,8 @@
 | 영역(파일) | 담당 |
 |---|---|
 | FleetRepository / TrafficManager / RobotStateMonitor / State Manager(PICKY) | 박서우 |
-| Web Service / TaskManager / RobotCommandGateway | 이명제 |
-| FleetApiServer / FleetManagerNode / `just_pick_it_db/services/*` / interfaces / docs | 공동 |
+| Web Service / FleetApiServer / TaskManager / RobotCommandGateway | 이명제 |
+| FleetManagerNode / `just_pick_it_db/services/*` / interfaces / docs | 공동 |
 
 상세 책임표는 `Fleet_manager.md` §2.
 
@@ -26,6 +26,7 @@
 | D2 | `robot_status` = **task 전이 전용** | `workflow_service`만 기록. 텔레메트리는 picky_state/battery/pose만 갱신 |
 | D3 | `/api/fleet/*` = **유지** | admin UI 검증/디버그용. Fleet API→Repository→DB라 정책 위배 아님 |
 | D4 | 입고 재고 = **계획값** | `stocking_item.stock_delta` 기반. 비전 실측(rack check) 미구현 → `complete_stocking` 제거 |
+| D5 | 입고 처리 = **진열(DISPLAY) 흐름** | 옛 `STOCKING_PICK`/`MOVE_TO_STORAGE`/`STOCKING_PLACE` 폐기. 창고 선별·적재는 주문용 `SORTING_AND_LOAD` 재사용(`stocking_item` 기준), `MOVE_TO_DISPLAY` + `DISPLAY_SCAN`(별도 task) + `DISPLAY_PLACE`로 진열. `DISPLAY_PLACE` SUCCESS 시 `stock_qty` 반영. 기준: `6_Data_Structure.pdf` / `5_Picky_State_Diagram.drawio.png` ver2.0 |
 
 ---
 
@@ -43,6 +44,14 @@
 | S2 | COBOT 디스패치 영구 스킵 버그 수정(매 cycle 재시도, 경고만 rate-limit) | 이명제 |
 | R2 | flow 종료 시 in-memory 임시 메모리 정리 | 이명제 |
 | C1/C2 | Fleet Manager 문서 3종으로 통합·최신화 (이 문서 포함) | 공동 |
+| C3 | D5(진열 흐름) 설계 문서 반영 (코드 반영은 별도, 아래 남은 작업) | 공동 |
+
+C3 수정 문서:
+- `docs/Fleet_manager.md` §4.3 입고(진열) 흐름 — 새 task 시퀀스, `stock_qty` 트리거를 `DISPLAY_PLACE`로
+- `docs/Fleet_manager_interface.md` §4 COBOT 명령 task / §5 PICKY 계약 / §6 COBOT 계약표·STOWING_ARM 선계획표 / §7 MOVING_STATES / §8 시나리오
+- `docs/Fleet_manager_TODO.md` D5 결정·이 항목 추가
+- `src/just_pick_it/pinky_amr_1/docs/state_manager.md` move_command 트리거 task 목록
+- `docs/ros2_driving_beginner_guide.md` 주행 task 표 / COBOT task 목록 / Milestone 8
 
 ### 남은 작업
 
@@ -52,6 +61,7 @@
 - [ ] Q: `fleet_repository`(상태 전이/트랜잭션) 단위 테스트 추가. recovery/traffic 테스트는 `test/test_recovery.py`에 존재.
 
 **이명제**
+- [ ] D5 진열 흐름 **코드 반영**(설계·문서는 C3로 완료): enum(`db/schema.sql`, `just_pick_it_db/models.py`), task_type 매핑(`robot_runtime_policy.py`, `workflow_service.py` — `DISPLAY_PLACE` SUCCESS 시 `apply_stocking_success`), `task_manager.py` `create_stocking_tasks_for_item` 재작성 + preplan 분기, `traffic_manager.py` MOVING_STATES, `pinky_amr_1/state_manager.py`, `web/app/static/js/admin.js` 라벨. Postgres enum 값 삭제 불가라 데모는 스키마 재생성 권장.
 - [ ] COBOT `ExecuteTask.action` 정의 + `send_cobot_task` 연결 + STOWING_ARM 감지 → `preplan_after_cobot_stowing` 호출. (현재 미연결 메서드: `preplan_after_cobot_stowing`)
 - [ ] Web LLM parser 실제 구현(`web/app/services/llm_client.py`).
 - [ ] Q: `task_manager` 추가 흐름 테스트, `fleet_api_server` 엔드포인트 테스트.

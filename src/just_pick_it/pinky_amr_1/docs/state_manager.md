@@ -29,7 +29,7 @@ PICKY 측 상태기계 노드. Fleet Manager 의 명령을 받아 `picky_state` 
 
 | Action | 인터페이스 | 트리거 task | 종료 |
 |---|---|---|---|
-| `move_command` | `just_pick_it_interfaces/MoveCommand` | MOVE_TO_PRODUCT / MOVE_TO_PICKUP / MOVE_TO_STOCK / MOVE_TO_STORAGE / RETURN_HOME | success / abort / canceled |
+| `move_command` | `just_pick_it_interfaces/MoveCommand` | MOVE_TO_PRODUCT / MOVE_TO_PICKUP / MOVE_TO_STOCK / MOVE_TO_DISPLAY / RETURN_HOME | success / abort / canceled |
 | `dock_command` | `just_pick_it_interfaces/DockCommand` | DOCK_IN | success / abort |
 
 ### Publisher

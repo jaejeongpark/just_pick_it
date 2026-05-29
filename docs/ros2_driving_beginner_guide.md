@@ -346,12 +346,12 @@ PICKY 주행 task:
 |---|---|---|
 | `MOVE_TO_PRODUCT` | 주문 상품 주차존 이동 | target zone pose로 이동 |
 | `MOVE_TO_PICKUP` | 픽업존 이동 | target zone pose로 이동 |
-| `MOVE_TO_STOCK` | 입고존 이동 | target zone pose로 이동 |
-| `MOVE_TO_STORAGE` | 적재 위치 이동 | target zone pose로 이동 |
+| `MOVE_TO_STOCK` | 창고(입고)존 이동 | target zone pose로 이동 |
+| `MOVE_TO_DISPLAY` | 진열 구역 이동 | target zone pose로 이동 |
 | `RETURN_HOME` | 대기/충전 구역 복귀 | standby 또는 dock 앞 pose로 이동 |
 | `CHARGE` | 충전 도킹 | 도킹 보정 루틴 실행 |
 
-COBOT task(`SORTING_AND_LOAD`, `INSPECTION`, `UNLOAD`, `STOCKING_PICK`, `STOCKING_PLACE`)는 PICKY 주행 runner가 직접 실행하지 않고 Fleet Manager/State Manager가 COBOT 쪽으로 분리해서 내려준다.
+COBOT task(`SORTING_AND_LOAD`, `INSPECTION`, `UNLOAD`, `DISPLAY_SCAN`, `DISPLAY_PLACE`)는 PICKY 주행 runner가 직접 실행하지 않고 Fleet Manager/State Manager가 COBOT 쪽으로 분리해서 내려준다.
 
 로봇 쪽에서 처음 구현할 runner는 DB를 직접 보면 안 됩니다. Fleet Manager가 내려주는 명령만 실행하고 결과를 Fleet Manager에 돌려주는 구조로 둡니다.
 
@@ -685,12 +685,12 @@ TF가 안 맞으면 제공 Nav2도 실패하고, 직접 만든 자율주행도 p
 - path를 따라가며 흔들림 없이 이동.
 - goal 근처에서 안정적으로 정지.
 
-### Milestone 8: Stocking / Return Home 연결
+### Milestone 8: Display(진열) / Return Home 연결
 
 목표:
 
-- `MOVE_TO_STOCK`, `MOVE_TO_STORAGE`, `RETURN_HOME` task를 주행 runner에 연결.
-- 입고 작업 중 COBOT 작업 대기 상태를 Fleet Manager에 보고.
+- `MOVE_TO_STOCK`, `MOVE_TO_DISPLAY`, `RETURN_HOME` task를 주행 runner에 연결.
+- 진열 작업 중 COBOT 작업 대기 상태를 Fleet Manager에 보고.
 - 예외 상황 발생 시 `/api/fleet/exceptions` 보고.
 
 검증:

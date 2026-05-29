@@ -47,7 +47,7 @@ FleetManagerNode
 | `TaskManager` | `task_manager.py` | 대기 작업 polling, task 생성/전이/dispatch, 재시작 복구 | 이명제 |
 | `RobotCommandGateway` | `robot_command_gateway.py` | task -> PICKY/COBOT Action/Service 변환, 콜백 연결 | 이명제 |
 | `Web Service` | `web/` | 화면 렌더링 + `/api/*` 프록시 (DB 코드 없음) | 이명제 |
-| `FleetApiServer` | `fleet_api_server.py` | REST/WebSocket endpoint 제공 | 공동 |
+| `FleetApiServer` | `fleet_api_server.py` | REST/WebSocket endpoint 제공 | 이명제 |
 | `FleetManagerNode` | `fleet_manager_node.py` | 컴포넌트 생성·배선·타이머·명령 전파 | 공동 |
 
 **수정 경계**: 위 표의 담당 외 파일은 직접 고치지 않고, 계약 변경이 필요하면 사유를 먼저 공유한다. 상태 전이 규칙(`just_pick_it_db/services/*`)은 양측 합의 영역.
@@ -108,16 +108,22 @@ POST /api/orders (Web Gateway 프록시)
 
 상품 task가 모두 SUCCESS → 남은 WAITING item 있으면 다음 상품 task, 없으면 pickup task(MOVE_TO_PICKUP/INSPECTION/UNLOAD) 생성. `UNLOAD` SUCCESS 시 `order=PICKUP_READY`, `pickup_slot=OCCUPIED`. 고객 수령(`POST /api/orders/{id}/complete`) 시 `COMPLETED` + slot `EMPTY`. pickup까지 끝나면 RETURN_HOME/DOCK_IN/CHARGE housekeeping을 이어 만든다(다음 작업이 있거나 배터리 충분하면 복귀 생략).
 
-### 4.3 입고 흐름
+### 4.3 입고(진열) 흐름
+
+입고 요청(`stocking_item`)은 창고에서 상품을 꺼내 진열 구역에 채우는 **진열 task** 흐름으로 처리한다. 모든 task는 주문과 무관하므로 `order_id`/`order_item_id` 없이 `stocking_item_id`로만 연결된다. 창고에서 상품을 선별·적재하는 단계는 주문 흐름의 `SORTING_AND_LOAD`를 재사용한다(`stocking_item` 기준).
 
 ```text
 POST /api/admin/llm/messages -> (web llm_client 파싱) -> action=STOCKING 이면
 POST /api/admin/stocking-items -> create_stocking_item(): status=REQUESTED
   -> (polling) TaskManager._process_new_stocking_item()
-     MOVE_TO_STOCK(PICKY) / STOCKING_PICK(COBOT) / MOVE_TO_STORAGE(PICKY) / STOCKING_PLACE(COBOT)
+     MOVE_TO_STOCK(PICKY)                창고 구역 이동
+     -> SORTING_AND_LOAD(COBOT) x N      창고 상품 선별 + PICKY 적재 (진열 상품 수만큼 반복)
+     -> MOVE_TO_DISPLAY(PICKY)           진열 구역 이동
+     -> DISPLAY_SCAN(COBOT)              진열대 빈자리 탐색
+     -> DISPLAY_PLACE(COBOT)             진열 상품 진열
 ```
 
-`STOCKING_PLACE` SUCCESS 시 `apply_stocking_success`가 **계획값**(`stocking_item.stock_delta`)으로 `product.stock_qty`를 반영한다(결정 D4: 비전 실측 경로 미구현).
+`DISPLAY_PLACE` SUCCESS 시 `apply_stocking_success`가 **계획값**(`stocking_item.stock_delta`)으로 `product.stock_qty`를 반영한다(결정 D4: 비전 실측 경로 미구현).
 
 ### 4.4 emergency / resume
 
