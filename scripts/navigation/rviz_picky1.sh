@@ -13,11 +13,15 @@
 #   - Add > By topic: /picky1/map (Map), /picky1/scan (LaserScan)
 #   - RobotModel 추가 시 Description Topic 은 /robot_description
 #   - 2D Pose Estimate 로 위치추정 (자동으로 /picky1/initialpose 로 발행됨)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source /opt/ros/jazzy/setup.bash
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/install/setup.bash"
+source "$SCRIPT_DIR/../../install/setup.bash"
 export ROS_DOMAIN_ID=25
 
-exec ros2 run rviz2 rviz2 --ros-args \
+# 저장된 RViz 설정(picky1.rviz)을 불러온다. Map Durability=Transient Local,
+# Fixed Frame, Map/LaserScan/RobotModel Display 가 미리 세팅돼 있어 매번 수동
+# 설정할 필요가 없다.
+exec ros2 run rviz2 rviz2 -d "$SCRIPT_DIR/picky1.rviz" --ros-args \
   -r /tf:=/picky1/tf \
   -r /tf_static:=/picky1/tf_static \
   -r /initialpose:=/picky1/initialpose \
