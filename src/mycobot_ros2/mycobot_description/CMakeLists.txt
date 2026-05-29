@@ -12,7 +12,6 @@ endif()
 
 # Locate and configure packages required by the project.
 find_package(ament_cmake REQUIRED)
-find_package(urdf_tutorial REQUIRED)
 
 # Copy necessary files to designated locations in the project
 install (
