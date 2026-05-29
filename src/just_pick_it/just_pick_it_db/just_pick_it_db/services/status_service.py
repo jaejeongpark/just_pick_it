@@ -95,6 +95,7 @@ def build_task_summary(db: Session, task: Task):
         "task_id": task.task_id,
         "order_id": task.order_id,
         "order_no": order.order_no if order else None,
+        "pickup_slot_id": order.pickup_slot_id if order else None,
         "order_item_id": task.order_item_id,
         "display_item_id": task.display_item_id,
         "product_id": product.product_id if product else None,
