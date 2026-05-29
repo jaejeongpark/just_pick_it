@@ -37,7 +37,7 @@ class AprilTagDetectorReal(Node):
         self.declare_parameter('calibration_file', '')
         self.declare_parameter('udp_port', 9870)
         self.declare_parameter('annotated_topic', '/apriltag/image_annotated')
-        self.declare_parameter('tag_size_m', 0.12)
+        self.declare_parameter('tag_size_m', 0.05)
         self.declare_parameter('base_frame', 'base_link')
         # Static transform: base_link -> front_camera_mount
         self.declare_parameter('camera_mount_x', 0.02)
@@ -159,8 +159,15 @@ class AprilTagDetectorReal(Node):
     def _get_T_camera_mount_camera_optical(self) -> np.ndarray:
         # camera_mount : x forward, y left,  z up
         # camera_optical: x right,  y down,  z forward (OpenCV convention)
-        # Calibration images were captured after cv2.flip(img, -1), so K is valid
-        # for the flipped image and this standard rotation applies without further correction.
+        #
+        # Pipeline: raw camera -> cv2.flip(-1) at receiver -> calibration K is
+        # for the flipped image. The solvePnP output is therefore in a "flipped
+        # optical frame" rotated 180 deg around z_optical from the standard
+        # optical convention. The rotation below maps that flipped optical frame
+        # directly to camera_mount (equivalent to R_standard @ R_z(180 deg)):
+        #   flipped_optical x -> +y_mount   (image right = mount left)
+        #   flipped_optical y -> +z_mount   (image down  = mount up)
+        #   flipped_optical z -> +x_mount   (forward)
         # camera_pitch_deg > 0: camera tilts upward (optical z gains +z_mount component).
         pitch = self._camera_pitch_rad
         cp = math.cos(pitch)
@@ -171,13 +178,18 @@ class AprilTagDetectorReal(Node):
             [  0, 1,   0],
             [ sp, 0,  cp],
         ], dtype=np.float64)
-        R_standard = np.array([
+        # R_flipped = np.array([
+        #     [ 0,  0,  1],
+        #     [ 1,  0,  0],
+        #     [ 0,  1,  0],
+        # ], dtype=np.float64)
+        R_flipped = np.array([
             [ 0,  0,  1],
-            [-1,  0,  0],
-            [ 0, -1,  0],
+            [ -1,  0,  0],
+            [ 0,  -1,  0],
         ], dtype=np.float64)
         T = np.eye(4, dtype=np.float64)
-        T[:3, :3] = R_pitch @ R_standard
+        T[:3, :3] = R_pitch @ R_flipped
         return T
 
     # ------------------------------------------------------------------
@@ -297,6 +309,7 @@ class AprilTagDetectorReal(Node):
                 self._obj_pts, img_pts, K, D,
                 flags=cv2.SOLVEPNP_IPPE_SQUARE,
             )
+            print(f'[tag {tag_id}] solvePnP 결과: ok={ok}, rvec={rvec.flatten()}, tvec={tvec.flatten()}')
             if not ok:
                 self.get_logger().warn(f'[tag {tag_id}] solvePnP 실패')
                 continue

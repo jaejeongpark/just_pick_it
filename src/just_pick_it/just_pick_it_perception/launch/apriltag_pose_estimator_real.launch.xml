@@ -1,0 +1,23 @@
+<?xml version='1.0' ?>
+
+<launch>
+    <arg name="udp_port"         default="5002"/>
+    <arg name="camera_pitch_deg" default="8.0"/>
+    <arg name="cmd_vel_topic"    default="/picky2/cmd_vel"/>
+    <arg name="rviz_config"      default="$(find-pkg-share just_pick_it_perception)/config/apriltag_pose_estimator_real.rviz"/>
+
+    <node pkg="just_pick_it_perception" exec="apriltag_map_tf_publisher"
+          name="apriltag_map_tf_publisher" output="screen"/>
+
+    <node pkg="just_pick_it_perception" exec="apriltag_detector_real"
+          name="apriltag_detector_real" output="screen">
+        <param name="udp_port"         value="$(var udp_port)"/>
+        <param name="camera_pitch_deg" value="$(var camera_pitch_deg)"/>
+    </node>
+
+    <executable cmd="gnome-terminal -- ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r /cmd_vel:=$(var cmd_vel_topic)"
+                output="screen"/>
+
+    <node pkg="rviz2" exec="rviz2" name="rviz2"
+          args="-d $(var rviz_config)" output="screen"/>
+</launch>
