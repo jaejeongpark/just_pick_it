@@ -32,6 +32,10 @@
         </node>
 
         <include file="$(find-pkg-share pinky_navigation)/launch/localization_launch.xml">
+            <!-- namespace는 위 group의 push-ros-namespace에서 이미 적용된다.
+                 부모 namespace가 자식으로 누수되어 자식이 또 push하면
+                 picky1 이 두 번 붙으므로 여기서 빈 값으로 막는다. -->
+            <arg name="namespace" value=""/>
             <arg name="params_file" value="$(var params_file)"/>
             <arg name="map" value="$(var map)"/>
             <arg name="use_sim_time" value="$(var use_sim_time)"/>
@@ -43,6 +47,10 @@
         </include>
 
         <include file="$(find-pkg-share pinky_navigation)/launch/navigation_launch.xml">
+            <!-- namespace는 위 group의 push-ros-namespace에서 이미 적용된다.
+                 부모 namespace가 자식으로 누수되어 자식이 또 push하면
+                 picky1 이 두 번 붙으므로 여기서 빈 값으로 막는다. -->
+            <arg name="namespace" value=""/>
             <arg name="params_file" value="$(var params_file)"/>
             <arg name="use_sim_time" value="$(var use_sim_time)"/>
             <arg name="autostart" value="$(var autostart)"/>

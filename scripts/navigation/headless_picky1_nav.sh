@@ -35,6 +35,10 @@ echo -e "\n[완료] 로봇 토픽 확인됨"
 
 echo "맵: $MAP_PATH"
 echo "=== [PICKY1] Nav2 기동 (namespace /picky1, ROS_DOMAIN_ID=$ROS_DOMAIN_ID) ==="
+# use_composition:=False : 이 보드(ARM)에서는 composable 노드 로드가 실패해
+# nav2_container 만 뜨고 map_server/amcl 이 안 올라온다. 노드를 개별 프로세스로
+# 띄워 안정적으로 기동한다.
 exec ros2 launch pinky_navigation bringup_launch.xml \
     namespace:=picky1 \
-    map:="$MAP_PATH"
+    map:="$MAP_PATH" \
+    use_composition:=False
