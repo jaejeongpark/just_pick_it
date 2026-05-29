@@ -35,7 +35,7 @@ FleetManagerNode
   ├── TrafficManager       PICKY 경로 탐색/예약/충돌 회피
   ├── RobotStateMonitor    로봇 텔레메트리 구독 -> DB + Traffic
   ├── RobotCommandGateway  task -> ROS2 Action/Service 명령
-  └── TaskManager          주문/입고 polling, task 생성/전이/dispatch
+  └── TaskManager          주문/진열 polling, task 생성/전이/dispatch
 ```
 
 | 모듈 | 파일 | 책임 | 담당 |
@@ -88,9 +88,9 @@ Web만 단독 기동은 `web/scripts/run.sh`(단, 화면 데이터는 Fleet Mana
 
 ### 4.1 5초 polling의 의미
 
-"무조건 5초마다 가져온다"가 아니라 "5초마다 확인하되, 새 작업을 받을 수 있는 PICKY가 IDLE/STANDBY일 때만 주문/입고 polling을 연다". 정상 task 진행은 polling을 기다리지 않고 Action result(`handle_task_result`)에서 즉시 다음 단계로 넘어간다. polling은 신규 작업과 막혀 있던 흐름을 다시 확인하는 보정 진입점이다.
+"무조건 5초마다 가져온다"가 아니라 "5초마다 확인하되, 새 작업을 받을 수 있는 PICKY가 IDLE/STANDBY일 때만 주문/진열 polling을 연다". 정상 task 진행은 polling을 기다리지 않고 Action result(`handle_task_result`)에서 즉시 다음 단계로 넘어간다. polling은 신규 작업과 막혀 있던 흐름을 다시 확인하는 보정 진입점이다.
 
-`check_waiting_work()` 한 사이클: 재시작 복구 재동기 → 충전 완료 정리 → 기존 주문/입고 flow 다음 task → 신규 ORDER_WAIT/REQUESTED 처리 → 실행 가능 ASSIGNED dispatch.
+`check_waiting_work()` 한 사이클: 재시작 복구 재동기 → 충전 완료 정리 → 기존 주문/진열 flow 다음 task → 신규 ORDER_WAIT/REQUESTED 처리 → 실행 가능 ASSIGNED dispatch.
 
 ### 4.2 주문 흐름
 
@@ -108,22 +108,22 @@ POST /api/orders (Web Gateway 프록시)
 
 상품 task가 모두 SUCCESS → 남은 WAITING item 있으면 다음 상품 task, 없으면 pickup task(MOVE_TO_PICKUP/INSPECTION/UNLOAD) 생성. `UNLOAD` SUCCESS 시 `order=PICKUP_READY`, `pickup_slot=OCCUPIED`. 고객 수령(`POST /api/orders/{id}/complete`) 시 `COMPLETED` + slot `EMPTY`. pickup까지 끝나면 RETURN_HOME/DOCK_IN/CHARGE housekeeping을 이어 만든다(다음 작업이 있거나 배터리 충분하면 복귀 생략).
 
-### 4.3 입고(진열) 흐름
+### 4.3 진열 흐름
 
-입고 요청(`stocking_item`)은 창고에서 상품을 꺼내 진열 구역에 채우는 **진열 task** 흐름으로 처리한다. 모든 task는 주문과 무관하므로 `order_id`/`order_item_id` 없이 `stocking_item_id`로만 연결된다. 창고에서 상품을 선별·적재하는 단계는 주문 흐름의 `SORTING_AND_LOAD`를 재사용한다(`stocking_item` 기준).
+진열 요청(`display_item`)은 창고에서 상품을 꺼내 진열 구역에 채우는 **진열 task** 흐름으로 처리한다. 모든 task는 주문과 무관하므로 `order_id`/`order_item_id` 없이 `display_item_id`로만 연결된다. 창고에서 상품을 선별·적재하는 단계는 주문 흐름의 `SORTING_AND_LOAD`를 재사용한다(`display_item` 기준).
 
 ```text
-POST /api/admin/llm/messages -> (web llm_client 파싱) -> action=STOCKING 이면
-POST /api/admin/stocking-items -> create_stocking_item(): status=REQUESTED
-  -> (polling) TaskManager._process_new_stocking_item()
+POST /api/admin/llm/messages -> (web llm_client 파싱) -> action=DISPLAY 이면
+POST /api/admin/display-items -> create_display_item(): status=REQUESTED
+  -> (polling) TaskManager._process_new_display_item()
      MOVE_TO_STOCK(PICKY)                창고 구역 이동
-     -> SORTING_AND_LOAD(COBOT) x N      창고 상품 선별 + PICKY 적재 (진열 상품 수만큼 반복)
+     -> SORTING_AND_LOAD(COBOT)          창고 상품 선별 + PICKY 적재
      -> MOVE_TO_DISPLAY(PICKY)           진열 구역 이동
      -> DISPLAY_SCAN(COBOT)              진열대 빈자리 탐색
      -> DISPLAY_PLACE(COBOT)             진열 상품 진열
 ```
 
-`DISPLAY_PLACE` SUCCESS 시 `apply_stocking_success`가 **계획값**(`stocking_item.stock_delta`)으로 `product.stock_qty`를 반영한다(결정 D4: 비전 실측 경로 미구현).
+`DISPLAY_PLACE` SUCCESS 시 `apply_display_success`가 **계획값**(`display_item.stock_delta`)으로 `product.stock_qty`를 반영한다(결정 D4: 비전 실측 경로 미구현).
 
 ### 4.4 emergency / resume
 

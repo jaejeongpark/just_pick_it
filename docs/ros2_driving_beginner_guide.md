@@ -276,7 +276,7 @@ bridge 기준:
 |---|---|
 | `web/WORKFLOW.md` | 주문/task 상태 전이 기준 문서 |
 | `web/app/routers/fleet_router.py` | Fleet Manager가 호출할 Fleet API |
-| `web/app/services/workflow_service.py` | task 상태 결과가 order/robot/stocking 상태에 반영되는 정책 |
+| `web/app/services/workflow_service.py` | task 상태 결과가 order/robot/display 상태에 반영되는 정책 |
 
 Fleet Manager가 우선 써야 하는 API:
 
@@ -346,7 +346,7 @@ PICKY 주행 task:
 |---|---|---|
 | `MOVE_TO_PRODUCT` | 주문 상품 주차존 이동 | target zone pose로 이동 |
 | `MOVE_TO_PICKUP` | 픽업존 이동 | target zone pose로 이동 |
-| `MOVE_TO_STOCK` | 창고(입고)존 이동 | target zone pose로 이동 |
+| `MOVE_TO_STOCK` | 창고존 이동 | target zone pose로 이동 |
 | `MOVE_TO_DISPLAY` | 진열 구역 이동 | target zone pose로 이동 |
 | `RETURN_HOME` | 대기/충전 구역 복귀 | standby 또는 dock 앞 pose로 이동 |
 | `CHARGE` | 충전 도킹 | 도킹 보정 루틴 실행 |

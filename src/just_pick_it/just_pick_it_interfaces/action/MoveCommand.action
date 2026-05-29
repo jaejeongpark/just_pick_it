@@ -1,7 +1,7 @@
 # Task Manager가 State Manager에게 이동 명령을 전달하는 Action
 
 # Goal: 이동 명령 + waypoint 경로
-string task_type                        # MOVE_TO_PRODUCT / MOVE_TO_PICKUP / MOVE_TO_STOCK / MOVE_TO_STORAGE / RETURN_HOME
+string task_type                        # MOVE_TO_PRODUCT / MOVE_TO_PICKUP / MOVE_TO_STOCK / MOVE_TO_DISPLAY / RETURN_HOME
 geometry_msgs/PoseStamped[] waypoints   # Traffic Manager가 생성한 거점 경로 (순서대로)
 ---
 # Result

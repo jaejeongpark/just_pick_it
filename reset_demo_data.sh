@@ -23,7 +23,7 @@ TRUNCATE TABLE
   task_event,
   exception_log,
   task,
-  stocking_item,
+  display_item,
   order_item,
   orders,
   robot,

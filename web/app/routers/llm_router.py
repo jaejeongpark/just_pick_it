@@ -33,29 +33,29 @@ def _fleet_api_url(path: str) -> str:
     return urljoin(FLEET_API_BASE_URL.rstrip("/") + "/", path.lstrip("/"))
 
 
-async def _create_stocking_item(parsed: dict) -> dict:
+async def _create_display_item(parsed: dict) -> dict:
     product_id = parsed.get("product_id")
     if product_id is None:
         return {
             **parsed,
             "result": "error",
-            "message": "입고 명령은 파싱됐지만 product_id가 없습니다. LLM parser가 product_id를 반환해야 합니다.",
+            "message": "진열 명령은 파싱됐지만 product_id가 없습니다. LLM parser가 product_id를 반환해야 합니다.",
         }
 
     payload = {
         "product_id": product_id,
         "requested_quantity": parsed.get("requested_quantity"),
-        "stocking_policy": parsed.get("stocking_policy"),
+        "display_policy": parsed.get("display_policy"),
     }
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(_fleet_api_url("/api/admin/stocking-items"), json=payload)
+            response = await client.post(_fleet_api_url("/api/admin/display-items"), json=payload)
     except httpx.RequestError as exc:
         return {
             **parsed,
             "result": "error",
-            "message": f"Fleet API 입고 요청 생성 실패: {exc}",
+            "message": f"Fleet API 진열 요청 생성 실패: {exc}",
         }
 
     if response.status_code >= 400:
@@ -66,24 +66,24 @@ async def _create_stocking_item(parsed: dict) -> dict:
         return {
             **parsed,
             "result": "error",
-            "message": f"Fleet API 입고 요청 생성 실패: {detail}",
+            "message": f"Fleet API 진열 요청 생성 실패: {detail}",
         }
 
-    stocking_item = response.json()
+    display_item = response.json()
     return {
         **parsed,
         "result": "ok",
         "message": (
-            f"입고 요청이 생성되었습니다. "
-            f"stocking_item_id={stocking_item.get('stocking_item_id')}, "
-            f"상품={stocking_item.get('product_name') or parsed.get('product_name') or parsed.get('product_id')}"
+            f"진열 요청이 생성되었습니다. "
+            f"display_item_id={display_item.get('display_item_id')}, "
+            f"상품={display_item.get('product_name') or parsed.get('product_name') or parsed.get('product_id')}"
         ),
-        "stocking_item_id": stocking_item.get("stocking_item_id"),
-        "product_id": stocking_item.get("product_id", parsed.get("product_id")),
-        "product_name": stocking_item.get("product_name", parsed.get("product_name")),
-        "requested_quantity": stocking_item.get("requested_quantity", parsed.get("requested_quantity")),
-        "stocking_policy": stocking_item.get("stocking_policy", parsed.get("stocking_policy")),
-        "stocking_status": stocking_item.get("status"),
+        "display_item_id": display_item.get("display_item_id"),
+        "product_id": display_item.get("product_id", parsed.get("product_id")),
+        "product_name": display_item.get("product_name", parsed.get("product_name")),
+        "requested_quantity": display_item.get("requested_quantity", parsed.get("requested_quantity")),
+        "display_policy": display_item.get("display_policy", parsed.get("display_policy")),
+        "display_status": display_item.get("status"),
     }
 
 
@@ -96,13 +96,13 @@ async def create_llm_message(body: AdminLlmMessageIn) -> dict:
     """관리자 AI 명령을 처리한다.
 
     LLM parser/client 는 Web Gateway 에 남긴다. 다만 DB 쓰기는 직접 하지 않고,
-    STOCKING 으로 파싱된 경우 Fleet API 에 stocking_item 생성을 위임한다.
+    DISPLAY 로 파싱된 경우 Fleet API 에 display_item 생성을 위임한다.
     """
     parsed = build_llm_message(body.message)
     if parsed.get("result") == "error":
         return parsed
 
-    if str(parsed.get("action") or "").upper() == "STOCKING":
-        return await _create_stocking_item(parsed)
+    if str(parsed.get("action") or "").upper() == "DISPLAY":
+        return await _create_display_item(parsed)
 
     return parsed

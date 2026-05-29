@@ -97,7 +97,7 @@ DB Health   : http://localhost:8000/api/health/db
 - 브라우저는 `http://localhost:8000/api/*`만 호출한다.
 - Web Gateway는 `/api/*` HTTP 요청과 `/api/*` WebSocket을 Fleet API로 전달한다.
 - Web Gateway는 DB session, SQLAlchemy model, DB service를 import하지 않는다.
-- LLM route는 Web Gateway에 남긴다. 단, 입고 요청 생성은 Fleet API에 위임한다.
+- LLM route는 Web Gateway에 남긴다. 단, 진열 요청 생성은 Fleet API에 위임한다.
 
 ## LLM 담당자 구현 지점
 
@@ -107,15 +107,15 @@ LLM 담당자는 다음 파일만 우선 구현하면 된다.
 web/app/services/llm_client.py
 ```
 
-반환값이 아래처럼 `action="STOCKING"`이면 Web Gateway가 Fleet API에 입고 요청을 생성한다.
+반환값이 아래처럼 `action="DISPLAY"`이면 Web Gateway가 Fleet API에 진열 요청을 생성한다.
 
 ```json
 {
   "result": "ok",
-  "action": "STOCKING",
+  "action": "DISPLAY",
   "product_id": 1,
   "requested_quantity": 3,
-  "stocking_policy": "REQUESTED_QUANTITY"
+  "display_policy": "REQUESTED_QUANTITY"
 }
 ```
 
@@ -123,7 +123,7 @@ web/app/services/llm_client.py
 
 ## 데모 데이터 초기화
 
-테스트 주문/입고/task를 지우고 seed 기준으로 되돌리려면 루트에서 실행한다.
+테스트 주문/진열/task를 지우고 seed 기준으로 되돌리려면 루트에서 실행한다.
 
 ```bash
 cd ~/just_pick_it

@@ -168,7 +168,7 @@ colcon build --symlink-install --packages-up-to mycobot_moveit_config
 |---|---|---|
 | `./reset_ws.sh` | 최초 세팅, 환경 재설정, 의존성/빌드 상태를 깨끗하게 맞출 때 | `web/.venv`, PostgreSQL DB, rosdep, colcon 전체 symlink build를 순서대로 수행 |
 | `./run_all.sh` | 평소 로컬 통합 실행 | Fleet Manager/Fleet API `:8100`을 띄우고 Web Gateway `:8000`을 실행 |
-| `./reset_demo_data.sh` | 데모 중 주문/task/입고 데이터만 seed 기준으로 되돌릴 때 | DB schema는 유지하고 demo table을 비운 뒤 `db/seed.sql` 재적용 |
+| `./reset_demo_data.sh` | 데모 중 주문/task/진열 데이터만 seed 기준으로 되돌릴 때 | DB schema는 유지하고 demo table을 비운 뒤 `db/seed.sql` 재적용 |
 
 권장 순서:
 

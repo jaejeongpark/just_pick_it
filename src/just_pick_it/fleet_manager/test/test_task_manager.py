@@ -3,9 +3,15 @@
 ROS Node/DB/Action server는 fake 객체로 대체해 TaskManager 정책만 검증한다.
 실행 예: pytest src/just_pick_it/fleet_manager/test/test_task_manager.py -v
 """
+import sys
+import types
 from unittest.mock import MagicMock
 
 import pytest
+
+
+sys.modules.setdefault("rclpy", types.ModuleType("rclpy"))
+sys.modules.setdefault("rclpy.node", types.SimpleNamespace(Node=object))
 
 from fleet_manager.task_manager import CHARGE_BATTERY_THRESHOLD, TaskManager
 
@@ -13,18 +19,19 @@ from fleet_manager.task_manager import CHARGE_BATTERY_THRESHOLD, TaskManager
 class FakeRepo:
     """TaskManager 테스트에 필요한 FleetRepository 최소 fake."""
 
-    def __init__(self, *, tasks=None, orders=None, stocking_items=None):
+    def __init__(self, *, tasks=None, orders=None, display_items=None):
         self.tasks = list(tasks or [])
         self.orders = list(orders or [])
-        self.stocking_items = list(stocking_items or [])
+        self.display_items = list(display_items or [])
         self.updated_tasks = []
+        self.created_tasks = []
         self.exceptions = []
 
     def list_waiting_orders(self):
         return list(self.orders)
 
-    def list_requested_stocking_items(self):
-        return list(self.stocking_items)
+    def list_requested_display_items(self):
+        return list(self.display_items)
 
     def list_order_tasks(self, order_id: int):
         return [task for task in self.tasks if task.get("order_id") == order_id]
@@ -61,7 +68,24 @@ class FakeRepo:
         return kwargs
 
     def get_zone_map(self):
-        return {}
+        names = [
+            "STANDBY_ZONE_1",
+            "STOCK_ZONE",
+            "STOCK_SLOT",
+            "PRODUCT_ZONE_1",
+            "PRODUCT_SLOT_1",
+        ]
+        return {name: {"zone_id": index + 1, "zone_name": name} for index, name in enumerate(names)}
+
+    def create_tasks_bulk(self, tasks):
+        base_id = len(self.tasks) + 1
+        task_ids = []
+        for index, task in enumerate(tasks):
+            new_task = {"task_id": base_id + index, **task}
+            self.created_tasks.append(new_task)
+            self.tasks.append(new_task)
+            task_ids.append(new_task["task_id"])
+        return {"status": "ok", "task_ids": task_ids}
 
 
 class FakeGateway:
@@ -97,15 +121,15 @@ def make_manager(mock_node, repo, *, gateway=None, traffic=None):
     )
 
 
-def test_collect_waiting_work_prioritizes_stocking_before_default_orders(mock_node):
+def test_collect_waiting_work_prioritizes_display_before_default_orders(mock_node):
     repo = FakeRepo(
         orders=[
             {"order_id": 20},
             {"order_id": 30, "priority": 3},
         ],
-        stocking_items=[
-            {"stocking_item_id": 10},
-            {"stocking_item_id": 40, "priority": 5},
+        display_items=[
+            {"display_item_id": 10},
+            {"display_item_id": 40, "priority": 5},
         ],
     )
     manager = make_manager(mock_node, repo)
@@ -113,11 +137,40 @@ def test_collect_waiting_work_prioritizes_stocking_before_default_orders(mock_no
     requests = manager._collect_waiting_work()
 
     assert [(item.kind, item.work_id, item.priority) for item in requests] == [
-        ("STOCKING", 10, 1),
+        ("DISPLAY", 10, 1),
         ("ORDER", 20, 2),
         ("ORDER", 30, 3),
-        ("STOCKING", 40, 5),
+        ("DISPLAY", 40, 5),
     ]
+
+
+def test_create_display_tasks_uses_display_scenario_sequence(mock_node):
+    repo = FakeRepo()
+    manager = make_manager(mock_node, repo)
+
+    task_ids = manager.create_display_tasks_for_item(
+        {
+            "display_item_id": 7,
+            "picky_name": "PICKY1",
+            "cobot_name": "COBOT1",
+            "source_zone_name": "STANDBY_ZONE_1",
+            "stock_zone_name": "STOCK_ZONE",
+            "stock_slot_name": "STOCK_SLOT",
+            "product_zone_name": "PRODUCT_ZONE_1",
+            "product_slot_name": "PRODUCT_SLOT_1",
+            "priority": 1,
+        }
+    )
+
+    assert task_ids == [1, 2, 3, 4, 5]
+    assert [task["task_type"] for task in repo.created_tasks] == [
+        "MOVE_TO_STOCK",
+        "SORTING_AND_LOAD",
+        "MOVE_TO_DISPLAY",
+        "DISPLAY_SCAN",
+        "DISPLAY_PLACE",
+    ]
+    assert all(task["display_item_id"] == 7 for task in repo.created_tasks)
 
 
 def test_dispatch_cobot_task_retries_when_gateway_is_not_ready(mock_node):

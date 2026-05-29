@@ -8,8 +8,8 @@ def build_llm_message(
     """Admin AI 명령 파싱 진입점.
 
     LLM 담당자는 이 함수만 실제 구현으로 교체하면 된다.
-    반환값이 action=STOCKING 이고 product_id/requested_quantity 등이 채워지면
-    llm_router 가 Fleet API 에 stocking_item 생성을 위임한다.
+    반환값이 action=DISPLAY 이고 product_id/requested_quantity 등이 채워지면
+    llm_router 가 Fleet API 에 display_item 생성을 위임한다.
     """
 
     return {
@@ -19,7 +19,7 @@ def build_llm_message(
         "product_id": None,
         "product_name": None,
         "requested_quantity": None,
-        "stocking_policy": None,
-        "stocking_item_id": None,
+        "display_policy": None,
+        "display_item_id": None,
         "provider": "stub",
     }

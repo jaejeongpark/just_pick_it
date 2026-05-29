@@ -78,7 +78,7 @@ PATCH  /api/fleet/pickup-slots/{slot_id}
 이 API들은 외부 디버깅/관리용으로 열려 있지만, 일반 운영 흐름에서는 `TaskManager`와
 `FleetRepository`가 프로세스 내부에서 직접 상태를 갱신한다.
 
-## LLM 입고 명령
+## LLM 진열 명령
 
 ```http
 POST /api/admin/llm/messages
@@ -88,19 +88,19 @@ POST /api/admin/llm/messages
 
 ```json
 {
-  "message": "우유 3개 입고"
+  "message": "우유 3개 진열"
 }
 ```
 
-현재 `llm_client.py`는 stub이다. 담당자가 `action="STOCKING"` 형태로 파싱하면
-Web Gateway가 Fleet API `POST /api/admin/stocking-items`를 호출한다.
+현재 `llm_client.py`는 stub이다. 담당자가 `action="DISPLAY"` 형태로 파싱하면
+Web Gateway가 Fleet API `POST /api/admin/display-items`를 호출한다.
 
-직접 입고 요청 생성:
+직접 진열 요청 생성:
 
 ```bash
-curl -X POST http://localhost:8000/api/admin/stocking-items \
+curl -X POST http://localhost:8000/api/admin/display-items \
   -H 'Content-Type: application/json' \
-  -d '{"product_id":1,"requested_quantity":3,"stocking_policy":"REQUESTED_QUANTITY"}'
+  -d '{"product_id":1,"requested_quantity":3,"display_policy":"REQUESTED_QUANTITY"}'
 ```
 
 ## WebSocket

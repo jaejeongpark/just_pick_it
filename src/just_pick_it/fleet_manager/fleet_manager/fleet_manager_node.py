@@ -23,7 +23,7 @@ class FleetManagerNode(Node):
     - TrafficManager: PICKY 경로 탐색/예약
     - RobotStateMonitor: PICKY 상태 구독
     - RobotCommandGateway: 로봇 Action/Service 명령 송신
-    - TaskManager: 주문/입고 요청을 task 흐름으로 변환
+    - TaskManager: 주문/진열 요청을 task 흐름으로 변환
     - FleetApiServer: Web Gateway가 호출하는 HTTP/WebSocket API
     """
 
@@ -150,7 +150,7 @@ class FleetManagerNode(Node):
     # =====================================
 
     def _poll_waiting_work_if_picky_idle(self) -> None:
-        """PICKY가 IDLE/STANDBY일 때만 대기 주문/입고 polling을 수행한다."""
+        """PICKY가 IDLE/STANDBY일 때만 대기 주문/진열 polling을 수행한다."""
         if not self.task_manager.has_idle_picky_for_waiting_work():
             return
         self.task_manager.check_waiting_work()

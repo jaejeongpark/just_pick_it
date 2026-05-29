@@ -94,18 +94,18 @@ const TASK_TYPE_SEQUENCE = [
   "INSPECTION",
   "UNLOAD",
   "MOVE_TO_STOCK",
-  "STOCKING_PICK",
-  "MOVE_TO_STORAGE",
-  "STOCKING_PLACE",
+  "MOVE_TO_DISPLAY",
+  "DISPLAY_SCAN",
+  "DISPLAY_PLACE",
   "RETURN_HOME",
   "DOCK_IN",
   "CHARGE",
 ];
-const STOCKING_TASK_TYPES = new Set([
+const DISPLAY_TASK_TYPES = new Set([
   "MOVE_TO_STOCK",
-  "STOCKING_PICK",
-  "MOVE_TO_STORAGE",
-  "STOCKING_PLACE",
+  "MOVE_TO_DISPLAY",
+  "DISPLAY_SCAN",
+  "DISPLAY_PLACE",
 ]);
 const ROBOT_DISPLAY_NAMES = {
   PICKY1: "PICKY 1",
@@ -129,7 +129,7 @@ const PICKY_STATES = [
   "WAITING_FOR_COBOT",
   "MOVING_TO_PICKUP",
   "MOVING_TO_STOCK",
-  "MOVING_TO_STORAGE",
+  "MOVING_TO_DISPLAY",
   "RETURNING",
   "DOCKING",
   "ERROR_RECOVERY",
@@ -140,9 +140,8 @@ const COBOT_STATES = [
   "LOADING",
   "INSPECTING",
   "UNLOADING",
-  "STOCKING_SORTING",
-  "STOCKING_LOADING",
-  "STOCKING_PLACING",
+  "SCANNING",
+  "PLACING",
   "STOWING_ARM",
   "SAFETY_STOPPED",
 ];
@@ -167,10 +166,10 @@ const statusText = {
   MOVE_TO_PICKUP: "픽업존 이동",
   INSPECTION: "검수",
   UNLOAD: "하차",
-  MOVE_TO_STOCK: "입고존 이동",
-  STOCKING_PICK: "입고 선별/상차",
-  MOVE_TO_STORAGE: "적재 위치 이동",
-  STOCKING_PLACE: "입고상품 적재",
+  MOVE_TO_STOCK: "창고존 이동",
+  MOVE_TO_DISPLAY: "진열 구역 이동",
+  DISPLAY_SCAN: "진열대 스캔",
+  DISPLAY_PLACE: "상품 진열",
   DOCK_IN: "도킹",
   CHARGE: "충전",
   RETURN_HOME: "복귀",
@@ -186,14 +185,13 @@ const statusText = {
   MOVING_TO_PRODUCT: "상품 위치 이동 중",
   WAITING_FOR_COBOT: "코봇 작업 대기",
   MOVING_TO_PICKUP: "픽업존 이동 중",
-  MOVING_TO_STOCK: "입고존 이동 중",
-  MOVING_TO_STORAGE: "적재 위치 이동 중",
+  MOVING_TO_STOCK: "창고존 이동 중",
+  MOVING_TO_DISPLAY: "진열 구역 이동 중",
   STANDBY: "대기",
   LOADING: "상차 중",
   UNLOADING: "하차 중",
-  STOCKING_SORTING: "입고상품 선별 중",
-  STOCKING_LOADING: "입고상품 상차 중",
-  STOCKING_PLACING: "입고상품 적재 중",
+  SCANNING: "진열대 스캔 중",
+  PLACING: "상품 진열 중",
   STOWING_ARM: "팔 기본 자세 복귀",
   SAFETY_STOPPED: "안전 정지",
   CHARGING: "충전",
@@ -220,9 +218,8 @@ const robotStateText = {
   LOADING: "상품 상차",
   INSPECTING: "상품 검수",
   UNLOADING: "상품 하차",
-  STOCKING_SORTING: "입고 상품 선별",
-  STOCKING_LOADING: "입고 상품 상차",
-  STOCKING_PLACING: "입고상품 적재 중",
+  SCANNING: "진열대 스캔",
+  PLACING: "상품 진열 중",
   STOWING_ARM: "팔 기본 자세 복귀",
 };
 
@@ -325,8 +322,8 @@ function taskProductName(task) {
   return task?.product_name || orderItem?.product_name || null;
 }
 
-function isStockingTaskType(taskType) {
-  return STOCKING_TASK_TYPES.has(taskType);
+function isDisplayTaskType(taskType) {
+  return DISPLAY_TASK_TYPES.has(taskType);
 }
 
 function taskDisplayTitle(task) {
@@ -339,10 +336,10 @@ function taskDisplayTitle(task) {
   const productTaskLabels = {
     MOVE_TO_PRODUCT: `${productName} 위치 이동`,
     SORTING_AND_LOAD: `${productName} 선별/상차`,
-    MOVE_TO_STOCK: `${productName} 입고존 이동`,
-    STOCKING_PICK: `${productName} 입고 선별/상차`,
-    MOVE_TO_STORAGE: `${productName} 적재 위치 이동`,
-    STOCKING_PLACE: `${productName} 입고상품 적재`,
+    MOVE_TO_STOCK: `${productName} 창고존 이동`,
+    MOVE_TO_DISPLAY: `${productName} 진열 구역 이동`,
+    DISPLAY_SCAN: `${productName} 진열대 스캔`,
+    DISPLAY_PLACE: `${productName} 진열`,
   };
 
   return productTaskLabels[task.task_type] || label(task.task_type);
@@ -357,8 +354,8 @@ function taskTargetLabel(task) {
     return `주문 #${task.order_id}`;
   }
 
-  if (task?.stocking_item_id) {
-    return `입고 #${task.stocking_item_id}`;
+  if (task?.display_item_id) {
+    return `진열 #${task.display_item_id}`;
   }
 
   return `Task #${task?.task_id ?? "-"}`;
@@ -369,8 +366,8 @@ function taskReferenceLabel(task) {
     return `order_item #${task.order_item_id}`;
   }
 
-  if (task?.stocking_item_id) {
-    return `stocking_item #${task.stocking_item_id}`;
+  if (task?.display_item_id) {
+    return `display_item #${task.display_item_id}`;
   }
 
   return "단독 작업";
@@ -399,8 +396,8 @@ function taskQuantityLabel(task) {
   return "-";
 }
 
-function recommendedTaskPriority(taskType, stockingItemId = null) {
-  return isStockingTaskType(taskType) || Boolean(stockingItemId) ? 1 : 2;
+function recommendedTaskPriority(taskType, displayItemId = null) {
+  return isDisplayTaskType(taskType) || Boolean(displayItemId) ? 1 : 2;
 }
 
 function productStorageLabel(product) {
@@ -2216,8 +2213,8 @@ function renderTaskCreateForm(zones) {
         <input id="new-task-order-item-id" type="number" min="1" placeholder="없으면 비움">
       </div>
       <div>
-        <label for="new-task-stocking-item-id">stocking_item_id</label>
-        <input id="new-task-stocking-item-id" type="number" min="1" placeholder="없으면 비움">
+        <label for="new-task-display-item-id">display_item_id</label>
+        <input id="new-task-display-item-id" type="number" min="1" placeholder="없으면 비움">
       </div>
       <div>
         <label for="new-task-priority">priority</label>
@@ -2242,8 +2239,8 @@ function renderTaskCreateForm(zones) {
 
 function syncTaskCreatePriorityDefault({ force = false } = {}) {
   const taskType = modalBody?.querySelector("#new-task-type")?.value;
-  const stockingItemId = modalBody
-    ?.querySelector("#new-task-stocking-item-id")
+  const displayItemId = modalBody
+    ?.querySelector("#new-task-display-item-id")
     ?.value.trim();
   const priorityInput = modalBody?.querySelector("#new-task-priority");
 
@@ -2251,7 +2248,7 @@ function syncTaskCreatePriorityDefault({ force = false } = {}) {
     return;
   }
 
-  const recommended = String(recommendedTaskPriority(taskType, stockingItemId));
+  const recommended = String(recommendedTaskPriority(taskType, displayItemId));
   const current = priorityInput.value;
 
   if (force || current === "" || current === "1" || current === "2") {
@@ -2324,7 +2321,7 @@ function taskSearchText(task) {
     task.order_no,
     task.order_id,
     task.order_item_id,
-    task.stocking_item_id,
+    task.display_item_id,
     assignedRobotLabel(task),
     task.status,
     label(task.status),
@@ -2929,9 +2926,9 @@ async function createTask() {
       "order_item_id",
       { min: 1 },
     ),
-    stocking_item_id: taskIntegerOrNull(
-      "#new-task-stocking-item-id",
-      "stocking_item_id",
+    display_item_id: taskIntegerOrNull(
+      "#new-task-display-item-id",
+      "display_item_id",
       { min: 1 },
     ),
     priority: taskIntegerOrNull("#new-task-priority", "priority", {
@@ -2943,9 +2940,9 @@ async function createTask() {
     result_message: resultMessage || null,
   };
 
-  if (task.stocking_item_id && (task.order_id || task.order_item_id)) {
+  if (task.display_item_id && (task.order_id || task.order_item_id)) {
     throw new Error(
-      "입고 작업은 order_id/order_item_id와 같이 만들 수 없습니다.",
+      "진열 작업은 order_id/order_item_id와 같이 만들 수 없습니다.",
     );
   }
 
@@ -3228,11 +3225,11 @@ function buildLlmFailureReply(command) {
   const lowerCommand = command.toLowerCase();
 
   if (
-    lowerCommand.includes("입고") ||
-    lowerCommand.includes("stocking") ||
-    lowerCommand.includes("stock in")
+    lowerCommand.includes("진열") ||
+    lowerCommand.includes("display") ||
+    lowerCommand.includes("place")
   ) {
-    return "입고 명령을 처리하지 못했습니다. AI 메시지 API와 Fleet Manager 상태를 확인해주세요.";
+    return "진열 명령을 처리하지 못했습니다. AI 메시지 API와 Fleet Manager 상태를 확인해주세요.";
   }
 
   if (lowerCommand.includes("재고") || lowerCommand.includes("stock")) {
@@ -3499,7 +3496,7 @@ taskCreateButton?.addEventListener("click", () => {
 });
 taskViewButton?.addEventListener("click", openTaskManager);
 modalBody?.addEventListener("input", (event) => {
-  if (event.target.id === "new-task-stocking-item-id") {
+  if (event.target.id === "new-task-display-item-id") {
     syncTaskCreatePriorityDefault();
     return;
   }
