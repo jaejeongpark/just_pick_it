@@ -537,7 +537,19 @@ colcon build --packages-select pinky_navigation pinky_amr_1   # 또는 ./build_a
 source install/setup.bash
 ```
 
-### B.2 보드 3세션 (각각 별도 SSH 또는 tmux 창)
+### B.2 보드 주행 스택 기동
+
+**한 번에 (권장):** tmux 세션 하나에 bringup/nav/state 3개 창을 자동으로 띄운다.
+
+```bash
+bash scripts/navigation/run_picky1_all.sh
+```
+
+- 창 전환 `Ctrl+b` 0/1/2, 떼기(노드 유지) `Ctrl+b d`, 다시 붙기 `tmux attach -t picky1`,
+  전체 종료 `tmux kill-session -t picky1`.
+- tmux 가 없으면 `sudo apt install -y tmux`. SSH 가 끊겨도 노드가 살아있다.
+
+**또는 수동으로 3세션** (각각 별도 SSH/tmux 창):
 
 ```bash
 # 공통 헤더는 각 스크립트가 알아서 source/도메인 설정함
@@ -546,7 +558,7 @@ bash scripts/navigation/headless_picky1_nav.sh       # 세션2: Nav2 (namespace=
 bash scripts/navigation/headless_picky1_state.sh     # 세션3: State Manager (이동/도킹 액션)
 ```
 
-- 세션2는 `/picky1/scan`, `/picky1/odom` 이 올라올 때까지 자동 대기 후 Nav2 를 띄운다.
+- 세션2(nav)는 `/picky1/scan`, `/picky1/odom` 이 올라올 때까지 자동 대기 후 Nav2 를 띄운다.
 - 세션2는 내부적으로 `namespace:=picky1 use_composition:=False` 로 띄운다. ARM 보드에서는
   composition(컨테이너 한 개에 합쳐 로드)이 실패해 컨테이너만 뜨고 노드가 0개가 되므로 끈다.
 
