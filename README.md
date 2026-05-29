@@ -20,7 +20,7 @@ just_pick_it/
 ├── db/                     # PostgreSQL schema 및 seed 데이터 (별도 README 참고)
 ├── docs/                   # 요구사항·시스템 아키텍처·시나리오 등 설계 문서 PDF
 ├── reset_ws.sh             # 워크스페이스 전체 재세팅
-├── reset_demo_data.sh      # 데모 DB 데이터만 seed 기준으로 초기화
+├── reset_demo_data.sh      # DB schema + seed 빠른 초기화
 ├── run_all.sh              # Fleet Manager + Web Gateway 통합 실행
 ├── build/                  # colcon 빌드 출력 (gitignore)
 ├── install/                # colcon 설치 공간 (gitignore)
@@ -168,7 +168,7 @@ colcon build --symlink-install --packages-up-to mycobot_moveit_config
 |---|---|---|
 | `./reset_ws.sh` | 최초 세팅, 환경 재설정, 의존성/빌드 상태를 깨끗하게 맞출 때 | `web/.venv`, PostgreSQL DB, rosdep, colcon 전체 symlink build를 순서대로 수행 |
 | `./run_all.sh` | 평소 로컬 통합 실행 | Fleet Manager/Fleet API `:8100`을 띄우고 Web Gateway `:8000`을 실행 |
-| `./reset_demo_data.sh` | 데모 중 주문/task/진열 데이터만 seed 기준으로 되돌릴 때 | DB schema는 유지하고 demo table을 비운 뒤 `db/seed.sql` 재적용 |
+| `./reset_demo_data.sh` | 빌드 없이 DB만 빠르게 최신 schema + seed 기준으로 되돌릴 때 | public schema를 재생성하고 `db/schema.sql` + `db/seed.sql`을 적용 |
 
 권장 순서:
 
@@ -179,7 +179,7 @@ colcon build --symlink-install --packages-up-to mycobot_moveit_config
 # 평소 통합 실행
 ./run_all.sh
 
-# 데모 데이터만 초기화
+# DB만 빠르게 초기화
 ./reset_demo_data.sh
 ```
 

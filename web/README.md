@@ -121,13 +121,13 @@ web/app/services/llm_client.py
 
 그 외 라우터/DB/FleetRepository는 LLM 담당자가 직접 건드리지 않는다.
 
-## 데모 데이터 초기화
+## DB 빠른 초기화
 
-테스트 주문/진열/task를 지우고 seed 기준으로 되돌리려면 루트에서 실행한다.
+빌드 없이 DB schema와 seed 데이터를 최신 기준으로 되돌리려면 루트에서 실행한다.
 
 ```bash
 cd ~/just_pick_it
 ./reset_demo_data.sh
 ```
 
-DB schema까지 다시 만들 필요가 있으면 `./reset_ws.sh`를 사용한다.
+venv/rosdep/colcon까지 다시 맞춰야 할 때만 `./reset_ws.sh`를 사용한다.
