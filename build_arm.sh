@@ -22,6 +22,7 @@ AMR_ONLY_PACKAGES=(
   sllidar_ros2
   pinky_amr_1
   pinky_amr_2
+  just_pick_it_simulation
 )
 
 colcon build --packages-ignore "${AMR_ONLY_PACKAGES[@]}" "$@"

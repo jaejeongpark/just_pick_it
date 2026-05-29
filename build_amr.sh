@@ -24,6 +24,7 @@ ARM_ONLY_PACKAGES=(
   jetcobot_moveit_config
   jetcobot_inspection
   jetcobot_sorting
+  just_pick_it_simulation
 )
 
 colcon build --packages-ignore "${ARM_ONLY_PACKAGES[@]}" "$@"
