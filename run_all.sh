@@ -14,6 +14,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WEB_DIR="$ROOT_DIR/web"
 ROS_DISTRO_REQUIRED="jazzy"
+# 팀 공통 ROS_DOMAIN_ID. Fleet Manager가 로봇(/picky1 등)과 통신하려면
+# 보드와 같은 도메인이어야 한다. 환경변수로 오버라이드 가능.
+export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-25}"
 FLEET_API_BASE_URL="${FLEET_API_BASE_URL:-http://localhost:8100}"
 FLEET_API_WAIT_TIMEOUT="${FLEET_API_WAIT_TIMEOUT:-30}"
 DATABASE_URL="${DATABASE_URL:-postgresql://just_pick_it_user:just_pick_it_pw@localhost:5432/just_pick_it}"
