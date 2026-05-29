@@ -512,3 +512,103 @@ ros2 action list | grep -E 'picky1|picky2'
   이에 의존하는 화면(`admin/map`, `admin/robots`)은 갱신되지 않을 수 있다.
 - zone 단일 점유, 경로 예약 같은 TrafficManager 로직은 동작하지만, 실제 충돌 회피는 검증되지 않는다.
 - 이 테스트가 통과해도 실주행/도킹/Nav2 연동은 별도로 §3.3~3.6으로 검증해야 한다.
+
+---
+
+## 부록 B. 헤드리스 실로봇 연동 (SSH, PICKY1 단일) — 검증된 절차
+
+§3 은 GUI(terminator/RViz)가 있는 환경을 가정한다. 하지만 실제 PICKY 보드는 **모니터 없는
+헤드리스 라즈베리파이**라 SSH 로 접속해 노드를 개별 실행해야 한다. 아래는 PICKY1 한 대를
+관제 PC + 보드 구성으로 실제 주행시키며 검증한 절차다. (2026-05-29 검증)
+
+### B.0 전제
+
+- 보드(raspi)는 헤드리스. SSH 로 접속. venv 는 `~/venv/jazzy`.
+- 관제 PC 는 RViz 와 Fleet Manager/Web 을 띄운다.
+- **모든 셸은 `ROS_DOMAIN_ID=25`** 여야 한다(팀 공통). `~/.bashrc` 에 넣어두면 편하다.
+- terminator 기반 `real_navigation.sh` 는 헤드리스에서 못 쓴다(GUI 필요). 아래 headless 스크립트를 쓴다.
+
+### B.1 보드 빌드 (최초 1회 또는 코드 갱신 시)
+
+```bash
+cd ~/just_pick_it
+git pull origin dev
+colcon build --packages-select pinky_navigation pinky_amr_1   # 또는 ./build_amr.sh
+source install/setup.bash
+```
+
+### B.2 보드 3세션 (각각 별도 SSH 또는 tmux 창)
+
+```bash
+# 공통 헤더는 각 스크립트가 알아서 source/도메인 설정함
+bash scripts/navigation/headless_picky1_bringup.sh   # 세션1: 하드웨어 (/picky1)
+bash scripts/navigation/headless_picky1_nav.sh       # 세션2: Nav2 (namespace=picky1, composition off)
+bash scripts/navigation/headless_picky1_state.sh     # 세션3: State Manager (이동/도킹 액션)
+```
+
+- 세션2는 `/picky1/scan`, `/picky1/odom` 이 올라올 때까지 자동 대기 후 Nav2 를 띄운다.
+- 세션2는 내부적으로 `namespace:=picky1 use_composition:=False` 로 띄운다. ARM 보드에서는
+  composition(컨테이너 한 개에 합쳐 로드)이 실패해 컨테이너만 뜨고 노드가 0개가 되므로 끈다.
+
+### B.3 관제 PC — 노드/네임스페이스 검증
+
+```bash
+export ROS_DOMAIN_ID=25
+ros2 node list | grep map_server      # /picky1/map_server (picky1 한 번이어야 정상)
+ros2 topic list | grep /picky1/map    # /picky1/map 이 보여야 함
+ros2 topic hz /picky1/scan            # 라이다 발행(약 10Hz)
+```
+
+`/picky1/picky1/...` 처럼 **이중 네임스페이스**면 안 된다(과거 버그, B.7 참고).
+
+### B.4 관제 PC — Fleet/DB/RViz
+
+```bash
+./reset_demo_data.sh    # 데이터 초기화
+./run_all.sh            # Fleet(:8100) + Web(:8000), 도메인 25 자동
+bash scripts/navigation/rviz_picky1.sh   # RViz (TF 등 /picky1 remap 적용)
+```
+
+`rviz_picky1.sh` 는 RViz 의 `/tf`,`/tf_static`,`/initialpose`,`/goal_pose` 를 `/picky1/...` 로
+remap 해서 띄운다(robot_description 은 글로벌이라 remap 안 함). 그냥 `rviz2` 로 띄우면 TF 를
+글로벌 `/tf` 에서 찾다가 아무것도 안 그려진다.
+
+### B.5 RViz 설정 (맵/라이다/로봇 표시 + 위치추정)
+
+1. `Fixed Frame`: 위치추정 전이면 `odom`, 후면 `map`.
+2. `Add > By topic`: `/picky1/scan`(LaserScan), `/picky1/map`(Map).
+   - **Map 이 안 뜨면**: Map display 의 `Topic > Durability Policy` 를 **Transient Local** 로 바꾼다.
+     맵은 latched(transient_local) 토픽이라 QoS 가 안 맞으면 한 번도 안 들어온다.
+3. RobotModel 추가 시 `Description Topic` 은 `/robot_description`(글로벌).
+4. 위치추정: amcl 을 한 번 깨운 뒤 RViz 2D Pose Estimate 로 정밀 조정.
+   ```bash
+   ros2 topic pub --once /picky1/initialpose geometry_msgs/msg/PoseWithCovarianceStamped \
+   "{header: {frame_id: map}, pose: {pose: {position: {x: 0.0, y: 0.0, z: 0.0}, orientation: {z: 0.0, w: 1.0}}}}"
+   ```
+   그다음 Fixed Frame 을 `map` 으로, 2D Pose Estimate 로 로봇 실제 위치/방향 클릭.
+   라이다 점이 맵 벽과 겹치면 성공. `ros2 topic echo /picky1/amcl_pose --once` 로 확인.
+
+### B.6 배터리/충전기 (주행 전 필수 확인)
+
+- **충전기를 꽂으면 보드 노드가 죽는다**(전원 순단). 빼는 것은 안전. 충전이 필요하면
+  꽂아서 충전 → 빼고 → 보드 3세션 재기동 → 위치추정 다시.
+- 배터리 기준(`pinky_battery.py`): 7.6V=100%, 6.8V=0% (2셀). 6.8V 미만이면 percent 가 0.
+- **PICKY1 배터리가 0 이면 Fleet 가 배터리 높은 PICKY2(unit2)로 주문을 배정**하고, PICKY2
+  노드가 없으면 MoveCommand 실패로 주문이 ERROR 가 된다. 주행 전 배터리를 확인할 것.
+  ```bash
+  ros2 topic echo /picky1/battery/percent --once   # 0 보다 커야 함
+  ros2 topic echo /picky1/battery/voltage --once   # 복귀(40%)까지 보려면 약 7.12V 이상, 권장 7.3V+
+  ```
+
+### B.7 헤드리스 트러블슈팅 (이번에 실제로 겪은 것)
+
+| 증상 | 원인 | 해결 |
+|---|---|---|
+| `urdf_tutorial`/`moveit_msgs` 못 찾아 빌드 실패 | AMR 보드가 로봇팔 패키지까지 빌드 | `./build_amr.sh` 로 로봇팔 계열 제외 |
+| `real_navigation.sh: terminator: command not found` | 헤드리스라 GUI 없음 | headless 스크립트(B.2) 사용 |
+| Nav2 가 `nav2_container` 만 뜨고 map_server 없음 | ARM 에서 composition 로드 실패 | `use_composition:=False` (headless_picky1_nav.sh 기본값) |
+| `/picky1/picky1/...` 이중 네임스페이스 | bringup_launch 의 namespace 가 자식 launch 로 누수 | 자식 include 에 `namespace` 빈 값 전달(수정 반영됨) |
+| RViz 에 아무것도 안 뜸 | RViz 가 도메인/네임스페이스 TF 를 못 봄 | 도메인 25 확인 + `rviz_picky1.sh`(TF remap) 로 실행 |
+| 맵만 안 뜨고 라이다는 뜸 | Map display QoS 불일치 | Durability 를 Transient Local 로 |
+| 맵은 떴는데 라이다가 안 맞음 | 위치추정 부정확 | 2D Pose Estimate 로 다시, 로봇 살짝 주행시켜 수렴 |
+| 주문이 ERROR / PICKY2 로 배정됨 | PICKY1 배터리 0 | 배터리 충전(B.6) |
