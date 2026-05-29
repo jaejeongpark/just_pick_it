@@ -16,11 +16,13 @@ router = APIRouter()
 # =====================================
 
 def render_template(request: Request, template_name: str, context: dict | None = None):
-    """Starlette 0.27 호환 TemplateResponse helper."""
+    """TemplateResponse helper. 최신 Starlette 시그니처(request 를 첫 인자로) 사용.
+    구식 (name, context) 호출은 최신 Starlette 에서 name 자리에 dict 가 들어가
+    'unhashable type: dict' 로 깨진다."""
     template_context = {"request": request}
     if context:
         template_context.update(context)
-    return templates.TemplateResponse(template_name, template_context)
+    return templates.TemplateResponse(request, template_name, template_context)
 
 
 # =====================================
