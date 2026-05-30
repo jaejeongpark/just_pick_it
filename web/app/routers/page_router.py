@@ -16,7 +16,11 @@ router = APIRouter()
 # =====================================
 
 def render_template(request: Request, template_name: str, context: dict | None = None):
-    """Starlette 0.27 호환 TemplateResponse helper."""
+    """TemplateResponse helper.
+    정식 실행 환경은 web/.venv 의 starlette 0.27(= fastapi 0.101.0 의존)이며,
+    venv 는 user site 를 무시(ENABLE_USER_SITE=False)하므로 전역 starlette 1.x 가
+    있어도 0.27 이 쓰인다. 따라서 0.27 시그니처 (name, context) 로 호출한다.
+    request 는 context 에 넣어 전달한다."""
     template_context = {"request": request}
     if context:
         template_context.update(context)

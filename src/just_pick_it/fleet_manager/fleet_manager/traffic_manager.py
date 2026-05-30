@@ -77,7 +77,7 @@ MOVING_STATES = frozenset({
     'MOVING_TO_PRODUCT',
     'MOVING_TO_PICKUP',
     'MOVING_TO_STOCK',
-    'MOVING_TO_STORAGE',
+    'MOVING_TO_DISPLAY',
     'RETURNING',
     'DOCKING',
 })
@@ -505,6 +505,60 @@ class TrafficManager:
     def get_all_states(self) -> dict[str, str]:
         with self._lock:
             return dict(self._robot_states)
+
+    # ── 재시작 복구 지원 (R1 / A'') ────────────────────────────────────
+    #
+    # Fleet Manager 재시작 시 in-memory 점유가 비므로, 로봇의 현재 위치를 기준으로
+    # 점유를 다시 세워야 한다. MOVE 점유는 기존 reserve_path(source=현재 zone, target)를
+    # 그대로 재사용하고, 도크 점유만 아래 rebuild_dock 으로 복원한다.
+
+    def nearest_zone(self, x: float, y: float) -> str | None:
+        """map 좌표 (x, y) 에 가장 가까운 zone_name 을 반환한다.
+
+        재시작 복구에서 로봇 pose 를 그래프 노드로 매핑하는 데 쓴다.
+        좌표가 없거나 zone 좌표 테이블이 비어 있으면 None.
+        (_zone_coords 는 생성자 이후 변하지 않으므로 lock 없이 읽는다.)
+        """
+        if x is None or y is None or not self._zone_coords:
+            return None
+
+        best_zone: str | None = None
+        best_dist_sq = float('inf')
+        for zone_name, (zx, zy) in self._zone_coords.items():
+            dist_sq = (zx - x) ** 2 + (zy - y) ** 2
+            if dist_sq < best_dist_sq:
+                best_dist_sq = dist_sq
+                best_zone = zone_name
+        return best_zone
+
+    def nearest_dock(self, x: float, y: float) -> str | None:
+        """map 좌표에 가장 가까운 충전 도크 이름을 반환한다(재시작 도크 추론용)."""
+        if x is None or y is None:
+            return None
+
+        best_dock: str | None = None
+        best_dist_sq = float('inf')
+        for dock_name, _standby in DOCK_PRIORITY:
+            coord = self._zone_coords.get(dock_name)
+            if coord is None:
+                continue
+            dx, dy = coord
+            dist_sq = (dx - x) ** 2 + (dy - y) ** 2
+            if dist_sq < best_dist_sq:
+                best_dist_sq = dist_sq
+                best_dock = dock_name
+        return best_dock
+
+    def rebuild_dock(self, robot_id: str, dock_name: str) -> None:
+        """재시작 복구 시 CHARGING/DOCKING 로봇의 도크 점유를 다시 표시한다.
+
+        다른 로봇이 같은 도크를 비어있다고 보고 reserve_dock_path 로 예약하는 것을 막는다.
+        """
+        with self._lock:
+            self._robot_dock[robot_id] = dock_name
+        self._node.get_logger().info(
+            f'[TrafficManager] {robot_id} 도크 점유 복원: {dock_name}'
+        )
 
     # ── 외부에서 주입되는 상태 갱신 ────────────────────────────────────
 

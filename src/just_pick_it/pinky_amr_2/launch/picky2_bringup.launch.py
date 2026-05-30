@@ -28,6 +28,13 @@ def generate_launch_description():
             SetRemap(src="/joint_states", dst="/picky2/joint_states"),
             SetRemap(src="/battery/percent", dst="/picky2/battery/percent"),
             SetRemap(src="/battery/voltage", dst="/picky2/battery/voltage"),
+            # TF도 로봇별로 분리한다. 이렇게 안 하면 두 로봇이 같은 /tf에
+            # odom과 base_footprint를 동시에 올려 TF 트리가 충돌한다.
+            # bringup, robot_state_publisher, lidar 가 모두 이 group 안에서
+            # /picky2/tf 로 publish 하게 되고, picky2 namespace 로 띄운 주행/AMCL
+            # 노드들도 상대 토픽 tf 를 /picky2/tf 로 구독하므로 트리가 맞물린다.
+            SetRemap(src="/tf", dst="/picky2/tf"),
+            SetRemap(src="/tf_static", dst="/picky2/tf_static"),
             IncludeLaunchDescription(AnyLaunchDescriptionSource(pinky_bringup_launch)),
         ]
     )

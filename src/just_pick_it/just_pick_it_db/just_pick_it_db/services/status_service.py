@@ -1,7 +1,7 @@
 from sqlalchemy import case
 from sqlalchemy.orm import Session
 
-from just_pick_it_db.models import ExceptionLog, Order, OrderItem, PickupSlot, Product, Robot, StockingItem, Task, Zone
+from just_pick_it_db.models import ExceptionLog, Order, OrderItem, PickupSlot, Product, Robot, DisplayItem, Task, Zone
 from just_pick_it_db.services.inventory_status import is_low_stock, stock_level
 from just_pick_it_db.services.product_images import resolve_product_image_url
 
@@ -76,14 +76,14 @@ def build_task_summary(db: Session, task: Task):
     order = db.get(Order, task.order_id) if task.order_id else None
     robot = db.get(Robot, task.assigned_robot_id) if task.assigned_robot_id else None
     order_item = db.get(OrderItem, task.order_item_id) if task.order_item_id else None
-    stocking_item = db.get(StockingItem, task.stocking_item_id) if task.stocking_item_id else None
+    display_item = db.get(DisplayItem, task.display_item_id) if task.display_item_id else None
 
     if order_item:
         product = db.get(Product, order_item.product_id)
         product_quantity = order_item.quantity
-    elif stocking_item:
-        product = db.get(Product, stocking_item.product_id)
-        product_quantity = stocking_item.requested_quantity or stocking_item.detected_quantity
+    elif display_item:
+        product = db.get(Product, display_item.product_id)
+        product_quantity = display_item.requested_quantity or display_item.detected_quantity
     else:
         product = None
         product_quantity = None
@@ -95,16 +95,17 @@ def build_task_summary(db: Session, task: Task):
         "task_id": task.task_id,
         "order_id": task.order_id,
         "order_no": order.order_no if order else None,
+        "pickup_slot_id": order.pickup_slot_id if order else None,
         "order_item_id": task.order_item_id,
-        "stocking_item_id": task.stocking_item_id,
+        "display_item_id": task.display_item_id,
         "product_id": product.product_id if product else None,
         "product_name": product.name if product else None,
         "product_quantity": product_quantity,
-        "requested_quantity": stocking_item.requested_quantity if stocking_item else None,
-        "detected_quantity": stocking_item.detected_quantity if stocking_item else None,
-        "stock_delta": stocking_item.stock_delta if stocking_item else None,
-        "stocking_policy": stocking_item.stocking_policy if stocking_item else None,
-        "stocking_status": stocking_item.status if stocking_item else None,
+        "requested_quantity": display_item.requested_quantity if display_item else None,
+        "detected_quantity": display_item.detected_quantity if display_item else None,
+        "stock_delta": display_item.stock_delta if display_item else None,
+        "display_policy": display_item.display_policy if display_item else None,
+        "display_status": display_item.status if display_item else None,
         "sequence_no": task.sequence_no,
         "assigned_robot_id": task.assigned_robot_id,
         "assigned_robot_name": robot.robot_name if robot else None,

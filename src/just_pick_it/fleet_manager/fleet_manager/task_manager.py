@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import threading
+from time import monotonic
 from typing import Any
 
 from rclpy.node import Node
@@ -14,7 +15,7 @@ MOVE_TASK_TYPES = {
     "MOVE_TO_PRODUCT",
     "MOVE_TO_PICKUP",
     "MOVE_TO_STOCK",
-    "MOVE_TO_STORAGE",
+    "MOVE_TO_DISPLAY",
     "RETURN_HOME",
 }
 
@@ -34,17 +35,30 @@ COBOT_TASK_TYPES = {
     "SORTING_AND_LOAD",
     "INSPECTION",
     "UNLOAD",
-    "STOCKING_PICK",
-    "STOCKING_PLACE",
+    "DISPLAY_SCAN",
+    "DISPLAY_PLACE",
 }
 
 FINAL_TASK_STATUSES = {"SUCCESS", "FAILED", "CANCELLED"}
 CHARGE_BATTERY_THRESHOLD = 40
+DEFAULT_ORDER_PRIORITY = 2
+DEFAULT_DISPLAY_PRIORITY = 1
+COBOT_DISPATCH_WARN_INTERVAL_SEC = 10.0
+RECOVERY_ARRIVAL_TIMEOUT_SEC = 120.0
+
+# 재시작 복구 시 MOVE task 도착 판정용 picky_state (State Manager ARRIVAL_STATE 계약과 동일).
+RECOVERY_ARRIVAL_STATE = {
+    "MOVE_TO_PRODUCT": "WAITING_FOR_COBOT",
+    "MOVE_TO_PICKUP": "WAITING_FOR_COBOT",
+    "MOVE_TO_STOCK": "WAITING_FOR_COBOT",
+    "MOVE_TO_DISPLAY": "WAITING_FOR_COBOT",
+    "RETURN_HOME": "STANDBY",
+}
 
 
 @dataclass(frozen=True)
 class WorkRequest:
-    """TaskManager가 처리할 주문/입고 대기 작업 1건."""
+    """TaskManager가 처리할 주문/진열 대기 작업 1건."""
 
     kind: str
     work_id: int
@@ -56,9 +70,9 @@ class TaskManager:
     """Fleet Manager 내부 task 생성/상태 전이 담당 클래스.
 
     역할:
-    - DB를 polling해서 ORDER_WAIT 주문과 REQUESTED 입고 요청을 찾는다.
+    - DB를 polling해서 ORDER_WAIT 주문과 REQUESTED 진열 요청을 찾는다.
     - 사용 가능한 robot unit을 배정한다.
-    - 주문/입고 데이터를 task payload로 변환한다.
+    - 주문/진열 데이터를 task payload로 변환한다.
     - TrafficManager와 협업해 PICKY 이동 경로를 예약한다.
     - task 상태 변경과 실패를 DB에 보고한다.
 
@@ -75,6 +89,7 @@ class TaskManager:
         fleet_repo: FleetRepository,
         traffic_manager: TrafficManager,
         robot_gateway: Any | None = None,
+        recovery_timeout_sec: float = RECOVERY_ARRIVAL_TIMEOUT_SEC,
     ) -> None:
         """TaskManager를 초기화한다.
 
@@ -83,6 +98,7 @@ class TaskManager:
             fleet_repo: DB 접근 Repository.
             traffic_manager: 경로 탐색/예약 담당 객체.
             robot_gateway: ROS2 Action 송신 담당 객체. 초기 task 생성 단계에서는 None 가능.
+            recovery_timeout_sec: 재시작 복구 시 도착 재동기 대기 한계(초). 초과 시 FAILED 처리.
         """
         self._node = node
         self._repo = fleet_repo
@@ -90,12 +106,18 @@ class TaskManager:
         self._robot_gateway = robot_gateway
         self._scheduler_lock = threading.RLock()
         self._fleet_paused = False
+        # 재시작 복구(R1/A''): node가 arm 하면 reconcile 전까지 poll/dispatch 게이트를 닫는다.
+        # 테스트는 arm 하지 않으므로 게이트가 열린 상태로 동작한다(무회귀).
+        self._reconcile_pending = False
+        # 복구로 점유만 다시 세운 RUNNING task_id -> 도착 재동기 deadline(monotonic).
+        self._recovering: dict[int, float] = {}
+        self._recovery_timeout_sec = recovery_timeout_sec
 
         # task_id -> TrafficManager가 예약한 zone 목록.
-        # Move task는 MoveCommand waypoint로, DOCK_IN은 dock zone 선택/예약으로 사용한다.
+        # 상세 경로는 충돌 회피/예약용이며, MoveCommand에는 최종 목적지 zone만 보낸다.
         self._move_waypoints_by_task: dict[int, tuple[str, ...]] = {}
         self._completed_move_target_by_task: dict[int, str] = {}
-        self._unsupported_task_warned: set[int] = set()
+        self._cobot_dispatch_warned_at: dict[tuple[str, str], float] = {}
         self._housekeeping_stopped_flows: set[tuple[str, int]] = set()
 
         # cobot_task_id -> STOWING_ARM 중 미리 생성한 다음 task id 목록.
@@ -107,7 +129,7 @@ class TaskManager:
         self._preplanned_move_tasks_by_trigger: dict[int, set[int]] = {}
 
     # ==================================================================
-    # 신규 주문/입고 확인 진입점
+    # 신규 주문/진열 확인 진입점
     # ==================================================================
 
     def has_idle_picky_for_waiting_work(self) -> bool:
@@ -133,17 +155,19 @@ class TaskManager:
         """대기 중인 작업을 확인하고 받을 수 있으면 바로 시작한다.
 
         여기서 말하는 대기 작업은 두 종류다.
-        - 아직 task가 없는 신규 `ORDER_WAIT` 주문 / `REQUESTED` 입고
-        - 경로 차단 등으로 다음 task를 못 만들고 멈춰 있는 기존 주문 / 입고 flow
+        - 아직 task가 없는 신규 `ORDER_WAIT` 주문 / `REQUESTED` 진열
+        - 경로 차단 등으로 다음 task를 못 만들고 멈춰 있는 기존 주문 / 진열 flow
 
         처리 순서:
         0. 충전 완료 조건을 만족한 CHARGE task 정리
-        1. ORDER_WAIT 주문 polling
-        2. 중복 task 없는 주문 처리
-        3. REQUESTED stocking_item polling
-        4. 입고 task 생성
-        5. 경로 차단 등으로 멈춰 있던 기존 주문/입고 flow 재시도
-        6. 새로 생성됐거나 이미 ASSIGNED 상태인 실행 가능 task를 dispatch
+        1. 이미 시작된 주문/진열 flow의 다음 task 생성 또는 막힌 flow 재시도
+        2. 새 작업을 받을 수 있는 unit이 있으면 ORDER_WAIT/REQUESTED를 priority queue로 처리
+        3. 새로 생성됐거나 이미 ASSIGNED 상태인 실행 가능 task를 dispatch
+
+        새 작업 priority:
+        - 숫자가 낮을수록 먼저 처리한다.
+        - 진열은 기본 priority=1, 주문은 기본 priority=2로 둔다.
+        - 이미 시작된 flow는 검수/하차 또는 진열 place까지 끊지 않고 이어간다.
 
         정상 task 연결은 handle_task_result()에서 즉시 처리한다. 이 함수는 기존 task를
         진행시키는 메인 루프가 아니라, 새 작업과 막혀 있던 작업을 다시 확인하는 polling 진입점이다.
@@ -157,10 +181,13 @@ class TaskManager:
             return
 
         try:
+            if self._reconcile_pending:
+                return
+            self._resync_recovering_tasks()
             self._complete_ready_charge_tasks()
-            self._process_waiting_work_if_unit_available()
             self._advance_existing_orders()
-            self._advance_existing_stocking_items()
+            self._advance_existing_display_items()
+            self._process_waiting_work_if_unit_available()
             self._dispatch_ready_tasks()
         finally:
             self._scheduler_lock.release()
@@ -185,10 +212,260 @@ class TaskManager:
         with self._scheduler_lock:
             self._fleet_paused = False
             self._complete_ready_charge_tasks()
-            self._process_waiting_work_if_unit_available()
             self._advance_existing_orders()
-            self._advance_existing_stocking_items()
+            self._advance_existing_display_items()
+            self._process_waiting_work_if_unit_available()
             self._dispatch_ready_tasks()
+
+    # ==================================================================
+    # 재시작 복구 (R1 / A'')
+    # ==================================================================
+
+    def arm_reconcile(self) -> None:
+        """노드가 호출: reconcile_on_startup 이 끝나기 전까지 poll/dispatch 게이트를 닫는다.
+
+        테스트는 이걸 호출하지 않으므로 게이트가 열린 상태로 동작한다(무회귀).
+        """
+        with self._scheduler_lock:
+            self._reconcile_pending = True
+
+    def reconcile_on_startup(self) -> None:
+        """재시작 복구(A''): RUNNING task 점유를 로봇 현재 위치 기준으로 재구성한다.
+
+        - 로봇은 건드리지 않는다(액션 goal 은 로봇 State Manager 가 계속 수행 중).
+        - EMERGENCY 상태였으면 게이트를 닫은 채 종료(재개는 admin resume).
+        - MOVE/DOCK/COBOT 은 도착 재동기/타임아웃 대상(_recovering)으로 등록(소비는 poll, Step 4).
+        - 점유 복원 후 게이트를 열고 ASSIGNED 를 정상 dispatch.
+        노드 one-shot 타이머에서 executor spin 이후 1회 호출한다(중복/미arm 호출은 무시).
+        """
+        with self._scheduler_lock:
+            if not self._reconcile_pending:
+                return
+
+            recovery_tasks: list[dict[str, Any]] = []
+            emergency = False
+            try:
+                recovery_tasks = self._repo.list_recovery_tasks()
+                emergency = self._repo.has_emergency_robots()
+                if emergency:
+                    self._fleet_paused = True
+                    self._node.get_logger().warn(
+                        "[TaskManager] 재시작 복구: EMERGENCY 감지 → dispatch 게이트 유지(재개 대기)"
+                    )
+                else:
+                    for task in recovery_tasks:
+                        self._recover_running_task(task)
+            except Exception as exc:  # noqa: BLE001 - 복구 오류가 게이트를 영구히 닫지 않게 한다
+                self._node.get_logger().error(f"[TaskManager] 재시작 복구 중 오류: {exc}")
+            finally:
+                self._reconcile_pending = False
+
+            if not self._fleet_paused:
+                self._dispatch_ready_tasks()
+
+        self._node.get_logger().info(
+            f"[TaskManager] 재시작 복구 완료: RUNNING {len(recovery_tasks)}건, emergency={emergency}"
+        )
+
+    def _recover_running_task(self, task: dict[str, Any]) -> None:
+        """RUNNING task 1건의 점유를 로봇 현재 위치 기준으로 다시 세운다(로봇 미개입)."""
+        task_id = int(task["task_id"])
+        task_type = str(task.get("task_type") or "")
+        robot_name = task.get("robot_name")
+        if not robot_name:
+            return
+        robot_name = str(robot_name)
+        current_zone = self._recovery_current_zone(task, robot_name)
+
+        if task_type in MOVE_TASK_TYPES:
+            self._recover_move_occupancy(
+                task_id, task_type, robot_name, current_zone, task.get("target_zone_name")
+            )
+            self._register_recovering(task_id)
+        elif task_type in DOCK_TASK_TYPES:
+            self._recover_dock_occupancy(task_id, robot_name, current_zone, task)
+            self._register_recovering(task_id)
+        elif task_type == "CHARGE":
+            dock = self._recovery_nearest_dock(task)
+            if dock is not None:
+                self._traffic.rebuild_dock(robot_name, dock)
+        else:
+            # COBOT 등: PICKY 정차 점유는 정상 동작과 동일(별도 예약 없음). 완료 재동기만 등록.
+            self._register_recovering(task_id)
+
+    def _recover_move_occupancy(
+        self,
+        task_id: int,
+        task_type: str,
+        robot_name: str,
+        current_zone: str | None,
+        target_zone_name: Any,
+    ) -> None:
+        """현재 위치 -> 목적지로 MOVE 점유를 재예약한다(로봇엔 명령 안 보냄)."""
+        if not current_zone:
+            self._node.get_logger().warn(
+                f"[TaskManager] 복구: task_id={task_id} 현재 zone 미상, 점유 복원 skip"
+            )
+            return
+
+        if task_type == "RETURN_HOME":
+            result = self._traffic.reserve_return_home_path(
+                robot_id=robot_name, task_id=task_id, source_zone=current_zone
+            )
+        else:
+            if not target_zone_name:
+                self._node.get_logger().warn(
+                    f"[TaskManager] 복구: task_id={task_id} target 미상, 점유 복원 skip"
+                )
+                return
+            result = self._traffic.reserve_path(
+                robot_id=robot_name,
+                task_id=task_id,
+                source_zone=current_zone,
+                target_zone=str(target_zone_name),
+            )
+
+        if result.ok:
+            self._move_waypoints_by_task[task_id] = tuple(result.waypoints)
+            self._node.get_logger().info(
+                f"[TaskManager] 복구: task_id={task_id} {robot_name} 점유 재예약 "
+                f"{current_zone} -> {result.waypoints[-1]}"
+            )
+        else:
+            self._node.get_logger().warn(
+                f"[TaskManager] 복구: task_id={task_id} 점유 재예약 실패: {result.reason}"
+            )
+
+    def _recover_dock_occupancy(
+        self,
+        task_id: int,
+        robot_name: str,
+        current_zone: str | None,
+        task: dict[str, Any],
+    ) -> None:
+        """DOCK_IN 점유를 현재 위치 기준으로 재예약한다."""
+        dock = self._recovery_nearest_dock(task)
+        if dock is None or not current_zone:
+            source = current_zone or self._default_source_zone(
+                self._unit_id_from_robot_name(robot_name)
+            )
+            result = self._traffic.reserve_dock_path(
+                robot_id=robot_name, task_id=task_id, source_zone=source
+            )
+            if result.ok:
+                self._move_waypoints_by_task[task_id] = tuple(result.waypoints)
+            return
+
+        self._traffic.rebuild_dock(robot_name, dock)
+        result = self._traffic.reserve_path(
+            robot_id=robot_name, task_id=task_id, source_zone=current_zone, target_zone=dock
+        )
+        if result.ok:
+            self._move_waypoints_by_task[task_id] = tuple(result.waypoints)
+            self._node.get_logger().info(
+                f"[TaskManager] 복구: task_id={task_id} {robot_name} 도크 점유 재예약 -> {dock}"
+            )
+
+    def _recovery_current_zone(self, task: dict[str, Any], robot_name: str) -> str | None:
+        """로봇 pose -> 그래프 노드. 없으면 task source_zone, 그래도 없으면 기본 zone."""
+        pos_x = task.get("pos_x")
+        pos_y = task.get("pos_y")
+        if pos_x is not None and pos_y is not None:
+            zone = self._traffic.nearest_zone(float(pos_x), float(pos_y))
+            if zone:
+                return zone
+        source = task.get("source_zone_name")
+        if source:
+            return str(source)
+        return self._default_source_zone(self._unit_id_from_robot_name(robot_name))
+
+    def _recovery_nearest_dock(self, task: dict[str, Any]) -> str | None:
+        """로봇 pose 기준 가장 가까운 충전 도크. pose 없으면 None."""
+        pos_x = task.get("pos_x")
+        pos_y = task.get("pos_y")
+        if pos_x is None or pos_y is None:
+            return None
+        return self._traffic.nearest_dock(float(pos_x), float(pos_y))
+
+    def _register_recovering(self, task_id: int) -> None:
+        """도착 재동기/타임아웃 대상으로 등록한다(소비는 _resync_recovering_tasks)."""
+        self._recovering[task_id] = monotonic() + self._recovery_timeout_sec
+
+    def _resync_recovering_tasks(self) -> None:
+        """복구로 점유만 세운 RUNNING task를 텔레메트리/타임아웃으로 마무리한다.
+
+        - 더 이상 RUNNING이 아니면 추적 종료.
+        - 로봇이 도착 상태(picky_state)면 SUCCESS로 마무리하고 다음 단계로 진행.
+        - 도착 신호 없이 deadline 초과면 FAILED로 정리(재계획은 후속 advance/poll이 담당).
+        check_waiting_work(5s poll)에서 호출한다. handle_task_result를 재사용하므로
+        traffic 해제/flow 진행/예외 기록이 정상 경로와 동일하게 처리된다.
+        """
+        if not self._recovering:
+            return
+
+        running_by_id = {
+            int(task["task_id"]): task
+            for task in self._repo.list_recovery_tasks()
+            if task.get("task_id") is not None
+        }
+        now = monotonic()
+
+        for task_id in list(self._recovering):
+            deadline = self._recovering.get(task_id)
+            rec = running_by_id.get(task_id)
+            if rec is None:
+                self._recovering.pop(task_id, None)
+                continue
+            if self._recovery_arrived(rec):
+                self._recovering.pop(task_id, None)
+                self._node.get_logger().info(
+                    f"[TaskManager] 복구: task_id={task_id} 도착 감지 → SUCCESS 처리"
+                )
+                self._complete_recovered_task(rec, success=True, message="recovered: arrival detected")
+            elif deadline is not None and now >= deadline:
+                self._recovering.pop(task_id, None)
+                self._node.get_logger().warn(
+                    f"[TaskManager] 복구: task_id={task_id} 도착 신호 없음, 타임아웃 → FAILED"
+                )
+                self._complete_recovered_task(
+                    rec, success=False, message="recovery timeout: no arrival signal"
+                )
+
+    def _complete_recovered_task(self, rec: dict[str, Any], *, success: bool, message: str) -> None:
+        """복구 task를 정상 result 경로(handle_task_result)로 마무리한다."""
+        self.handle_task_result(
+            {
+                "task_id": int(rec["task_id"]),
+                "robot_name": rec.get("robot_name"),
+                "task_type": rec.get("task_type"),
+                "success": success,
+                "message": message,
+            }
+        )
+
+    def _recovery_arrived(self, rec: dict[str, Any]) -> bool:
+        """복구 중인 task의 로봇이 목적지에 도착했는지 텔레메트리로 판정한다."""
+        task_type = rec.get("task_type")
+        state = rec.get("picky_state")
+
+        if task_type in MOVE_TASK_TYPES:
+            expected = RECOVERY_ARRIVAL_STATE.get(str(task_type))
+            if expected is not None and state == expected:
+                return True
+            return self._recovery_at_target(rec)
+        if task_type in DOCK_TASK_TYPES:
+            return state == "CHARGING"
+        # COBOT 등은 picky_state 도착 신호가 없으므로 액션 결과 또는 타임아웃으로 처리.
+        return False
+
+    def _recovery_at_target(self, rec: dict[str, Any]) -> bool:
+        """로봇 현재 위치가 목적지 zone에 도달했는지(보조 판정)."""
+        target = rec.get("target_zone_name")
+        pos_x = rec.get("pos_x")
+        pos_y = rec.get("pos_y")
+        if not target or pos_x is None or pos_y is None:
+            return False
+        return self._traffic.nearest_zone(float(pos_x), float(pos_y)) == target
 
     # ==================================================================
     # COBOT STOWING_ARM lookahead planning
@@ -244,10 +521,7 @@ class TaskManager:
         if task_type == "SORTING_AND_LOAD":
             return self._preplan_after_sorting_and_load(task)
 
-        if task_type == "STOCKING_PICK":
-            return self._pre_reserve_next_existing_move_task(task)
-
-        if task_type in ("INSPECTION", "UNLOAD", "STOCKING_PLACE"):
+        if task_type in ("INSPECTION", "UNLOAD", "DISPLAY_SCAN", "DISPLAY_PLACE"):
             self._node.get_logger().debug(
                 f"[TaskManager] task_id={cobot_task_id} {task_type} 이후 preplan 대상 이동 없음"
             )
@@ -256,9 +530,11 @@ class TaskManager:
         return False
 
     def _preplan_after_sorting_and_load(self, task: dict[str, Any]) -> bool:
-        """SORTING_AND_LOAD의 STOWING_ARM 중 다음 상품 또는 pickup task를 만든다."""
+        """SORTING_AND_LOAD의 STOWING_ARM 중 다음 이동 task를 선계획한다."""
         order_id = task.get("order_id")
         if order_id is None:
+            if task.get("display_item_id") is not None:
+                return self._pre_reserve_next_existing_move_task(task)
             return False
 
         order_id = int(order_id)
@@ -353,22 +629,22 @@ class TaskManager:
         task: dict[str, Any],
         tasks: list[dict[str, Any]],
     ) -> bool:
-        """같은 주문/입고 흐름에 현재 task 이후 task가 이미 있는지 확인한다."""
+        """같은 주문/진열 흐름에 현재 task 이후 task가 이미 있는지 확인한다."""
         sequence_no = int(task.get("sequence_no") or 0)
         return any(int(item.get("sequence_no") or 0) > sequence_no for item in tasks)
 
     def _find_next_task(self, task: dict[str, Any]) -> dict[str, Any] | None:
-        """같은 주문/입고 흐름에서 현재 task 다음 task를 찾는다."""
+        """같은 주문/진열 흐름에서 현재 task 다음 task를 찾는다."""
         sequence_no = int(task.get("sequence_no") or 0)
         order_id = task.get("order_id")
-        stocking_item_id = task.get("stocking_item_id")
+        display_item_id = task.get("display_item_id")
 
         if order_id is not None:
             tasks = self._repo.list_order_tasks(int(order_id))
-        elif stocking_item_id is not None:
+        elif display_item_id is not None:
             tasks = [
                 item for item in self._repo.list_tasks()
-                if item.get("stocking_item_id") == stocking_item_id
+                if item.get("display_item_id") == display_item_id
             ]
         else:
             return None
@@ -430,7 +706,7 @@ class TaskManager:
     # ==================================================================
 
     def _process_waiting_work_if_unit_available(self) -> None:
-        """작업 가능한 unit이 있을 때만 신규 주문/입고 polling을 수행한다.
+        """작업 가능한 unit이 있을 때만 신규 주문/진열 polling을 수행한다.
 
         scheduler cycle 자체는 주기적으로 호출될 수 있지만, 모든 PICKY/COBOT unit이 BUSY이거나
         배터리/housekeeping 조건 때문에 새 작업을 받을 수 없으면 Fleet API의
@@ -441,13 +717,13 @@ class TaskManager:
         """
         if self._fleet_paused:
             self._node.get_logger().debug(
-                "[TaskManager] 신규 주문/입고 polling skip: fleet emergency paused"
+                "[TaskManager] 신규 주문/진열 polling skip: fleet emergency paused"
             )
             return
 
         if not self._has_available_unit_for_new_work():
             self._node.get_logger().debug(
-                "[TaskManager] 신규 주문/입고 polling skip: 작업 가능한 robot unit 없음"
+                "[TaskManager] 신규 주문/진열 polling skip: 작업 가능한 robot unit 없음"
             )
             return
 
@@ -475,7 +751,7 @@ class TaskManager:
         return True
 
     def _has_available_unit_for_new_work(self) -> bool:
-        """신규 주문/입고를 받을 수 있는 robot unit이 하나라도 있는지 확인한다.
+        """신규 주문/진열을 받을 수 있는 robot unit이 하나라도 있는지 확인한다.
 
         `_select_available_unit()`은 실제 배정 직전에 PARKING RETURN_HOME을 취소하는
         side effect가 있다. scheduler cycle 초반 guard에서는 순수 확인만 필요하므로 별도 helper로 둔다.
@@ -507,15 +783,19 @@ class TaskManager:
         return False
 
     def _process_waiting_work(self) -> None:
-        """ORDER_WAIT 주문과 REQUESTED 입고 요청을 하나의 priority queue로 처리한다."""
+        """ORDER_WAIT 주문과 REQUESTED 진열 요청을 priority queue 순서로 처리한다."""
         for request in self._collect_waiting_work():
             if request.kind == "ORDER":
                 self._process_new_order(request.payload)
-            elif request.kind == "STOCKING":
-                self._process_new_stocking_item(request.payload)
+            elif request.kind == "DISPLAY":
+                self._process_new_display_item(request.payload)
 
     def _collect_waiting_work(self) -> list[WorkRequest]:
-        """아직 task가 없는 주문/입고 요청을 priority 기준 대기열로 모은다."""
+        """아직 task가 없는 주문/진열 요청을 priority 기준 대기열로 모은다.
+
+        현재 DB schema에서는 주문만 priority 컬럼을 가진다. 진열은 운영 정책상
+        주문보다 높은 우선순위로 보고 기본 priority=1로 둔다.
+        """
         requests: list[WorkRequest] = []
 
         for order in self._repo.list_waiting_orders():
@@ -533,38 +813,32 @@ class TaskManager:
                 WorkRequest(
                     kind="ORDER",
                     work_id=int(order_id),
-                    priority=int(order.get("priority") or 2),
+                    priority=int(order.get("priority") or DEFAULT_ORDER_PRIORITY),
                     payload=order,
                 )
             )
 
-        for stocking_item in self._repo.list_requested_stocking_items():
-            stocking_item_id = stocking_item.get("stocking_item_id")
-            if stocking_item_id is None:
+        for display_item in self._repo.list_requested_display_items():
+            display_item_id = display_item.get("display_item_id")
+            if display_item_id is None:
                 continue
-            if self._stocking_item_has_tasks(int(stocking_item_id)):
+            if self._display_item_has_tasks(int(display_item_id)):
                 self._node.get_logger().debug(
-                    f"[TaskManager] stocking_item_id={stocking_item_id} 기존 task 존재, 생성 skip"
+                    f"[TaskManager] display_item_id={display_item_id} 기존 task 존재, 생성 skip"
                 )
                 continue
 
             requests.append(
                 WorkRequest(
-                    kind="STOCKING",
-                    work_id=int(stocking_item_id),
-                    priority=int(stocking_item.get("priority") or 2),
-                    payload=stocking_item,
+                    kind="DISPLAY",
+                    work_id=int(display_item_id),
+                    priority=int(display_item.get("priority") or DEFAULT_DISPLAY_PRIORITY),
+                    payload=display_item,
                 )
             )
 
         requests.sort(key=lambda item: (item.priority, item.work_id, item.kind))
         return requests
-
-    def _process_waiting_orders(self) -> None:
-        """호환용 wrapper. 신규 구현은 _process_waiting_work()를 사용한다."""
-        for request in self._collect_waiting_work():
-            if request.kind == "ORDER":
-                self._process_new_order(request.payload)
 
     def _process_new_order(self, order: dict[str, Any]) -> None:
         """주문 1건을 robot unit에 배정하고 첫 상품 task를 생성한다."""
@@ -674,7 +948,7 @@ class TaskManager:
         return True
 
     def _picky_has_work_battery(self, robot: dict[str, Any]) -> bool:
-        """PICKY가 신규 주문/입고 작업을 받을 만큼 배터리가 있는지 확인한다.
+        """PICKY가 신규 주문/진열 작업을 받을 만큼 배터리가 있는지 확인한다.
 
         정책:
         - battery_level이 없으면 아직 상태 연동 전으로 보고 배정을 허용한다.
@@ -690,7 +964,7 @@ class TaskManager:
 
         robot_status가 아직 IDLE로 보이더라도 ASSIGNED task가 이미 있으면
         같은 polling cycle에서 중복 배정하지 않는다.
-        단, RETURN_HOME은 새 주문/입고가 들어오면 선점 취소 가능한 housekeeping task로 본다.
+        단, RETURN_HOME은 새 주문/진열이 들어오면 선점 취소 가능한 housekeeping task로 본다.
         """
         tasks = self._repo.list_tasks(robot_name=robot_name)
         return any(
@@ -705,7 +979,7 @@ class TaskManager:
         picky_name: str,
         cobot_name: str,
         order_id: int | None = None,
-        stocking_item_id: int | None = None,
+        display_item_id: int | None = None,
     ) -> bool:
         """같은 unit에 현재 flow가 아닌 미완료 task가 있는지 확인한다.
 
@@ -721,7 +995,7 @@ class TaskManager:
                     continue
                 if order_id is not None and task.get("order_id") == order_id:
                     continue
-                if stocking_item_id is not None and task.get("stocking_item_id") == stocking_item_id:
+                if display_item_id is not None and task.get("display_item_id") == display_item_id:
                     continue
                 return True
 
@@ -775,7 +1049,7 @@ class TaskManager:
         )
 
     def _cancel_preemptible_return_home(self, robot_name: str) -> None:
-        """새 주문/입고 배정 직전 진행 중인 RETURN_HOME을 취소한다.
+        """새 주문/진열 배정 직전 진행 중인 RETURN_HOME을 취소한다.
 
         PARKING 사유의 RETURN_HOME만 취소한다.
         LOW_BATTERY 사유의 RETURN_HOME은 충전을 우선해야 하므로 선점하지 않는다.
@@ -990,107 +1264,100 @@ class TaskManager:
         return [move_task, sorting_task]
 
     # ==================================================================
-    # 입고 task 생성
+    # 진열 task 생성
     # ==================================================================
 
-    def _process_requested_stocking_items(self) -> None:
-        """REQUESTED stocking_item을 조회하고 task가 없는 항목을 처리한다."""
-        stocking_items = self._repo.list_requested_stocking_items()
-
-        for stocking_item in stocking_items:
-            stocking_item_id = stocking_item.get("stocking_item_id")
-            if stocking_item_id is None:
-                continue
-            if self._stocking_item_has_tasks(int(stocking_item_id)):
-                self._node.get_logger().debug(
-                    f"[TaskManager] stocking_item_id={stocking_item_id} 기존 task 존재, 생성 skip"
-                )
-                continue
-
-            self._process_new_stocking_item(stocking_item)
-
-    def _stocking_item_has_tasks(self, stocking_item_id: int) -> bool:
-        """stocking_item에 이미 task가 생성되어 있는지 확인한다."""
+    def _display_item_has_tasks(self, display_item_id: int) -> bool:
+        """display_item에 이미 task가 생성되어 있는지 확인한다."""
         tasks = self._repo.list_tasks()
-        return any(task.get("stocking_item_id") == stocking_item_id for task in tasks)
+        return any(task.get("display_item_id") == display_item_id for task in tasks)
 
-    def _process_new_stocking_item(self, stocking_item: dict[str, Any]) -> list[int]:
-        """stocking_item 1건을 입고 task 4개로 변환한다."""
+    def _process_new_display_item(self, display_item: dict[str, Any]) -> list[int]:
+        """display_item 1건을 진열 task 5개로 변환한다."""
         unit = self._select_available_unit()
         if unit is None:
-            self._node.get_logger().info("[TaskManager] 입고 배정 가능한 robot unit 없음")
+            self._node.get_logger().info("[TaskManager] 진열 배정 가능한 robot unit 없음")
             return []
 
-        stocking_item_id = int(stocking_item["stocking_item_id"])
-        stocking_work = self._repo.get_stocking_work(
+        display_item_id = int(display_item["display_item_id"])
+        display_work = self._repo.get_display_work(
             {
-                **stocking_item,
+                **display_item,
                 "assigned_unit_id": unit["unit_id"],
             }
         )
-        if stocking_work is None:
+        if display_work is None:
             return []
 
-        stocking_work["picky_name"] = unit["picky_name"]
-        stocking_work["cobot_name"] = unit["cobot_name"]
-        stocking_work["source_zone_name"] = unit["source_zone"]
+        display_work["picky_name"] = unit["picky_name"]
+        display_work["cobot_name"] = unit["cobot_name"]
+        display_work["source_zone_name"] = unit["source_zone"]
 
-        task_ids = self.create_stocking_tasks_for_item(stocking_work)
+        task_ids = self.create_display_tasks_for_item(display_work)
         if not task_ids:
             return []
 
-        updated = self._repo.update_stocking_item(
-            stocking_item_id,
+        updated = self._repo.update_display_item(
+            display_item_id,
             status="ASSIGNED",
             assigned_unit_id=unit["unit_id"],
         )
         if updated is None:
             self._node.get_logger().warn(
-                f"[TaskManager] stocking_item_id={stocking_item_id} 배정 기록 실패"
+                f"[TaskManager] display_item_id={display_item_id} 배정 기록 실패"
             )
 
         return task_ids
 
-    def create_stocking_tasks_for_item(self, stocking_work: dict[str, Any]) -> list[int]:
-        """입고 요청 1건에 대한 task 4개를 생성한다."""
-        priority = int(stocking_work.get("priority") or 2)
-        stocking_item_id = int(stocking_work["stocking_item_id"])
+    def create_display_tasks_for_item(self, display_work: dict[str, Any]) -> list[int]:
+        """진열 요청 1건에 대한 task 5개를 생성한다."""
+        priority = int(display_work.get("priority") or 2)
+        display_item_id = int(display_work["display_item_id"])
 
         tasks = [
             self._build_task_payload(
                 sequence_no=1,
                 task_type="MOVE_TO_STOCK",
-                assigned_robot_name=stocking_work["picky_name"],
-                stocking_item_id=stocking_item_id,
-                source_zone_name=stocking_work.get("source_zone_name"),
-                target_zone_name=stocking_work["stock_zone_name"],
+                assigned_robot_name=display_work["picky_name"],
+                display_item_id=display_item_id,
+                source_zone_name=display_work.get("source_zone_name"),
+                target_zone_name=display_work["stock_zone_name"],
                 priority=priority,
             ),
             self._build_task_payload(
                 sequence_no=2,
-                task_type="STOCKING_PICK",
-                assigned_robot_name=stocking_work["cobot_name"],
-                stocking_item_id=stocking_item_id,
-                source_zone_name=stocking_work["stock_slot_name"],
-                target_zone_name=stocking_work["stock_slot_name"],
+                task_type="SORTING_AND_LOAD",
+                assigned_robot_name=display_work["cobot_name"],
+                display_item_id=display_item_id,
+                source_zone_name=display_work["stock_slot_name"],
+                target_zone_name=display_work["stock_slot_name"],
                 priority=priority,
             ),
             self._build_task_payload(
                 sequence_no=3,
-                task_type="MOVE_TO_STORAGE",
-                assigned_robot_name=stocking_work["picky_name"],
-                stocking_item_id=stocking_item_id,
-                source_zone_name=stocking_work["stock_zone_name"],
-                target_zone_name=stocking_work["product_zone_name"],
+                task_type="MOVE_TO_DISPLAY",
+                assigned_robot_name=display_work["picky_name"],
+                display_item_id=display_item_id,
+                source_zone_name=display_work["stock_zone_name"],
+                target_zone_name=display_work["product_zone_name"],
                 priority=priority,
             ),
             self._build_task_payload(
                 sequence_no=4,
-                task_type="STOCKING_PLACE",
-                assigned_robot_name=stocking_work["cobot_name"],
-                stocking_item_id=stocking_item_id,
-                source_zone_name=stocking_work["product_slot_name"],
-                target_zone_name=stocking_work["product_slot_name"],
+                task_type="DISPLAY_SCAN",
+                assigned_robot_name=display_work["cobot_name"],
+                display_item_id=display_item_id,
+                source_zone_name=display_work["product_slot_name"],
+                target_zone_name=display_work["product_slot_name"],
+                priority=priority,
+            ),
+            self._build_task_payload(
+                sequence_no=5,
+                task_type="DISPLAY_PLACE",
+                assigned_robot_name=display_work["cobot_name"],
+                display_item_id=display_item_id,
+                source_zone_name=display_work["product_slot_name"],
+                target_zone_name=display_work["product_slot_name"],
                 priority=priority,
             ),
         ]
@@ -1101,7 +1368,7 @@ class TaskManager:
 
         task_ids = [int(task_id) for task_id in result_data.get("task_ids", [])]
         self._node.get_logger().info(
-            f"[TaskManager] stocking_item_id={stocking_item_id} 입고 task 생성 완료: {task_ids}"
+            f"[TaskManager] display_item_id={display_item_id} 진열 task 생성 완료: {task_ids}"
         )
         return task_ids
 
@@ -1117,7 +1384,7 @@ class TaskManager:
         assigned_robot_name: str,
         order_id: int | None = None,
         order_item_id: int | None = None,
-        stocking_item_id: int | None = None,
+        display_item_id: int | None = None,
         source_zone_name: str | None = None,
         target_zone_name: str | None = None,
         priority: int = 2,
@@ -1132,7 +1399,7 @@ class TaskManager:
         return {
             "order_id": order_id,
             "order_item_id": order_item_id,
-            "stocking_item_id": stocking_item_id,
+            "display_item_id": display_item_id,
             "sequence_no": sequence_no,
             "assigned_robot_name": assigned_robot_name,
             "task_type": task_type,
@@ -1142,6 +1409,25 @@ class TaskManager:
             "target_zone_id": target_zone.get("zone_id") if target_zone else None,
             "result_message": result_message,
         }
+
+    def _move_command_waypoints_for_task(self, task: dict[str, Any]) -> tuple[str, ...]:
+        """MoveCommand에는 실제 로봇이 가야 할 목적지 waypoint만 넘긴다.
+
+        TrafficManager의 상세 graph 경로는 충돌 회피/예약용 내부 데이터다.
+        로봇 State Machine은 목표 zone pose를 받아 로컬 navigation을 수행하고,
+        Fleet은 task 결과 시점에 TrafficManager 예약을 해제한다.
+        """
+        target_zone = task.get("target_zone_name")
+        if target_zone:
+            return (str(target_zone),)
+
+        task_id = int(task["task_id"])
+        reserved_waypoints = self._move_waypoints_by_task.get(task_id) or ()
+        if reserved_waypoints:
+            return (str(reserved_waypoints[-1]),)
+
+        source_zone = task.get("source_zone_name")
+        return (str(source_zone),) if source_zone else ()
 
     # ==================================================================
     # 기존 주문 진행 / 다음 task 생성
@@ -1418,34 +1704,34 @@ class TaskManager:
     # 완료 후 복귀 / 도킹 / 충전 task 생성
     # ==================================================================
 
-    def _advance_existing_stocking_items(self) -> None:
-        """입고 흐름이 끝난 뒤 필요한 housekeeping task를 이어서 만든다."""
+    def _advance_existing_display_items(self) -> None:
+        """진열 흐름이 끝난 뒤 필요한 housekeeping task를 이어서 만든다."""
         tasks_by_item: dict[int, list[dict[str, Any]]] = {}
 
         for task in self._repo.list_tasks():
-            stocking_item_id = task.get("stocking_item_id")
-            if stocking_item_id is None:
+            display_item_id = task.get("display_item_id")
+            if display_item_id is None:
                 continue
-            tasks_by_item.setdefault(int(stocking_item_id), []).append(task)
+            tasks_by_item.setdefault(int(display_item_id), []).append(task)
 
-        for stocking_item_id, tasks in tasks_by_item.items():
-            self._advance_stocking_item_if_ready(stocking_item_id, tasks)
+        for display_item_id, tasks in tasks_by_item.items():
+            self._advance_display_item_if_ready(display_item_id, tasks)
 
-    def _advance_stocking_item_by_id_if_ready(self, stocking_item_id: int) -> None:
-        """task result 직후 해당 입고 흐름만 다음 단계로 즉시 진행한다."""
+    def _advance_display_item_by_id_if_ready(self, display_item_id: int) -> None:
+        """task result 직후 해당 진열 흐름만 다음 단계로 즉시 진행한다."""
         tasks = [
             task for task in self._repo.list_tasks()
-            if task.get("stocking_item_id") is not None
-            and int(task["stocking_item_id"]) == stocking_item_id
+            if task.get("display_item_id") is not None
+            and int(task["display_item_id"]) == display_item_id
         ]
-        self._advance_stocking_item_if_ready(stocking_item_id, tasks)
+        self._advance_display_item_if_ready(display_item_id, tasks)
 
-    def _advance_stocking_item_if_ready(
+    def _advance_display_item_if_ready(
         self,
-        stocking_item_id: int,
+        display_item_id: int,
         tasks: list[dict[str, Any]],
     ) -> None:
-        """입고 task가 모두 끝났으면 housekeeping task를 이어서 만든다."""
+        """진열 task가 모두 끝났으면 housekeeping task를 이어서 만든다."""
         if not tasks or not self._all_existing_tasks_success(tasks):
             return
 
@@ -1455,8 +1741,8 @@ class TaskManager:
 
         self._create_next_housekeeping_task(
             tasks=tasks,
-            flow_kind="stocking",
-            flow_id=stocking_item_id,
+            flow_kind="display",
+            flow_id=display_item_id,
             unit_id=self._unit_id_from_robot_name(picky_name),
             picky_name=picky_name,
             priority=max(int(task.get("priority") or 2) for task in tasks),
@@ -1472,11 +1758,11 @@ class TaskManager:
         picky_name: str,
         priority: int,
     ) -> list[int]:
-        """완료된 주문/입고 흐름 뒤에 필요한 다음 housekeeping task 하나를 만든다.
+        """완료된 주문/진열 흐름 뒤에 필요한 다음 housekeeping task 하나를 만든다.
 
         정책:
-        - 다음 주문/입고가 있고 PICKY 배터리가 40% 초과면 복귀 체인을 만들지 않는다.
-        - 다음 주문/입고가 없으면 PARKING 사유로 RETURN_HOME을 만든다.
+        - 다음 주문/진열이 있고 PICKY 배터리가 40% 초과면 복귀 체인을 만들지 않는다.
+        - 다음 주문/진열이 없으면 PARKING 사유로 RETURN_HOME을 만든다.
         - 배터리가 40% 이하이면 LOW_BATTERY 사유로 RETURN_HOME을 만든다.
         - RETURN_HOME 성공 후에도 같은 판단 함수를 다시 호출한다.
           PARKING 중 새 작업이 생기면 DOCK_IN/CHARGE로 이어가지 않는다.
@@ -1595,7 +1881,7 @@ class TaskManager:
             task_type=task_type,
             assigned_robot_name=assigned_robot_name,
             order_id=flow_id if flow_kind == "order" else None,
-            stocking_item_id=flow_id if flow_kind == "stocking" else None,
+            display_item_id=flow_id if flow_kind == "display" else None,
             source_zone_name=source_zone_name,
             target_zone_name=target_zone_name,
             priority=priority,
@@ -1636,6 +1922,8 @@ class TaskManager:
         이 함수에는 같은 값만 전달하면 된다.
         """
         with self._scheduler_lock:
+            if self._reconcile_pending:
+                return
             completed = self._complete_charge_tasks_for_robot(robot_name, battery_level)
             if not completed:
                 return
@@ -1719,15 +2007,15 @@ class TaskManager:
         return f"{message} HOUSEKEEPING_REASON={reason}"
 
     def _has_assignable_waiting_work(self) -> bool:
-        """아직 task가 없는 ORDER_WAIT 주문이나 REQUESTED 입고 요청이 있는지 확인한다."""
+        """아직 task가 없는 ORDER_WAIT 주문이나 REQUESTED 진열 요청이 있는지 확인한다."""
         for order in self._repo.list_waiting_orders():
             order_id = order.get("order_id")
             if order_id is not None and not self._repo.list_order_tasks(int(order_id)):
                 return True
 
-        for item in self._repo.list_requested_stocking_items():
-            stocking_item_id = item.get("stocking_item_id")
-            if stocking_item_id is not None and not self._stocking_item_has_tasks(int(stocking_item_id)):
+        for item in self._repo.list_requested_display_items():
+            display_item_id = item.get("display_item_id")
+            if display_item_id is not None and not self._display_item_has_tasks(int(display_item_id)):
                 return True
 
         return False
@@ -1771,14 +2059,14 @@ class TaskManager:
             self._housekeeping_stopped_flows.add(flow_key)
 
     def _flow_key_for_task(self, task: dict[str, Any]) -> tuple[str, int] | None:
-        """task가 속한 주문/입고 흐름 key를 반환한다."""
+        """task가 속한 주문/진열 흐름 key를 반환한다."""
         order_id = task.get("order_id")
         if order_id is not None:
             return ("order", int(order_id))
 
-        stocking_item_id = task.get("stocking_item_id")
-        if stocking_item_id is not None:
-            return ("stocking", int(stocking_item_id))
+        display_item_id = task.get("display_item_id")
+        if display_item_id is not None:
+            return ("display", int(display_item_id))
 
         return None
 
@@ -1788,6 +2076,8 @@ class TaskManager:
 
     def _dispatch_ready_tasks(self) -> None:
         """ASSIGNED task 중 순서상 실행 가능한 task를 로봇으로 보낸다."""
+        if self._reconcile_pending:
+            return
         if self._fleet_paused:
             self._node.get_logger().debug(
                 "[TaskManager] dispatch skip: fleet emergency paused"
@@ -1818,17 +2108,17 @@ class TaskManager:
         task: dict[str, Any],
         all_tasks: list[dict[str, Any]],
     ) -> bool:
-        """같은 주문/입고 묶음의 이전 sequence task가 모두 SUCCESS인지 확인한다."""
+        """같은 주문/진열 묶음의 이전 sequence task가 모두 SUCCESS인지 확인한다."""
         sequence_no = int(task.get("sequence_no") or 0)
         order_id = task.get("order_id")
-        stocking_item_id = task.get("stocking_item_id")
+        display_item_id = task.get("display_item_id")
 
         if order_id is not None:
             related_tasks = self._repo.list_order_tasks(int(order_id))
-        elif stocking_item_id is not None:
+        elif display_item_id is not None:
             related_tasks = [
                 item for item in all_tasks
-                if item.get("stocking_item_id") == stocking_item_id
+                if item.get("display_item_id") == display_item_id
             ]
         else:
             related_tasks = all_tasks
@@ -1896,7 +2186,7 @@ class TaskManager:
             robot_name=robot_name,
             task_id=task_id,
             task_type=task_type,
-            waypoints=self._move_waypoints_by_task[task_id],
+            waypoints=self._move_command_waypoints_for_task(task),
             zone_map=self._repo.get_zone_map(),
             feedback_callback=self.handle_move_feedback,
             result_callback=self.handle_task_result,
@@ -2053,30 +2343,28 @@ class TaskManager:
     def _dispatch_cobot_task(self, task: dict[str, Any]) -> bool:
         """COBOT task를 RobotCommandGateway로 보낸다.
 
-        현재 저장소에는 ExecuteTask.action이 없으므로 Gateway가 False를 반환한다.
-        이 경우 task 상태는 ASSIGNED로 유지해서 인터페이스 확정 후 재시도 가능하게 둔다.
+        ExecuteTask.action 생성 전이거나 action server가 없으면 Gateway가 False를 반환한다.
+        이 경우 task 상태는 ASSIGNED로 유지하고 다음 dispatch cycle에서 다시 시도한다.
         """
         if self._robot_gateway is None:
             return False
 
         task_id = int(task["task_id"])
         robot_name = str(task.get("assigned_robot_name") or "")
-        if task_id in self._unsupported_task_warned:
-            return False
+        task_type = str(task.get("task_type") or "")
 
         sent = self._robot_gateway.send_cobot_task(
             robot_name=robot_name,
             task=task,
+            feedback_callback=self.handle_cobot_feedback,
             result_callback=self.handle_task_result,
         )
-        if not sent and task_id not in self._unsupported_task_warned:
-            self._unsupported_task_warned.add(task_id)
-            self._node.get_logger().warn(
-                f"[TaskManager] task_id={task_id} COBOT 실행 인터페이스 대기 중, 상태는 ASSIGNED 유지"
-            )
+        if not sent:
+            self._warn_cobot_dispatch_waiting(robot_name, task_type, task_id)
             return False
 
         if sent:
+            self._cobot_dispatch_warned_at.pop((robot_name, task_type), None)
             self._repo.update_task_status(
                 task_id,
                 status="RUNNING",
@@ -2090,6 +2378,29 @@ class TaskManager:
             return True
 
         return False
+
+    def _warn_cobot_dispatch_waiting(
+        self,
+        robot_name: str,
+        task_type: str,
+        task_id: int,
+    ) -> None:
+        """COBOT action server 대기 로그만 제한하고 dispatch 재시도는 막지 않는다."""
+        key = (robot_name, task_type)
+        now = monotonic()
+        last_warned_at = self._cobot_dispatch_warned_at.get(key)
+
+        if (
+            last_warned_at is not None
+            and now - last_warned_at < COBOT_DISPATCH_WARN_INTERVAL_SEC
+        ):
+            return
+
+        self._cobot_dispatch_warned_at[key] = now
+        self._node.get_logger().warn(
+            f"[TaskManager] task_id={task_id} {robot_name} {task_type} "
+            "COBOT 실행 인터페이스 대기 중, 상태는 ASSIGNED 유지 후 재시도"
+        )
 
     def _mark_task_failed_before_dispatch(
         self,
@@ -2139,6 +2450,17 @@ class TaskManager:
             current_waypoint_index,
         )
 
+    def handle_cobot_feedback(self, feedback: dict[str, Any]) -> None:
+        """COBOT ExecuteTask feedback을 처리한다."""
+        if str(feedback.get("status") or "") != "STOWING_ARM":
+            return
+
+        task_id = feedback.get("task_id")
+        if task_id is None:
+            return
+
+        self.preplan_after_cobot_stowing(int(task_id))
+
     def handle_task_result(self, result: dict[str, Any]) -> None:
         """RobotCommandGateway가 전달한 task result를 처리한다."""
         self._scheduler_lock.acquire()
@@ -2164,6 +2486,9 @@ class TaskManager:
             return
 
         next_status = "SUCCESS" if success else "FAILED"
+        if success and task_type in COBOT_TASK_TYPES:
+            self._apply_cobot_result_payload(task, result)
+
         self._repo.update_task_status(
             task_id,
             status=next_status,
@@ -2193,21 +2518,107 @@ class TaskManager:
                 task_id=task_id,
                 detail=message,
             )
+            self._cleanup_finished_flow_memory(task)
             return
 
         if self._fleet_paused:
+            self._cleanup_finished_flow_memory(task)
             return
 
         self._advance_flow_after_task_success(task)
         self._dispatch_ready_tasks()
+        self._cleanup_finished_flow_memory(task)
+
+    def _apply_cobot_result_payload(
+        self,
+        task: dict[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        """COBOT result의 진열 수량 정보를 display_item에 반영한다."""
+        display_item_id = task.get("display_item_id")
+        if display_item_id is None:
+            return
+
+        updates: dict[str, int] = {}
+        detected_quantity = self._positive_int_or_none(result.get("detected_quantity"))
+        stock_delta = self._positive_int_or_none(result.get("stock_delta"))
+
+        if detected_quantity is not None:
+            updates["detected_quantity"] = detected_quantity
+        if stock_delta is not None:
+            updates["stock_delta"] = stock_delta
+
+        if updates:
+            self._repo.update_display_item(int(display_item_id), **updates)
+
+    def _positive_int_or_none(self, value: Any) -> int | None:
+        """0/None 기본값은 미보고로 보고 양수만 반환한다."""
+        if value is None:
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
 
     def _advance_flow_after_task_success(self, task: dict[str, Any]) -> None:
-        """성공한 task가 속한 주문/입고 흐름만 즉시 다음 단계로 넘긴다."""
+        """성공한 task가 속한 주문/진열 흐름만 즉시 다음 단계로 넘긴다."""
         order_id = task.get("order_id")
         if order_id is not None:
             self._advance_order_by_id_if_ready(int(order_id))
             return
 
-        stocking_item_id = task.get("stocking_item_id")
-        if stocking_item_id is not None:
-            self._advance_stocking_item_by_id_if_ready(int(stocking_item_id))
+        display_item_id = task.get("display_item_id")
+        if display_item_id is not None:
+            self._advance_display_item_by_id_if_ready(int(display_item_id))
+
+    def _cleanup_finished_flow_memory(self, task: dict[str, Any]) -> None:
+        """완료된 주문/진열 흐름의 TaskManager 임시 메모리를 정리한다."""
+        flow_key = self._flow_key_for_task(task)
+        if flow_key is None:
+            return
+
+        flow_tasks = self._tasks_for_flow_key(flow_key)
+        if not flow_tasks:
+            return
+        if any(item.get("status") not in FINAL_TASK_STATUSES for item in flow_tasks):
+            return
+
+        flow_task_ids = {
+            int(item["task_id"])
+            for item in flow_tasks
+            if item.get("task_id") is not None
+        }
+
+        for flow_task_id in flow_task_ids:
+            self._move_waypoints_by_task.pop(flow_task_id, None)
+            self._completed_move_target_by_task.pop(flow_task_id, None)
+
+        self._housekeeping_stopped_flows.discard(flow_key)
+        self._cleanup_preplanned_memory(flow_task_ids)
+
+    def _tasks_for_flow_key(self, flow_key: tuple[str, int]) -> list[dict[str, Any]]:
+        """주문/진열 flow key에 연결된 task 목록을 반환한다."""
+        flow_kind, flow_id = flow_key
+        if flow_kind == "order":
+            return self._repo.list_order_tasks(flow_id)
+
+        return [
+            task for task in self._repo.list_tasks()
+            if task.get("display_item_id") is not None
+            and int(task["display_item_id"]) == flow_id
+        ]
+
+    def _cleanup_preplanned_memory(self, flow_task_ids: set[int]) -> None:
+        """완료된 flow에 묶인 COBOT preplan 임시 메모리를 제거한다."""
+        for trigger_task_id, created_task_ids in list(
+            self._preplanned_created_tasks_by_trigger.items()
+        ):
+            if trigger_task_id in flow_task_ids or created_task_ids & flow_task_ids:
+                self._preplanned_created_tasks_by_trigger.pop(trigger_task_id, None)
+
+        for trigger_task_id, move_task_ids in list(
+            self._preplanned_move_tasks_by_trigger.items()
+        ):
+            if trigger_task_id in flow_task_ids or move_task_ids & flow_task_ids:
+                self._preplanned_move_tasks_by_trigger.pop(trigger_task_id, None)

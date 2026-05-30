@@ -19,7 +19,7 @@ from fleet_manager.fleet_api_schemas import (
     ProductCreateIn,
     ProductStockUpdateIn,
     ProductUpdateIn,
-    StockingItemCreateIn,
+    DisplayItemCreateIn,
 )
 from fleet_manager.fleet_repository import FleetRepository, RepoError
 from just_pick_it_db.session import check_database_connection
@@ -248,9 +248,9 @@ class FleetApiServer:
         def resolve_exception(exception_id: int):
             return self._guard(lambda: repo.resolve_exception(exception_id))
 
-        @app.post("/api/admin/stocking-items", status_code=201)
-        def create_stocking_item(body: StockingItemCreateIn):
-            return self._guard(lambda: repo.create_stocking_item(**self._model_dump(body)))
+        @app.post("/api/admin/display-items", status_code=201)
+        def create_display_item(body: DisplayItemCreateIn):
+            return self._guard(lambda: repo.create_display_item(**self._model_dump(body)))
 
         @app.post("/api/fleet/tasks/bulk", status_code=201)
         def create_fleet_tasks(body: FleetTaskBulkCreateIn):
