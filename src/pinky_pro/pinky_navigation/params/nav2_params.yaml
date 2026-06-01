@@ -113,7 +113,9 @@ controller_server:
       lookahead_time: 1.5
       transform_tolerance: 0.2
       use_velocity_scaled_lookahead_dist: true
-      use_collision_detection: true
+      # 소형 아레나(2x1m): 벽 충돌 검사로 인한 잦은 정지를 막는다. 경로는 global
+      # planner 가 충돌 회피하므로 RPP 는 그 경로를 따라가기만 한다.
+      use_collision_detection: false
       use_interpolation: true
 
       # ========= 회전 우선 관련 핵심 파라미터 =========
@@ -144,8 +146,10 @@ controller_server:
       inflation_cost_scaling_factor: 3.0
       regulated_linear_scaling_min_radius: 0.5
       regulated_linear_scaling_min_speed: 0.05
-      use_cost_regulated_linear_velocity_scaling: true
-      cost_scaling_dist: 0.6
+      # 소형 아레나에선 어디든 벽 0.6m 이내라, 비용 기반 감속을 켜면 항상 최저속으로
+      # 기어간다. 끄거나(아래) cost_scaling_dist 를 아주 작게 둔다.
+      use_cost_regulated_linear_velocity_scaling: false
+      cost_scaling_dist: 0.15
       cost_scaling_gain: 1.5
 
 
@@ -166,7 +170,7 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.15
+        inflation_radius: 0.03
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: True
@@ -195,7 +199,7 @@ local_costmap:
 global_costmap:
   global_costmap:
     ros__parameters:
-      footprint_padding: 0.03
+      footprint_padding: 0.0
       update_frequency: 1.0
       publish_frequency: 1.0
       global_frame: map
@@ -225,7 +229,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.15
+        inflation_radius: 0.03
       always_send_full_costmap: True
 
 # The yaml_filename does not need to be specified since it going to be set by defaults in launch.
