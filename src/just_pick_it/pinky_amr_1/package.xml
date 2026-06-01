@@ -17,6 +17,7 @@
   <depend>just_pick_it_interfaces</depend>
   <exec_depend>nav2_bringup</exec_depend>
   <exec_depend>pinky_navigation</exec_depend>
+  <exec_depend>slam_toolbox</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
