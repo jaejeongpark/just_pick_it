@@ -9,7 +9,7 @@ from rclpy.node import Node
 
 from std_msgs.msg import String
 
-from just_pick_it_interfaces.action import ExecuteCobotTask
+from just_pick_it_interfaces.action import ExecuteTask
 from just_pick_it_interfaces.srv import EmergencyControl
 
 # [확정 필요] Vision Service ROS2 인터페이스 타입 임포트
@@ -32,14 +32,14 @@ class CobotStateManager(Node):
     """
     Cobot cobot_state 상태 기계 노드.
 
-    Task Manager로부터 ExecuteCobotTask Action으로 명령을 수신하여
+    Task Manager로부터 ExecuteTask Action으로 명령을 수신하여
     로봇팔 작업을 수행하고 cobot_state를 전환한다.
     EmergencyControl 서비스로 즉시 정지/재개를 처리한다.
 
     외부 인터페이스 (launch namespace 기준 상대경로):
-      Action Server  : execute_cobot_task  (just_pick_it_interfaces/ExecuteCobotTask)
-      Service Server : emergency_control   (just_pick_it_interfaces/EmergencyControl)
-      Publisher      : cobot_state         (std_msgs/String)
+      Action Server  : execute_task       (just_pick_it_interfaces/ExecuteTask)
+      Service Server : emergency_control  (just_pick_it_interfaces/EmergencyControl)
+      Publisher      : cobot_state        (std_msgs/String)
       Service Client : vision_service_name 파라미터로 지정한 Vision Service
     """
 
@@ -73,8 +73,8 @@ class CobotStateManager(Node):
         # Task Manager 코봇 작업 명령 수신 Action Server
         self._task_action_server = ActionServer(
             self,
-            ExecuteCobotTask,
-            'execute_cobot_task',
+            ExecuteTask,
+            'execute_task',
             execute_callback=self._execute_task,
             goal_callback=self._on_task_goal,
             cancel_callback=self._on_task_cancel,
@@ -155,7 +155,7 @@ class CobotStateManager(Node):
 
         return True, future.result()
 
-    # ── ExecuteCobotTask Action 콜백 ──────────────────────────────────
+    # ── ExecuteTask Action 콜백 ──────────────────────────────────────
 
     def _on_task_goal(self, goal_request) -> GoalResponse:
         task_type = goal_request.task_type
@@ -173,7 +173,7 @@ class CobotStateManager(Node):
         # [구현 필요] 코봇 제어기에 취소 신호 전달
         return CancelResponse.ACCEPT
 
-    def _execute_task(self, goal_handle) -> ExecuteCobotTask.Result:
+    def _execute_task(self, goal_handle) -> ExecuteTask.Result:
         request    = goal_handle.request
         task_type  = request.task_type
         task_id    = request.task_id
@@ -184,7 +184,7 @@ class CobotStateManager(Node):
             f'task_type={task_type}, robot={robot_name}'
         )
 
-        feedback = ExecuteCobotTask.Feedback()
+        feedback = ExecuteTask.Feedback()
 
         # ── ACCEPTED feedback 발행 ────────────────────────────────────
         feedback.state             = 'ACCEPTED'
@@ -202,7 +202,7 @@ class CobotStateManager(Node):
             if goal_handle.is_cancel_requested:
                 self._set_state('STANDBY')
                 goal_handle.canceled()
-                return ExecuteCobotTask.Result(
+                return ExecuteTask.Result(
                     success=False,
                     status='CANCELLED',
                     message='task cancelled',
@@ -214,7 +214,7 @@ class CobotStateManager(Node):
                 if self._emergency_stop:
                     self._set_state('SAFETY_STOPPED')
                     goal_handle.abort()
-                    return ExecuteCobotTask.Result(
+                    return ExecuteTask.Result(
                         success=False,
                         status='FAILED',
                         message='emergency stop triggered',
@@ -234,7 +234,7 @@ class CobotStateManager(Node):
             if not success:
                 self._set_state('SAFETY_STOPPED')
                 goal_handle.abort()
-                return ExecuteCobotTask.Result(
+                return ExecuteTask.Result(
                     success=False,
                     status='FAILED',
                     message=f'{phase} failed',
@@ -258,7 +258,7 @@ class CobotStateManager(Node):
         if not stow_success:
             self._set_state('SAFETY_STOPPED')
             goal_handle.abort()
-            return ExecuteCobotTask.Result(
+            return ExecuteTask.Result(
                 success=False,
                 status='FAILED',
                 message='arm stowing failed',
@@ -269,7 +269,7 @@ class CobotStateManager(Node):
         # ── 최종 완료 — 팔 복귀까지 완전히 끝난 뒤에만 success=True ──
         self._set_state('STANDBY')
         goal_handle.succeed()
-        return ExecuteCobotTask.Result(
+        return ExecuteTask.Result(
             success=True,
             status='SUCCESS',
             message='ok',
