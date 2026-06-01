@@ -61,13 +61,21 @@ class AprilTagDetectorReal(Node):
         pitch_deg = self.get_parameter('camera_pitch_deg').get_parameter_value().double_value
         self._camera_pitch_rad = math.radians(pitch_deg)
 
-        # solvePnP 3D object points (TL, TR, BR, BL — cv2.aruco corner order)
+        # solvePnP 3D object points — DICT_APRILTAG_36h11 실측 corner 순서: TR, TL, BL, BR
+        # (x right, y up, z toward camera; right-hand)
         self._obj_pts = np.array([
-            [-tag_half,  tag_half, 0.0],
-            [ tag_half,  tag_half, 0.0],
-            [ tag_half, -tag_half, 0.0],
-            [-tag_half, -tag_half, 0.0],
+            [-tag_half,  tag_half, 0.0],  # corner 0: TL
+            [ tag_half,  tag_half, 0.0],  # corner 1: TR
+            [ tag_half, -tag_half, 0.0],  # corner 2: BR
+            [-tag_half, -tag_half, 0.0],  # corner 3: BL
         ], dtype=np.float64)
+
+        # self._obj_pts = np.array([
+        #     [ tag_half,  tag_half, 0.0],  # corner 0: TL
+        #     [ -tag_half,  tag_half, 0.0],  # corner 1: TR
+        #     [ -tag_half, -tag_half, 0.0],  # corner 2: BR
+        #     [ tag_half, -tag_half, 0.0],  # corner 3: BL
+        # ], dtype=np.float64)
 
         self.K, self.D = self._load_calibration(calib_path)
         self.get_logger().info(f'calibration loaded: K=\n{self.K}\nD={self.D}')
@@ -150,11 +158,15 @@ class AprilTagDetectorReal(Node):
                 gray, self._dictionary, parameters=self._params)
 
     def _build_undistort_maps(self, h: int, w: int):
-        new_K, _ = cv2.getOptimalNewCameraMatrix(self.K, self.D, (w, h), alpha=1)
+        new_K, _ = cv2.getOptimalNewCameraMatrix(self.K, self.D, (w, h), alpha=0)
         self._map1, self._map2 = cv2.initUndistortRectifyMap(
             self.K, self.D, None, new_K, (w, h), cv2.CV_16SC2)
         self._new_K = new_K
-        self.get_logger().info(f'undistort maps built for {w}x{h}\nnew_K=\n{new_K}')
+        self.get_logger().info(
+            f'undistort maps built for {w}x{h}'
+            f'\noriginal K[fx]={self.K[0,0]:.1f}  new_K[fx]={new_K[0,0]:.1f}'
+            f'\nnew_K=\n{new_K}'
+        )
 
     def _get_T_camera_mount_camera_optical(self) -> np.ndarray:
         # camera_mount : x forward, y left,  z up
@@ -178,15 +190,10 @@ class AprilTagDetectorReal(Node):
             [  0, 1,   0],
             [ sp, 0,  cp],
         ], dtype=np.float64)
-        # R_flipped = np.array([
-        #     [ 0,  0,  1],
-        #     [ 1,  0,  0],
-        #     [ 0,  1,  0],
-        # ], dtype=np.float64)
         R_flipped = np.array([
             [ 0,  0,  1],
-            [ -1,  0,  0],
-            [ 0,  -1,  0],
+            [ 1,  0,  0],
+            [ 0,  1,  0],
         ], dtype=np.float64)
         T = np.eye(4, dtype=np.float64)
         T[:3, :3] = R_pitch @ R_flipped
@@ -305,14 +312,32 @@ class AprilTagDetectorReal(Node):
                 self._pose_est_logged = True
 
             img_pts = corners[i].reshape(4, 2)
-            ok, rvec, tvec = cv2.solvePnP(
+            print(f'[tag {tag_id}] img_pts:\n{img_pts}')
+            print(f'[tag {tag_id}] obj_pts:\n{self._obj_pts}')
+
+            # IPPE_SQUARE는 두 개의 해를 반환한다. solvePnPGeneric으로 모두 얻어서
+            # tvec[2] > 0 (마커가 카메라 앞쪽)인 해를 명시적으로 선택한다.
+            retval, rvecs, tvecs, reproj_errors = cv2.solvePnPGeneric(
                 self._obj_pts, img_pts, K, D,
                 flags=cv2.SOLVEPNP_IPPE_SQUARE,
             )
-            print(f'[tag {tag_id}] solvePnP 결과: ok={ok}, rvec={rvec.flatten()}, tvec={tvec.flatten()}')
-            if not ok:
-                self.get_logger().warn(f'[tag {tag_id}] solvePnP 실패')
+
+            best_idx = None
+            for j in range(len(rvecs)):
+                if tvecs[j][2, 0] > 0:
+                    if best_idx is None or reproj_errors[j] < reproj_errors[best_idx]:
+                        best_idx = j
+
+            if best_idx is None:
+                self.get_logger().warn(f'[tag {tag_id}] 유효한 solvePnP 해 없음 (tvec.z<=0)')
                 continue
+
+            rvec = rvecs[best_idx]
+            tvec = tvecs[best_idx]
+            print(
+                f'[tag {tag_id}] solvePnP (sol={best_idx}): '
+                f'tvec={tvec.flatten()}, reproj={reproj_errors[best_idx, 0]:.2f}px'
+            )
 
             R, _ = cv2.Rodrigues(rvec)
             T_camera_optical_marker = np.eye(4, dtype=np.float64)

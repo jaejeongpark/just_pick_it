@@ -1,6 +1,7 @@
 <?xml version='1.0' ?>
 
 <launch>
+    <arg name="robot_name"        default="picky_2"/>
     <arg name="udp_port"         default="5002"/>
     <arg name="camera_pitch_deg" default="8.0"/>
     <arg name="cmd_vel_topic"    default="/picky2/cmd_vel"/>
@@ -11,6 +12,7 @@
 
     <node pkg="just_pick_it_perception" exec="apriltag_detector_real"
           name="apriltag_detector_real" output="screen">
+        <param name="robot_name"       value="$(var robot_name)"/>
         <param name="udp_port"         value="$(var udp_port)"/>
         <param name="camera_pitch_deg" value="$(var camera_pitch_deg)"/>
     </node>

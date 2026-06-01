@@ -13,7 +13,7 @@
 
 world_frame: map
 family: tag36h11
-default_size_m: 0.15
+default_size_m: 0.05
 
 tags:
   0:

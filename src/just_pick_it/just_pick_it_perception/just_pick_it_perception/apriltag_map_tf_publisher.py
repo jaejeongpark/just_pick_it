@@ -86,7 +86,13 @@ class AprilTagMapTfPublisher(Node):
         y = world_up - np.dot(world_up, z) * z
         y /= np.linalg.norm(y)
 
-        x = np.cross(y, z)
+        # 기존 x 방향이 좌우 반전처럼 보이면 x를 반대로 잡는다
+        x = np.cross(z, y)
+        x /= np.linalg.norm(x)
+
+        # 오른손 좌표계 유지하려고 y를 다시 계산
+        y = np.cross(z, x)
+        y /= np.linalg.norm(y)
 
         return np.column_stack([x, y, z])
 
