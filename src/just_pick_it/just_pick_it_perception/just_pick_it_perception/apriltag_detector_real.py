@@ -27,6 +27,73 @@ HEADER_FMT = '>IHH'
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
 RECV_BUF = 65536
 
+_STALE_THRESHOLD_S = 2.0
+
+
+class OneEuroFilter1D:
+
+    def __init__(self, min_cutoff=0.5, beta=0.5, d_cutoff=1.0):
+        self._min_cutoff = min_cutoff
+        self._beta = beta
+        self._d_cutoff = d_cutoff
+        self._x_prev = None
+        self._dx_prev = 0.0
+        self._t_prev = None
+
+    def filter(self, x: float, t_now: float) -> float:
+        if self._t_prev is None:
+            self._x_prev = x
+            self._t_prev = t_now
+            return x
+        dt = max(t_now - self._t_prev, 1e-6)
+        alpha_d = self._alpha(self._d_cutoff, dt)
+        dx = (x - self._x_prev) / dt
+        dx_hat = alpha_d * dx + (1.0 - alpha_d) * self._dx_prev
+        cutoff = self._min_cutoff + self._beta * abs(dx_hat)
+        alpha = self._alpha(cutoff, dt)
+        x_hat = alpha * x + (1.0 - alpha) * self._x_prev
+        self._x_prev = x_hat
+        self._dx_prev = dx_hat
+        self._t_prev = t_now
+        return x_hat
+
+    def reset(self):
+        self._x_prev = None
+        self._dx_prev = 0.0
+        self._t_prev = None
+
+    def _alpha(self, cutoff: float, dt: float) -> float:
+        tau = 1.0 / (2.0 * math.pi * cutoff)
+        return 1.0 / (1.0 + tau / dt)
+
+
+class PoseOneEuroFilter:
+
+    def __init__(self, min_cutoff: float, beta: float, d_cutoff: float):
+        self._filters = [OneEuroFilter1D(min_cutoff, beta, d_cutoff) for _ in range(7)]
+
+    def filter(
+        self,
+        t_vec: np.ndarray,
+        q_wxyz: np.ndarray,
+        t_now: float,
+    ):
+        if (
+            self._filters[0]._t_prev is not None
+            and t_now - self._filters[0]._t_prev > _STALE_THRESHOLD_S
+        ):
+            self.reset()
+        vals = list(t_vec) + list(q_wxyz)
+        out = [f.filter(v, t_now) for f, v in zip(self._filters, vals)]
+        t_f = np.array(out[:3], dtype=np.float64)
+        q_f = np.array(out[3:], dtype=np.float64)
+        q_f /= np.linalg.norm(q_f)
+        return t_f, q_f
+
+    def reset(self):
+        for f in self._filters:
+            f.reset()
+
 
 class AprilTagDetectorReal(Node):
 
@@ -46,6 +113,9 @@ class AprilTagDetectorReal(Node):
         # Physical camera tilt around y-axis of mount frame.
         # Positive = camera tilts upward (optical axis pitches toward +z_mount).
         self.declare_parameter('camera_pitch_deg', 0.0)
+        self.declare_parameter('pose_filter_min_cutoff', 1.0)
+        self.declare_parameter('pose_filter_beta', 0.01)
+        self.declare_parameter('pose_filter_d_cutoff', 1.0)
 
         robot_name = self.get_parameter('robot_name').get_parameter_value().string_value
         calib_path = self.get_parameter('calibration_file').get_parameter_value().string_value
@@ -60,6 +130,10 @@ class AprilTagDetectorReal(Node):
         mount_z = self.get_parameter('camera_mount_z').get_parameter_value().double_value
         pitch_deg = self.get_parameter('camera_pitch_deg').get_parameter_value().double_value
         self._camera_pitch_rad = math.radians(pitch_deg)
+        filter_min_cutoff = self.get_parameter('pose_filter_min_cutoff').get_parameter_value().double_value
+        filter_beta = self.get_parameter('pose_filter_beta').get_parameter_value().double_value
+        filter_d_cutoff = self.get_parameter('pose_filter_d_cutoff').get_parameter_value().double_value
+        self._pose_filter = PoseOneEuroFilter(filter_min_cutoff, filter_beta, filter_d_cutoff)
 
         # solvePnP 3D object points — DICT_APRILTAG_36h11 실측 corner 순서: TR, TL, BL, BR
         # (x right, y up, z toward camera; right-hand)
@@ -294,6 +368,8 @@ class AprilTagDetectorReal(Node):
         T_camera_mount_camera_optical = self._get_T_camera_mount_camera_optical()
         T_camera_mount_base_link = self._T_camera_mount_base_link
 
+        estimates = []
+
         for i, tag_id in enumerate(ids.flatten()):
             if tag_id not in self._T_map_marker:
                 result = self._lookup_tf_matrix('map', f'apriltag_{tag_id}')
@@ -312,8 +388,6 @@ class AprilTagDetectorReal(Node):
                 self._pose_est_logged = True
 
             img_pts = corners[i].reshape(4, 2)
-            print(f'[tag {tag_id}] img_pts:\n{img_pts}')
-            print(f'[tag {tag_id}] obj_pts:\n{self._obj_pts}')
 
             # IPPE_SQUARE는 두 개의 해를 반환한다. solvePnPGeneric으로 모두 얻어서
             # tvec[2] > 0 (마커가 카메라 앞쪽)인 해를 명시적으로 선택한다.
@@ -334,10 +408,6 @@ class AprilTagDetectorReal(Node):
 
             rvec = rvecs[best_idx]
             tvec = tvecs[best_idx]
-            print(
-                f'[tag {tag_id}] solvePnP (sol={best_idx}): '
-                f'tvec={tvec.flatten()}, reproj={reproj_errors[best_idx, 0]:.2f}px'
-            )
 
             R, _ = cv2.Rodrigues(rvec)
             T_camera_optical_marker = np.eye(4, dtype=np.float64)
@@ -353,7 +423,39 @@ class AprilTagDetectorReal(Node):
                 @ T_camera_mount_base_link
             )
 
-            self._publish_robot_pose(T_map_base_link)
+            t_i = T_map_base_link[:3, 3].copy()
+            q_i = mat2quat(T_map_base_link[:3, :3])
+            w_i = 1.0 / max(float(reproj_errors[best_idx, 0]), 1e-6)
+            estimates.append((t_i, q_i, w_i))
+
+        if not estimates:
+            return
+
+        t_fused, q_fused = self._fuse_pose_estimates(estimates)
+        t_now = self.get_clock().now().nanoseconds * 1e-9
+        t_smooth, q_smooth = self._pose_filter.filter(t_fused, q_fused, t_now)
+
+        T_out = np.eye(4, dtype=np.float64)
+        T_out[:3, :3] = quat2mat(q_smooth)
+        T_out[:3, 3] = t_smooth
+        self._publish_robot_pose(T_out)
+
+    def _fuse_pose_estimates(self, estimates):
+        t_sum = np.zeros(3, dtype=np.float64)
+        q_sum = np.zeros(4, dtype=np.float64)
+        w_sum = 0.0
+        q_ref = None
+        for t_i, q_i, w_i in estimates:
+            if q_ref is None:
+                q_ref = q_i
+            elif np.dot(q_i, q_ref) < 0:
+                q_i = -q_i
+            t_sum += w_i * t_i
+            q_sum += w_i * q_i
+            w_sum += w_i
+        t_fused = t_sum / w_sum
+        q_fused = q_sum / np.linalg.norm(q_sum)
+        return t_fused, q_fused
 
     def _publish_robot_pose(self, T_map_base_link: np.ndarray):
         w, qx, qy, qz = mat2quat(T_map_base_link[:3, :3])
