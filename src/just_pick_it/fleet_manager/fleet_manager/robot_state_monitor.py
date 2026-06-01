@@ -39,7 +39,7 @@ class RobotStateMonitor:
       한 번에 DB에 반영한다(coalesce). picky_state도 같은 주기에 함께 반영한다.
     - **robot_status는 절대 기록하지 않는다.** robot_status는 task 전이(workflow_service)
       전용이며, 텔레메트리는 picky_state / battery_level / pos_* 만 갱신한다.
-    - battery_level이 임계값(기본 40%)을 **초과하는 구간에서 robot별 1회만**
+    - battery_level이 임계값(기본 30%)을 **초과하는 구간에서 robot별 1회만**
       `on_battery_update`(TaskManager.handle_battery_update)를 호출한다(충전 완료 트리거).
       임계값 이하로 떨어지면 플래그가 해제되어 다음 초과 진입 때 다시 1회 호출된다.
       구간당 1회만 호출하므로 scheduler lock 경합이 사실상 없다.
@@ -53,7 +53,7 @@ class RobotStateMonitor:
         on_state_change: StateCallback,
         on_battery_update: BatteryCallback | None = None,
         db_flush_period_sec: float = 1.0,
-        battery_notify_threshold: int = 40,
+        battery_notify_threshold: int = 30,
     ) -> None:
         self._node = node
         self._repo = fleet_repo
@@ -148,8 +148,8 @@ class RobotStateMonitor:
     def _maybe_notify_battery(self, robot_id: str, level: Any) -> None:
         """battery 임계 초과 구간에서 robot 별 1회만 on_battery_update 를 호출한다.
 
-        예: 39%(미호출) -> 41%(1회 호출, 플래그 set) -> 45%/80%(플래그 set, skip)
-            -> 40% 이하(플래그 해제) -> 41%(다시 1회 호출).
+        예: 29%(미호출) -> 31%(1회 호출, 플래그 set) -> 45%/80%(플래그 set, skip)
+            -> 30% 이하(플래그 해제) -> 31%(다시 1회 호출).
         """
         if self._on_battery_update is None or level is None:
             return

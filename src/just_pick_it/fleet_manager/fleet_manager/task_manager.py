@@ -40,7 +40,7 @@ COBOT_TASK_TYPES = {
 }
 
 FINAL_TASK_STATUSES = {"SUCCESS", "FAILED", "CANCELLED"}
-CHARGE_BATTERY_THRESHOLD = 40
+CHARGE_BATTERY_THRESHOLD = 30
 DEFAULT_ORDER_PRIORITY = 2
 DEFAULT_DISPLAY_PRIORITY = 1
 COBOT_DISPATCH_WARN_INTERVAL_SEC = 10.0
@@ -952,7 +952,7 @@ class TaskManager:
 
         정책:
         - battery_level이 없으면 아직 상태 연동 전으로 보고 배정을 허용한다.
-        - battery_level이 40 이하이면 신규 작업을 받지 않고 복귀/충전 대상으로 본다.
+        - battery_level이 30 이하이면 신규 작업을 받지 않고 복귀/충전 대상으로 본다.
         """
         battery_level = robot.get("battery_level")
         if battery_level is None:
@@ -1761,9 +1761,9 @@ class TaskManager:
         """완료된 주문/진열 흐름 뒤에 필요한 다음 housekeeping task 하나를 만든다.
 
         정책:
-        - 다음 주문/진열이 있고 PICKY 배터리가 40% 초과면 복귀 체인을 만들지 않는다.
+        - 다음 주문/진열이 있고 PICKY 배터리가 30% 초과면 복귀 체인을 만들지 않는다.
         - 다음 주문/진열이 없으면 PARKING 사유로 RETURN_HOME을 만든다.
-        - 배터리가 40% 이하이면 LOW_BATTERY 사유로 RETURN_HOME을 만든다.
+        - 배터리가 30% 이하이면 LOW_BATTERY 사유로 RETURN_HOME을 만든다.
         - RETURN_HOME 성공 후에도 같은 판단 함수를 다시 호출한다.
           PARKING 중 새 작업이 생기면 DOCK_IN/CHARGE로 이어가지 않는다.
         """
