@@ -90,6 +90,7 @@ class TaskManager:
         traffic_manager: TrafficManager,
         robot_gateway: Any | None = None,
         recovery_timeout_sec: float = RECOVERY_ARRIVAL_TIMEOUT_SEC,
+        active_robot_ids: list[str] | None = None,
     ) -> None:
         """TaskManager를 초기화한다.
 
@@ -99,11 +100,15 @@ class TaskManager:
             traffic_manager: 경로 탐색/예약 담당 객체.
             robot_gateway: ROS2 Action 송신 담당 객체. 초기 task 생성 단계에서는 None 가능.
             recovery_timeout_sec: 재시작 복구 시 도착 재동기 대기 한계(초). 초과 시 FAILED 처리.
+            active_robot_ids: 운용 중인(config robot_ids) 로봇 이름 집합. 지정 시 이 집합에
+                없는 로봇(예: 단일로봇 테스트의 PICKY2/COBOT2)은 작업 배정 후보에서 제외한다.
+                DB seed 에는 남아 있어도 노드가 안 떠 있는 로봇에 오배정되는 것을 막는다.
         """
         self._node = node
         self._repo = fleet_repo
         self._traffic = traffic_manager
         self._robot_gateway = robot_gateway
+        self._active_robot_ids = set(active_robot_ids) if active_robot_ids else None
         self._scheduler_lock = threading.RLock()
         self._fleet_paused = False
         # 재시작 복구(R1/A''): node가 arm 하면 reconcile 전까지 poll/dispatch 게이트를 닫는다.
@@ -933,6 +938,10 @@ class TaskManager:
         """로봇이 신규 작업을 받을 수 있는지 확인한다."""
         if robot is None:
             return False
+        # 운용 중인 robot_ids 가 지정됐으면 그 집합에 없는 로봇(안 떠 있는 PICKY2 등)은
+        # 후보에서 제외한다. DB seed 의 stale 배터리로 오배정되는 것을 막는다.
+        if self._active_robot_ids is not None and robot.get("robot_name") not in self._active_robot_ids:
+            return False
         current_task = self._robot_current_task(robot)
         if robot.get("robot_status") != "IDLE" and not self._is_preemptible_return_home(current_task):
             return False
@@ -1411,20 +1420,28 @@ class TaskManager:
         }
 
     def _move_command_waypoints_for_task(self, task: dict[str, Any]) -> tuple[str, ...]:
-        """MoveCommand에는 실제 로봇이 가야 할 목적지 waypoint만 넘긴다.
+        """MoveCommand 에 TrafficManager 가 예약한 경유지 리스트를 넘긴다.
 
-        TrafficManager의 상세 graph 경로는 충돌 회피/예약용 내부 데이터다.
-        로봇 State Machine은 목표 zone pose를 받아 로컬 navigation을 수행하고,
-        Fleet은 task 결과 시점에 TrafficManager 예약을 해제한다.
+        로봇 State Machine 은 waypoint 를 순서대로 nav2 로 주행하고, 각 waypoint 통과
+        시점에 Action 피드백(current_waypoint_index)을 보낸다. Fleet 은 그 인덱스로
+        TrafficManager 점유를 단계적으로 해제한다(handle_move_feedback ->
+        update_path_progress).
+
+        예약 경로의 첫 노드는 현재 위치(source)다. 로봇은 이미 그 zone 에 있고(첫 MOVE 는
+        도크에서 undock 한 직후라 도크로 되돌아가면 안 된다) 제외한다. 따라서 로봇이 받는
+        리스트의 0-based 인덱스는 TrafficManager 전체 경로 인덱스보다 1 작다.
+        handle_move_feedback 가 +1 보정한다.
+
+        예약 경로가 없으면(경로 탐색 실패 fallback) 목적지 zone 만 넘긴다.
         """
+        task_id = int(task["task_id"])
+        reserved_waypoints = self._move_waypoints_by_task.get(task_id) or ()
+        if len(reserved_waypoints) > 1:
+            return tuple(str(zone_name) for zone_name in reserved_waypoints[1:])
+
         target_zone = task.get("target_zone_name")
         if target_zone:
             return (str(target_zone),)
-
-        task_id = int(task["task_id"])
-        reserved_waypoints = self._move_waypoints_by_task.get(task_id) or ()
-        if reserved_waypoints:
-            return (str(reserved_waypoints[-1]),)
 
         source_zone = task.get("source_zone_name")
         return (str(source_zone),) if source_zone else ()
@@ -2443,11 +2460,15 @@ class TaskManager:
         task_id: int,
         current_waypoint_index: int,
     ) -> None:
-        """PICKY MoveCommand feedback을 TrafficManager에 전달한다."""
+        """PICKY MoveCommand feedback을 TrafficManager에 전달한다.
+
+        로봇이 받는 waypoint 리스트는 source 를 제외했으므로(0-based), TrafficManager
+        전체 경로(source 포함) 인덱스에 맞추려 +1 한다.
+        """
         self._traffic.update_path_progress(
             robot_name,
             task_id,
-            current_waypoint_index,
+            current_waypoint_index + 1,
         )
 
     def handle_cobot_feedback(self, feedback: dict[str, Any]) -> None:

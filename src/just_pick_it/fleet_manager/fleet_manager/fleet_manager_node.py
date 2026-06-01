@@ -38,6 +38,8 @@ class FleetManagerNode(Node):
 
         self.fleet_repo = FleetRepository(self)
         self.robot_gateway = RobotCommandGateway(self)
+        # action 클라이언트 discovery 를 기동 구간에 끝내 첫 주문 dispatch timeout 방지.
+        self.robot_gateway.prewarm(picky_robot_ids)
         self.traffic_manager = self._create_traffic_manager(picky_robot_ids)
         # TaskManager 를 먼저 만들어 RobotStateMonitor 의 battery hook 으로 넘긴다.
         self.task_manager = self._create_task_manager()
@@ -129,6 +131,7 @@ class FleetManagerNode(Node):
             fleet_repo=self.fleet_repo,
             traffic_manager=self.traffic_manager,
             robot_gateway=self.robot_gateway,
+            active_robot_ids=self.robot_ids,
         )
 
     def _create_api_server(self, config: dict) -> FleetApiServer | None:
