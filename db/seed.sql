@@ -1,28 +1,43 @@
--- Temporary development seed data. Replace coordinates after the final map is fixed.
--- *_ZONE_* means a PICKY navigation/parking pose.
--- *_SLOT_* means a physical product/pickup pose for COBOT work.
-
+-- Zone poses. map frame, 좌하단 원점(+x 오른쪽, +y 위쪽), 약 2.0m x 1.0m arena.
+-- docs/Traffic_node_graph.jpg 토폴로지 기준이며 ZONE 좌표는 traffic_manager.py 의
+-- DEFAULT_ZONE_COORDS 와 일치시킨다. 대략값이므로 실측 후 미세조정 필요.
+-- *_ZONE_* = PICKY 주행/주차 pose. *_SLOT_* = COBOT 작업용 물리 pose(z=0.35 선반/슬롯 높이).
+-- TRAFFIC_*/CHARGING_DOCK_* 그래프 노드 좌표는 DB 가 아니라 DEFAULT_ZONE_COORDS 에 있다.
 INSERT INTO zone (zone_name, zone_type, pos_x, pos_y, pos_z, pos_theta) VALUES
-    ('STANDBY_ZONE_1', 'STANDBY', 0.90, 0.82, 0.00, 0.00),
-    ('STANDBY_ZONE_2', 'STANDBY', 0.90, 0.08, 0.00, 0.00),
-    ('STOCK_ZONE', 'STOCK', 0.15, 0.45, 0.00, 0.00),
-    ('STOCK_SLOT', 'STOCK_SLOT', 0.08, 0.45, 0.35, 0.00),
-    ('PRODUCT_ZONE_1', 'PRODUCT', 0.20, 0.80, 0.00, 0.00),
-    ('PRODUCT_ZONE_2', 'PRODUCT', 0.32, 0.80, 0.00, 0.00),
-    ('PRODUCT_ZONE_3', 'PRODUCT', 0.44, 0.80, 0.00, 0.00),
-    ('PRODUCT_ZONE_4', 'PRODUCT', 0.56, 0.80, 0.00, 0.00),
-    ('PRODUCT_ZONE_5', 'PRODUCT', 0.68, 0.80, 0.00, 0.00),
-    ('PRODUCT_ZONE_6', 'PRODUCT', 0.80, 0.80, 0.00, 0.00),
-    ('PRODUCT_SLOT_1', 'PRODUCT_SLOT', 0.20, 0.92, 0.35, 0.00),
-    ('PRODUCT_SLOT_2', 'PRODUCT_SLOT', 0.32, 0.92, 0.35, 0.00),
-    ('PRODUCT_SLOT_3', 'PRODUCT_SLOT', 0.44, 0.92, 0.35, 0.00),
-    ('PRODUCT_SLOT_4', 'PRODUCT_SLOT', 0.56, 0.92, 0.35, 0.00),
-    ('PRODUCT_SLOT_5', 'PRODUCT_SLOT', 0.68, 0.92, 0.35, 0.00),
-    ('PRODUCT_SLOT_6', 'PRODUCT_SLOT', 0.80, 0.92, 0.35, 0.00),
-    ('PICKUP_ZONE_1', 'PICKUP', 1.70, 0.75, 0.00, 3.14),
-    ('PICKUP_ZONE_2', 'PICKUP', 1.70, 0.55, 0.00, 3.14),
-    ('PICKUP_SLOT_1', 'PICKUP_SLOT', 1.88, 0.75, 0.35, 3.14),
-    ('PICKUP_SLOT_2', 'PICKUP_SLOT', 1.88, 0.55, 0.35, 3.14);
+    ('STANDBY_ZONE_1', 'STANDBY', 0.14, 0.40, 0.00, 0.00),
+    ('STANDBY_ZONE_2', 'STANDBY', 0.31, 0.40, 0.00, 0.00),
+    ('STOCK_ZONE', 'STOCK', 0.18, 0.85, 0.00, 0.00),
+    ('STOCK_SLOT', 'STOCK_SLOT', 0.05, 0.85, 0.35, 0.00),
+    ('PRODUCT_ZONE_1', 'PRODUCT', 0.70, 0.60, 0.00, 0.00),
+    ('PRODUCT_ZONE_2', 'PRODUCT', 1.05, 0.60, 0.00, 0.00),
+    ('PRODUCT_ZONE_3', 'PRODUCT', 1.40, 0.60, 0.00, 0.00),
+    ('PRODUCT_ZONE_4', 'PRODUCT', 0.70, 0.35, 0.00, 0.00),
+    ('PRODUCT_ZONE_5', 'PRODUCT', 1.05, 0.35, 0.00, 0.00),
+    ('PRODUCT_ZONE_6', 'PRODUCT', 1.40, 0.35, 0.00, 0.00),
+    ('PRODUCT_SLOT_1', 'PRODUCT_SLOT', 0.82, 0.60, 0.35, 0.00),
+    ('PRODUCT_SLOT_2', 'PRODUCT_SLOT', 1.17, 0.60, 0.35, 0.00),
+    ('PRODUCT_SLOT_3', 'PRODUCT_SLOT', 1.52, 0.60, 0.35, 0.00),
+    ('PRODUCT_SLOT_4', 'PRODUCT_SLOT', 0.82, 0.35, 0.35, 0.00),
+    ('PRODUCT_SLOT_5', 'PRODUCT_SLOT', 1.17, 0.35, 0.35, 0.00),
+    ('PRODUCT_SLOT_6', 'PRODUCT_SLOT', 1.52, 0.35, 0.35, 0.00),
+    ('PICKUP_ZONE_1', 'PICKUP', 1.80, 0.80, 0.00, 3.14),
+    ('PICKUP_ZONE_2', 'PICKUP', 1.80, 0.20, 0.00, 3.14),
+    ('PICKUP_SLOT_1', 'PICKUP_SLOT', 1.92, 0.80, 0.35, 3.14),
+    ('PICKUP_SLOT_2', 'PICKUP_SLOT', 1.92, 0.20, 0.35, 3.14),
+    -- 충전 도크 + 교통(라우팅) 노드. TrafficManager 그래프 경로를 MoveCommand waypoint
+    -- 리스트로 로봇에 전송하려면 중간 경유지도 DB pose 가 있어야 한다.
+    -- 좌표는 traffic_manager.py DEFAULT_ZONE_COORDS 와 일치(좌하단 원점).
+    ('CHARGING_DOCK_1', 'CHARGING', 0.14, 0.15, 0.00, 0.00),
+    ('CHARGING_DOCK_2', 'CHARGING', 0.31, 0.15, 0.00, 0.00),
+    ('TRAFFIC_L1', 'TRAFFIC', 0.45, 0.85, 0.00, 0.00),
+    ('TRAFFIC_L2', 'TRAFFIC', 0.45, 0.40, 0.00, 0.00),
+    ('TRAFFIC_L3', 'TRAFFIC', 0.45, 0.15, 0.00, 0.00),
+    ('TRAFFIC_T1', 'TRAFFIC', 0.70, 0.85, 0.00, 0.00),
+    ('TRAFFIC_T2', 'TRAFFIC', 1.05, 0.85, 0.00, 0.00),
+    ('TRAFFIC_T3', 'TRAFFIC', 1.40, 0.85, 0.00, 0.00),
+    ('TRAFFIC_B1', 'TRAFFIC', 0.70, 0.15, 0.00, 0.00),
+    ('TRAFFIC_B2', 'TRAFFIC', 1.05, 0.15, 0.00, 0.00),
+    ('TRAFFIC_B3', 'TRAFFIC', 1.40, 0.15, 0.00, 0.00);
 
 INSERT INTO product (name, image_url, stock_qty, storage_zone_id) VALUES
     ('우유', '/static/img/milk.png', 2, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_1')),
@@ -53,7 +68,7 @@ INSERT INTO robot (
     pos_y,
     pos_theta
 ) VALUES
-    ('PICKY1', 1, 'PICKY', 'IDLE', 'STANDBY', NULL, '/picky1', 100, 0.90, 0.82, 0.00),
+    ('PICKY1', 1, 'PICKY', 'IDLE', 'STANDBY', NULL, '/picky1', 100, 0.14, 0.40, 0.00),
     ('COBOT1', 1, 'COBOT', 'IDLE', NULL, 'STANDBY', '/cobot1', NULL, NULL, NULL, NULL),
-    ('PICKY2', 2, 'PICKY', 'IDLE', 'STANDBY', NULL, '/picky2', 100, 0.90, 0.08, 0.00),
+    ('PICKY2', 2, 'PICKY', 'IDLE', 'STANDBY', NULL, '/picky2', 100, 0.31, 0.40, 0.00),
     ('COBOT2', 2, 'COBOT', 'IDLE', NULL, 'STANDBY', '/cobot2', NULL, NULL, NULL, NULL);

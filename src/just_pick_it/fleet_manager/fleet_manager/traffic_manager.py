@@ -104,12 +104,12 @@ STANDBY_ZONES: list[str] = ['STANDBY_ZONE_1', 'STANDBY_ZONE_2']
 # Fleet API 의 /api/fleet/zones 응답이 있으면 그 값으로 덮어쓴다.
 DEFAULT_ZONE_COORDS: dict[str, tuple[float, float]] = {
     # 좌측 충전 구역 (도킹 위치)
-    'CHARGING_DOCK_1':  (0.10, 0.10),
-    'CHARGING_DOCK_2':  (0.27, 0.10),
+    'CHARGING_DOCK_1':  (0.14, 0.15),
+    'CHARGING_DOCK_2':  (0.31, 0.15),
 
-    # 좌측 대기 구역 (도킹 진입 위치)
-    'STANDBY_ZONE_1':   (0.10, 0.40),
-    'STANDBY_ZONE_2':   (0.27, 0.40),
+    # 좌측 대기 구역 (도킹 진입 위치, 각 도크 채널 바로 위)
+    'STANDBY_ZONE_1':   (0.14, 0.40),
+    'STANDBY_ZONE_2':   (0.31, 0.40),
 
     # 좌측 재고 구역
     'STOCK_ZONE':       (0.18, 0.85),
