@@ -9,8 +9,8 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
-from geometry_msgs.msg import Twist
-from std_msgs.msg import String
+from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
+from std_msgs.msg import Float32, String
 
 from just_pick_it_interfaces.action import DockCommand, MoveCommand
 
@@ -37,11 +37,27 @@ ARRIVAL_STATE = {
     'RETURN_HOME':     'STANDBY',
 }
 
+# 충전 중 배터리가 이 값(%)을 넘으면 picky_state 를 CHARGING -> STANDBY 로 바꾼다.
+# 상태만 바꾸고 물리 이동(도크 이탈)은 하지 않는다. Fleet 의 작업 배정 게이트가
+# picky_state STANDBY 를 요구하므로, 이 전환이 있어야 충전 후 새 주문을 받는다.
+BATTERY_STANDBY_THRESHOLD = 30.0
+
 
 def quat_to_yaw(q) -> float:
     siny = 2.0 * (q.w * q.z + q.x * q.y)
     cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
     return math.atan2(siny, cosy)
+
+
+def normalize_angle(a: float) -> float:
+    """각도를 (-pi, pi] 로 정규화한다."""
+    return math.atan2(math.sin(a), math.cos(a))
+
+
+# 목적지 도착 후 정지 회전 파라미터
+STOP_ROTATE_SPEED = 0.8        # [rad/s]
+STOP_ROTATE_TOL = 0.05         # [rad] 약 3도
+STOP_ROTATE_TIMEOUT = 8.0      # [s]
 
 
 class StateManager(Node):
@@ -64,7 +80,7 @@ class StateManager(Node):
 
         self.declare_parameter('robot_id', 'PICKY1')
         self.declare_parameter('state_publish_interval_sec', 1.0)
-        self.declare_parameter('dock_departure_distance', 0.08)
+        self.declare_parameter('dock_departure_distance', 0.20)
 
         # 충전 도크별 ArUco 마커 ID와 도크의 절대 좌표(map frame).
         # DockCommand goal 의 dock_name 으로 lookup 한다.
@@ -101,6 +117,10 @@ class StateManager(Node):
 
         self._lock = threading.Lock()
         self._picky_state = 'CHARGING'
+        # 물리적으로 충전 도크에 있는지. picky_state 와 분리한다. 배터리 임계 초과 시
+        # 상태는 STANDBY 로 바뀌어도 도크에는 그대로 있으므로, move 수신 시 실제
+        # 도크 이탈(undock) 여부 판정에 쓴다. 부팅 시 도크에서 시작한다고 가정.
+        self._at_dock = True
 
         # Action과 타이머를 동시에 처리하기 위해 ReentrantCallbackGroup 사용
         cb_group = ReentrantCallbackGroup()
@@ -110,6 +130,18 @@ class StateManager(Node):
         self._state_pub = self.create_publisher(String, 'picky_state', 10)
         # 도크 이탈 시 직접 구동용
         self._cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
+
+        # 배터리 구독: 충전 중 배터리가 임계 초과면 CHARGING -> STANDBY 전환(상태만).
+        self._battery_sub = self.create_subscription(
+            Float32, 'battery/percent', self._on_battery, 10, callback_group=cb_group
+        )
+
+        # amcl pose 구독: 목적지 도착 후 정지 회전(사방향 스냅)에 현재 yaw 사용.
+        self._cur_yaw = 0.0
+        self._pose_sub = self.create_subscription(
+            PoseWithCovarianceStamped, 'amcl_pose', self._on_pose, 10,
+            callback_group=cb_group,
+        )
 
         # Task Manager 이동 명령 수신 Action Server
         self._move_action_server = ActionServer(
@@ -181,12 +213,16 @@ class StateManager(Node):
             f'[StateManager] MOVE 실행: {task_type}, waypoints={len(waypoints)}개'
         )
 
-        # 충전 도크에 있을 경우 이탈 동작 우선 수행
-        # 이탈 직후 picky_state 변경 → Traffic Manager가 도크 점유 자동 해제
+        # 도크 이탈은 'STANDBY 상태이면서 물리적으로 도크에 있을 때'만 수행한다.
+        # 배터리 임계 초과로 CHARGING -> STANDBY 만 된 상태에서는 이동하지 않고,
+        # 실제 move task 가 와야 여기서 이탈한다(STANDBY 상태에서만 undock).
         with self._lock:
+            at_dock = self._at_dock
             current_state = self._picky_state
-        if current_state == 'CHARGING':
+        if at_dock and current_state == 'STANDBY':
             self._depart_from_dock()
+            with self._lock:
+                self._at_dock = False
 
         self._set_state(TASK_TO_MOVING_STATE[task_type])
 
@@ -204,21 +240,56 @@ class StateManager(Node):
 
             x = wp.pose.position.x
             y = wp.pose.position.y
-            theta = quat_to_yaw(wp.pose.orientation)
+            # zone 의 theta 는 쓰지 않는다. 중간 경유지는 통과만 하고, 마지막
+            # 목적지에서만 도착 heading 기준 가장 가까운 90° 로 정지 자세를 잡는다.
+            is_final = (i == len(waypoints) - 1)
 
-            if not self._move.move_to_goal(x, y, theta):
+            if not self._move.move_to_goal(x, y, final=is_final):
                 self._set_state('ERROR_RECOVERY')
                 goal_handle.abort()
                 return MoveCommand.Result(
                     success=False, message=f'navigation failed at waypoint {i}'
                 )
 
-        # 전체 이동 완료 후 상태 전환.
+        # 전체 이동 완료. 목적지에서 도착 heading 기준 가장 가까운 90°(축 정렬)로
+        # 정지 자세를 잡는다(회전 최소). zone theta 는 사용하지 않는다.
+        self._rotate_to_nearest_90()
+
         # RETURN_HOME 도 여기서 STANDBY 로 종료한다. 도킹은 별도 DOCK_IN task 가 수행.
         self._set_state(ARRIVAL_STATE[task_type])
 
         goal_handle.succeed()
         return MoveCommand.Result(success=True, message='ok')
+
+    # ── 정지 자세(사방향 스냅) 회전 ────────────────────────────────────
+
+    def _on_pose(self, msg: PoseWithCovarianceStamped) -> None:
+        with self._lock:
+            self._cur_yaw = quat_to_yaw(msg.pose.pose.orientation)
+
+    def _rotate_to_nearest_90(self) -> None:
+        """현재 heading 에서 가장 가까운 90°(0/90/180/270)로 제자리 회전한다.
+
+        zone 의 theta 대신, 도착 시점 heading 에서 회전이 최소가 되는 축 정렬 방향을
+        정지 자세로 삼는다. cmd_vel 로 직접 제자리 회전한다.
+        """
+        with self._lock:
+            cur = self._cur_yaw
+        target = normalize_angle(round(cur / (math.pi / 2.0)) * (math.pi / 2.0))
+        self.get_logger().info(
+            f'[StateManager] 정지 자세 회전: {cur:.2f} -> {target:.2f} rad'
+        )
+        deadline = time.time() + STOP_ROTATE_TIMEOUT
+        while time.time() < deadline:
+            with self._lock:
+                err = normalize_angle(target - self._cur_yaw)
+            if abs(err) < STOP_ROTATE_TOL:
+                break
+            twist = Twist()
+            twist.angular.z = STOP_ROTATE_SPEED if err > 0 else -STOP_ROTATE_SPEED
+            self._cmd_vel_pub.publish(twist)
+            time.sleep(0.05)
+        self._cmd_vel_pub.publish(Twist())  # 정지
 
     # ── 도크 이탈 ──────────────────────────────────────────────────────
 
@@ -284,9 +355,30 @@ class StateManager(Node):
                 success=False, message=f'reverse docking failed at {dock_name}'
             )
 
+        with self._lock:
+            self._at_dock = True
         self._set_state('CHARGING')
         goal_handle.succeed()
         return DockCommand.Result(success=True, message=f'docked at {dock_name}')
+
+    # ── 배터리 기반 충전 완료 전환 ──────────────────────────────────────
+
+    def _on_battery(self, msg: Float32) -> None:
+        """충전 중 배터리가 임계를 넘으면 picky_state 를 STANDBY 로 바꾼다.
+
+        상태만 바꾸고 도크 이탈(undock)은 하지 않는다. _at_dock 은 True 로 유지되어
+        실제 move task 수신 시 _execute_move 에서 STANDBY 상태로 이탈한다.
+        """
+        if msg.data <= BATTERY_STANDBY_THRESHOLD:
+            return
+        with self._lock:
+            is_charging = self._picky_state == 'CHARGING'
+        if is_charging:
+            self.get_logger().info(
+                f'[StateManager] 배터리 {msg.data:.0f}% > '
+                f'{BATTERY_STANDBY_THRESHOLD:.0f}% -> CHARGING 에서 STANDBY 로 전환(도크 유지)'
+            )
+            self._set_state('STANDBY')
 
     # ── 주기 상태 publish ──────────────────────────────────────────────
 

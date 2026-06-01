@@ -44,7 +44,7 @@ class MoveToGoal(Node):
         self.declare_parameter("precision_approach_distance", 0.3)
         self.declare_parameter("xy_goal_tolerance", 0.05)
         self.declare_parameter("yaw_goal_tolerance", 0.05)
-        self.declare_parameter("nav_timeout_sec", 60.0)
+        self.declare_parameter("nav_timeout_sec", 120.0)
 
         self._prec_dist = self.get_parameter("precision_approach_distance").value
         self._xy_tol = self.get_parameter("xy_goal_tolerance").value
@@ -69,23 +69,27 @@ class MoveToGoal(Node):
     # 외부 인터페이스 (blocking, executor 스레드에서 호출)
     # ------------------------------------------------------------------ #
 
-    def move_to_goal(self, x: float, y: float, yaw: float) -> bool:
-        """
-        목표(x, y, yaw)까지 이동. 성공 시 True, 실패/타임아웃 시 False.
+    def move_to_goal(self, x: float, y: float, final: bool = True) -> bool:
+        """목표 (x, y) '위치'까지 이동(도착)만 한다. 정지 자세(회전)는 State Machine 담당.
+
+        zone 의 theta 는 사용하지 않는다.
+        - 중간 경유지(final=False): nav2 로 근처까지 통과만 한다(정밀접근 생략).
+        - 목적지(final=True): 정밀접근으로 위치 오차 이내까지 도달한다(회전 없음).
         task_manager의 daemon 스레드에서 호출.
         """
-        self.get_logger().info(f"move_to_goal: target=({x:.3f},{y:.3f},{yaw:.3f})")
+        self.get_logger().info(f"move_to_goal: target=({x:.3f},{y:.3f}) final={final}")
 
-        if not self._nav2_navigate(x, y, yaw):
+        if not self._nav2_navigate(x, y, 0.0):
             return False
+
+        if not final:
+            self.get_logger().info("move_to_goal: 경유지 통과")
+            return True
 
         if not self._precision_approach(x, y):
             return False
 
-        if not self._yaw_correction(yaw):
-            return False
-
-        self.get_logger().info("move_to_goal: SUCCESS")
+        self.get_logger().info("move_to_goal: 위치 도착")
         return True
 
     def cancel_navigation(self):
