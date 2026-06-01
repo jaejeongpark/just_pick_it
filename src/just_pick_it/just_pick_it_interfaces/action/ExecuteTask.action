@@ -1,0 +1,19 @@
+# Task Manager가 Cobot State Manager에게 작업 명령을 전달하는 Action
+
+# Goal
+string task_id
+string task_type     # SORTING_AND_LOAD / INSPECTION / UNLOAD / DISPLAY_SCAN / DISPLAY_PLACE
+string robot_name
+---
+# Result
+bool success
+string status        # SUCCESS / FAILED / CANCELLED
+string message
+int32 detected_quantity
+int32 stock_delta
+---
+# Feedback
+string state
+string message
+float32 progress     # 0.0 ~ 1.0
+int32 detected_quantity
