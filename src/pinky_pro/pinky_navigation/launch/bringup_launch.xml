@@ -3,7 +3,7 @@
     <set_env name="RCUTILS_LOGGING_BUFFERED_STREAM" value="1"/>
 
     <arg name="namespace" default=""/>
-    <arg name="map" default="$(find-pkg-share pinky_navigation)/map/sync_map.yaml"/>
+    <arg name="map" default=""/>
     <arg name="use_sim_time" default="False"/>
     <arg name="params_file" default="$(find-pkg-share pinky_navigation)/params/nav2_params.yaml"/>
     <arg name="autostart" default="True"/>
@@ -32,10 +32,6 @@
         </node>
 
         <include file="$(find-pkg-share pinky_navigation)/launch/localization_launch.xml">
-            <!-- namespace는 위 group의 push-ros-namespace에서 이미 적용된다.
-                 부모 namespace가 자식으로 누수되어 자식이 또 push하면
-                 picky1 이 두 번 붙으므로 여기서 빈 값으로 막는다. -->
-            <arg name="namespace" value=""/>
             <arg name="params_file" value="$(var params_file)"/>
             <arg name="map" value="$(var map)"/>
             <arg name="use_sim_time" value="$(var use_sim_time)"/>
@@ -47,10 +43,6 @@
         </include>
 
         <include file="$(find-pkg-share pinky_navigation)/launch/navigation_launch.xml">
-            <!-- namespace는 위 group의 push-ros-namespace에서 이미 적용된다.
-                 부모 namespace가 자식으로 누수되어 자식이 또 push하면
-                 picky1 이 두 번 붙으므로 여기서 빈 값으로 막는다. -->
-            <arg name="namespace" value=""/>
             <arg name="params_file" value="$(var params_file)"/>
             <arg name="use_sim_time" value="$(var use_sim_time)"/>
             <arg name="autostart" value="$(var autostart)"/>

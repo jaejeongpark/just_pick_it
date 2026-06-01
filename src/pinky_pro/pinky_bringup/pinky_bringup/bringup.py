@@ -2,7 +2,6 @@
 
 import rclpy
 from rclpy.node import Node
-from rclpy.duration import Duration
 import math
 import time
 
@@ -155,15 +154,9 @@ class Pinky(Node):
         v_x = delta_distance / dt if dt > 0 else 0.0
         vth = delta_theta / dt if dt > 0 else 0.0
 
-        # amcl/Nav2 등 TF 소비자가 약간 미래 stamp 의 scan 을 보간할 수 있도록
-        # TF/odom 을 0.1s 미래로 발행한다. 모터 피드백을 읽고 계산하는 사이의
-        # 지연으로 odom stamp 가 scan 보다 과거가 되어 amcl 이 "extrapolation
-        # into the future" 로 scan 을 drop 하던 문제를 막는다. dt/last_time 은
-        # 실제 시각(current_time)으로 유지해 적분 정확도는 보존한다.
-        stamp_time = current_time + Duration(seconds=0.1)
-        self._publish_tf(stamp_time)
-        self._publish_odometry(stamp_time, v_x, vth)
-        self._publish_joint_states(stamp_time, rpm_l, rpm_r)
+        self._publish_tf(current_time)
+        self._publish_odometry(current_time, v_x, vth)
+        self._publish_joint_states(current_time, rpm_l, rpm_r)
 
         self.last_time = current_time
 
