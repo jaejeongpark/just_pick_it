@@ -1,6 +1,6 @@
 # Fleet Manager 작업 현황 (담당 · 결정 · TODO)
 
-갱신: 2026-05-29. 설계·동작은 `docs/Fleet_manager.md`, 인터페이스 계약은 `docs/Fleet_manager_interface.md`.
+갱신: 2026-06-01. 설계·동작은 `docs/Fleet_manager.md`, 인터페이스 계약은 `docs/Fleet_manager_interface.md`.
 
 심각도: **S**(기능 결함) / **R**(견고성) / **C**(문서·정합) / **Q**(테스트).
 
@@ -53,6 +53,30 @@ C3 수정 문서:
 - `docs/Fleet_manager_TODO.md` D5 결정·이 항목 추가
 - `src/just_pick_it/pinky_amr_1/docs/state_manager.md` move_command 트리거 task 목록
 - `docs/ros2_driving_beginner_guide.md` 주행 task 표 / COBOT task 목록 / Milestone 8
+
+### 2026-06-01 실로봇 주행 통합 (picky1 단일로봇)
+
+주문 흐름을 실주행으로 끝까지 돌리며 발견·수정. dev 에 작업별로 커밋됨.
+
+- **맵**: 좌측벽 과포착으로 도크 출구가 막혀 재맵핑 → 좌하단 코너 원점(`[0,0,0]`),
+  가짜 기둥/노이즈 정리. SLAM launch(`picky1_slam.launch.py`) 추가.
+- **Nav2 namespace**: `pinky_amr_1/picky1_nav.launch.py` — RewrittenYaml 로 `/picky1`
+  노드에 nav2_params 적용(기존 XML 은 namespace 에서 params 미적용 → controller 가
+  기본 DWB(critics 없음)로 죽던 버그). 소형 아레나 nav 튜닝(inflation 0.03,
+  use_cost_regulated/use_collision_detection off → RPP 크롤링 해소).
+- **zone/traffic**: zone 좌표를 맵 좌하단 원점 레이아웃에 정합 + 로봇 홈 갱신.
+  `TRAFFIC_*`/`CHARGING_DOCK_*` zone 을 DB 에 시드(경유지 리스트 전송용 pose).
+- **Fleet**: MoveCommand 에 TrafficManager 예약 **전체 경로(경유지 리스트)** 전송 +
+  Action 피드백 인덱스(+1)로 traffic 점유 단계 해제. config `robot_ids` 외 로봇은
+  배정 후보 제외(`_robot_available`) — DB stale 배터리로 **PICKY2 오배정**되던 문제
+  해결. gateway action 클라이언트 reentrant 콜백그룹 + 기동 prewarm + wait timeout
+  2→8s(크로스머신 첫 주문 discovery 실패 방지). 배터리 작업배정/충전복귀 임계 40→30.
+- **State Manager**: 배터리>30% 면 `CHARGING`→`STANDBY`(상태만, 이동 없음, Fleet 배정
+  게이트 충족). undock 은 `_at_dock`+`STANDBY` 일 때만(물리 도크 여부를 picky_state 와
+  분리). 목적지 도착 후 가장 가까운 90°(축 정렬)로 정지 회전(zone theta 미사용,
+  회전 최소). `move_to_goal` 은 위치 도착 전담(경유지 통과·회전 제거), nav_timeout 120s.
+
+미완: 주문 E2E 실주행 검증(배터리 충전 후). `_at_dock` 부팅 가정 견고화(낮음).
 
 ### 남은 작업
 
