@@ -10,7 +10,13 @@ PICKY1/PICKY2가 같은 ROS_DOMAIN_ID에서 실행될 때 `/odom`, `/cmd_vel`, `
 """
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription
+from launch.actions import (
+    DeclareLaunchArgument,
+    GroupAction,
+    IncludeLaunchDescription,
+    SetLaunchConfiguration,
+)
+from launch.conditions import IfCondition
 from launch.launch_description_sources import AnyLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import SetRemap, Node
@@ -21,6 +27,7 @@ def generate_launch_description():
     """원본 `pinky_bringup`을 namespace/remap 기준으로 실행한다."""
     namespace = LaunchConfiguration('namespace')
     dest_ip = LaunchConfiguration('dest_ip')
+    enable_camera = LaunchConfiguration('enable_camera')
 
     pinky_bringup_launch = PathJoinSubstitution(
         [FindPackageShare("pinky_bringup"), "launch", "bringup_robot.launch.xml"]
@@ -40,13 +47,27 @@ def generate_launch_description():
             SetRemap(src="/battery/voltage", dst=ns("battery/voltage")),
             SetRemap(src="/tf", dst=ns("tf")),
             SetRemap(src="/tf_static", dst=ns("tf_static")),
+            SetRemap(src="/robot_description", dst=ns("robot_description")),
             SetRemap(src="/camera/image_raw", dst=ns("camera/image_raw")),
-            IncludeLaunchDescription(AnyLaunchDescriptionSource(pinky_bringup_launch)),
+            # pinky_bringup(원본)을 포함하되 이 include 안에서만 namespace 를 비운다.
+            # upload_robot 의 robot_state_publisher 는 frame_prefix=[namespace] 라, 상속된
+            # namespace(picky1)를 받으면 picky1/base_link 처럼 접두어 frame 을 낸다. 그런데
+            # 베이스 드라이버는 odom, base_footprint 를 무접두어로 내므로 두 트리가 끊긴다.
+            # namespace 를 비우면 rsp 도 무접두어로 발행해 트리가 이어진다. 토픽 분리는 위
+            # SetRemap(/tf -> /picky1/tf 등)이 그대로 담당한다(scoped 그룹이 상속받음).
+            GroupAction(
+                [
+                    SetLaunchConfiguration("namespace", ""),
+                    IncludeLaunchDescription(AnyLaunchDescriptionSource(pinky_bringup_launch)),
+                ],
+                scoped=True,
+            ),
             Node(
                 package="just_pick_it_perception",
                 executable="udp_image_sender",
                 name="pi_camera_udp_publisher",
                 output="screen",
+                condition=IfCondition(enable_camera),
                 parameters=[
                     {"dest_port": 5001},
                     {"dest_ip": dest_ip},
@@ -66,5 +87,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'dest_ip', default_value='192.168.1.73',
             description='카메라 UDP 전송 대상 IP (보통 관제 PC). robot/네트워크별로 바꿀 수 있다.'),
+        DeclareLaunchArgument(
+            'enable_camera', default_value='false',
+            description='카메라 UDP 스트리머(udp_image_sender) 실행 여부. 720p30 JPEG 인코딩이 '
+                        'Pi CPU 한 코어를 거의 다 먹어 주행 중 시리얼 통신을 굶긴다. reverse '
+                        'docking 때만 true 로 켠다.'),
         bringup,
     ])
