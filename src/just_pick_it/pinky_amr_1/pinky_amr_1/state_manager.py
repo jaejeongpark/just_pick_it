@@ -54,10 +54,6 @@ def normalize_angle(a: float) -> float:
     return math.atan2(math.sin(a), math.cos(a))
 
 
-# 목적지 도착 후 정지 회전 파라미터
-STOP_ROTATE_SPEED = 0.8        # [rad/s]
-STOP_ROTATE_TOL = 0.05         # [rad] 약 3도
-STOP_ROTATE_TIMEOUT = 8.0      # [s]
 
 
 class StateManager(Node):
@@ -212,6 +208,11 @@ class StateManager(Node):
         self.get_logger().info(
             f'[StateManager] MOVE 실행: {task_type}, waypoints={len(waypoints)}개'
         )
+        self.get_logger().info(
+            '[PATHTRACE][StateMachine] 수신 waypoints=' + str(
+                [(round(w.pose.position.x, 3), round(w.pose.position.y, 3)) for w in waypoints]
+            )
+        )
 
         # 도크 이탈은 'STANDBY 상태이면서 물리적으로 도크에 있을 때'만 수행한다.
         # 배터리 임계 초과로 CHARGING -> STANDBY 만 된 상태에서는 이동하지 않고,
@@ -244,6 +245,10 @@ class StateManager(Node):
             # 목적지에서만 도착 heading 기준 가장 가까운 90° 로 정지 자세를 잡는다.
             is_final = (i == len(waypoints) - 1)
 
+            self.get_logger().info(
+                f'[PATHTRACE][StateMachine->MoveToGoal] idx={i} 좌표=({x:.3f}, {y:.3f}) final={is_final}'
+            )
+
             if not self._move.move_to_goal(x, y, final=is_final):
                 self._set_state('ERROR_RECOVERY')
                 goal_handle.abort()
@@ -251,9 +256,8 @@ class StateManager(Node):
                     success=False, message=f'navigation failed at waypoint {i}'
                 )
 
-        # 전체 이동 완료. 목적지에서 도착 heading 기준 가장 가까운 90°(축 정렬)로
-        # 정지 자세를 잡는다(회전 최소). zone theta 는 사용하지 않는다.
-        self._rotate_to_nearest_90()
+        # 전체 이동 완료. 정지 자세 회전(사방향 90° 스냅)은 move_to_goal 의 최종 목적지
+        # (final=True) 처리로 옮겼다. 여기서는 추가 회전하지 않는다(중간 경유지도 회전 없음).
 
         # RETURN_HOME 도 여기서 STANDBY 로 종료한다. 도킹은 별도 DOCK_IN task 가 수행.
         self._set_state(ARRIVAL_STATE[task_type])
@@ -266,30 +270,6 @@ class StateManager(Node):
     def _on_pose(self, msg: PoseWithCovarianceStamped) -> None:
         with self._lock:
             self._cur_yaw = quat_to_yaw(msg.pose.pose.orientation)
-
-    def _rotate_to_nearest_90(self) -> None:
-        """현재 heading 에서 가장 가까운 90°(0/90/180/270)로 제자리 회전한다.
-
-        zone 의 theta 대신, 도착 시점 heading 에서 회전이 최소가 되는 축 정렬 방향을
-        정지 자세로 삼는다. cmd_vel 로 직접 제자리 회전한다.
-        """
-        with self._lock:
-            cur = self._cur_yaw
-        target = normalize_angle(round(cur / (math.pi / 2.0)) * (math.pi / 2.0))
-        self.get_logger().info(
-            f'[StateManager] 정지 자세 회전: {cur:.2f} -> {target:.2f} rad'
-        )
-        deadline = time.time() + STOP_ROTATE_TIMEOUT
-        while time.time() < deadline:
-            with self._lock:
-                err = normalize_angle(target - self._cur_yaw)
-            if abs(err) < STOP_ROTATE_TOL:
-                break
-            twist = Twist()
-            twist.angular.z = STOP_ROTATE_SPEED if err > 0 else -STOP_ROTATE_SPEED
-            self._cmd_vel_pub.publish(twist)
-            time.sleep(0.05)
-        self._cmd_vel_pub.publish(Twist())  # 정지
 
     # ── 도크 이탈 ──────────────────────────────────────────────────────
 
