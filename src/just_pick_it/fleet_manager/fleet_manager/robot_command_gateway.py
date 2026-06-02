@@ -125,6 +125,12 @@ class RobotCommandGateway:
             f"[RobotCommandGateway] {robot_name} task_id={task_id} {task_type} 전송, "
             f"waypoints={len(poses)}"
         )
+        self._node.get_logger().info(
+            f"[PATHTRACE][Gateway->StateMachine] task_id={task_id} zone={list(waypoints)} "
+            "poses=[" + ", ".join(
+                f"({p.pose.position.x:.3f},{p.pose.position.y:.3f})" for p in poses
+            ) + "]"
+        )
 
         send_future = client.send_goal_async(
             goal,

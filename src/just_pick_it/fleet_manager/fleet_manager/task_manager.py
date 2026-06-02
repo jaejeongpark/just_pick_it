@@ -2199,11 +2199,20 @@ class TaskManager:
             self._move_waypoints_by_task.pop(task_id, None)
             return False
 
+        traffic_wps = self._move_waypoints_by_task.get(task_id, ())
+        gateway_wps = self._move_command_waypoints_for_task(task)
+        self._node.get_logger().info(
+            f"[PATHTRACE][TrafficManager] task_id={task_id} 예약경로(zone)={list(traffic_wps)}"
+        )
+        self._node.get_logger().info(
+            f"[PATHTRACE][TaskManager->Gateway] task_id={task_id} 전송(zone, source제외)={list(gateway_wps)}"
+        )
+
         sent = self._robot_gateway.send_move_task(
             robot_name=robot_name,
             task_id=task_id,
             task_type=task_type,
-            waypoints=self._move_command_waypoints_for_task(task),
+            waypoints=gateway_wps,
             zone_map=self._repo.get_zone_map(),
             feedback_callback=self.handle_move_feedback,
             result_callback=self.handle_task_result,
