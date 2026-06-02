@@ -46,6 +46,7 @@ setup(
             'udp_image_video_gen = just_pick_it_perception.udp_image_video_gen:main',
             'usb_camera = just_pick_it_perception.usb_camera_node:main',
             'apriltag_detector_real = just_pick_it_perception.apriltag_detector_real:main',
+            'yolo_seg_trainer = just_pick_it_perception.yolo_seg_trainer:main',
         ],
     },
 )

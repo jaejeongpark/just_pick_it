@@ -1,12 +1,18 @@
+import socket
+import struct
+
 import cv2
 import numpy as np
 import rclpy
 from cv_bridge import CvBridge
+from just_pick_it_interfaces.msg import TrackedObject, TrackedObjectArray
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import Header
 
-from just_pick_it_interfaces.msg import TrackedObject, TrackedObjectArray
+_HEADER_FMT = '>IHH'
+_HEADER_SIZE = struct.calcsize(_HEADER_FMT)
+_RECV_BUF = 65536
 
 
 class DetectionTrackerNode(Node):
@@ -25,19 +31,24 @@ class DetectionTrackerNode(Node):
 
         self._track_first_seen: dict[int, int] = {}
         self._frame_counter = 0
+        self._udp_frames: dict[int, dict[int, bytes]] = {}
 
         self._pub_objects = self.create_publisher(
             TrackedObjectArray, 'detection/tracked_objects', 10)
         self._pub_annotated = self.create_publisher(
             Image, 'detection/annotated_image', 10)
 
-        image_topic = self.get_parameter('image_topic').value
-        self.create_subscription(Image, image_topic, self._image_cb, 10)
+        udp_port = self.get_parameter('udp_port').value
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._sock.bind(('', udp_port))
+        self._sock.setblocking(False)
+
+        self.create_timer(1.0 / 30.0, self._image_cb)
 
         self.get_logger().info(
             f'DetectionTrackerNode ready — model: '
             f'{self.get_parameter("model_path").value}, '
-            f'topic: {image_topic}'
+            f'UDP port: {udp_port}'
         )
 
     # ------------------------------------------------------------------ setup
@@ -46,9 +57,10 @@ class DetectionTrackerNode(Node):
         self.declare_parameter('model_path', 'yolov8n-seg.pt')
         self.declare_parameter('confidence', 0.5)
         self.declare_parameter('iou_threshold', 0.45)
-        self.declare_parameter('target_classes', rclpy.Parameter.Type.STRING_ARRAY)
+        self.declare_parameter('target_classes', [''])
         self.declare_parameter('consistency_frames', 5)
-        self.declare_parameter('image_topic', '/camera_head/color/image_raw')
+        self.declare_parameter('udp_port', 9870)
+        self.declare_parameter('frame_id', 'camera_link')
 
     def _load_model(self):
         try:
@@ -61,7 +73,9 @@ class DetectionTrackerNode(Node):
         model = YOLO(model_path)
         self.get_logger().info(f'YOLO 모델 로드: {model_path}, 클래스: {model.names}')
 
-        target_classes_param = self.get_parameter('target_classes').value
+        target_classes_param = [
+            c for c in self.get_parameter('target_classes').value if c
+        ]
         if target_classes_param:
             name_to_id = {v: k for k, v in model.names.items()}
             self._classes_filter = [
@@ -77,9 +91,15 @@ class DetectionTrackerNode(Node):
 
     # ---------------------------------------------------------------- callback
 
-    def _image_cb(self, msg: Image):
-        frame = self._bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+    def _image_cb(self):
+        frame = self._recv_frame()
+        if frame is None:
+            return
+
         self._frame_counter += 1
+        stamp = self.get_clock().now().to_msg()
+        frame_id = self.get_parameter('frame_id').value
+        header = Header(stamp=stamp, frame_id=frame_id)
 
         conf = self.get_parameter('confidence').value
         iou = self.get_parameter('iou_threshold').value
@@ -97,11 +117,9 @@ class DetectionTrackerNode(Node):
 
         consistency = self.get_parameter('consistency_frames').value
         tracked_array = TrackedObjectArray()
-        tracked_array.header = Header(
-            stamp=msg.header.stamp,
-            frame_id=msg.header.frame_id,
-        )
+        tracked_array.header = header
 
+        boxes = None
         if results and results[0].boxes is not None:
             r = results[0]
             boxes = r.boxes
@@ -122,7 +140,7 @@ class DetectionTrackerNode(Node):
                     continue
 
                 obj = self._build_tracked_object(
-                    box, masks, i, track_id, frame_count, r.names, msg.header,
+                    box, masks, i, track_id, frame_count, r.names, header,
                 )
                 tracked_array.objects.append(obj)
 
@@ -130,10 +148,36 @@ class DetectionTrackerNode(Node):
 
         annotated = results[0].plot() if results else frame
         annotated_msg = self._bridge.cv2_to_imgmsg(annotated, encoding='bgr8')
-        annotated_msg.header = msg.header
+        annotated_msg.header = header
         self._pub_annotated.publish(annotated_msg)
 
-        self._cleanup_stale_tracks(boxes if (results and results[0].boxes is not None) else None)
+        self._cleanup_stale_tracks(boxes)
+
+    def _recv_frame(self):
+        """소켓에서 패킷을 드레인하며 완성된 첫 프레임을 반환한다."""
+        while True:
+            try:
+                packet, _ = self._sock.recvfrom(_RECV_BUF)
+            except BlockingIOError:
+                return None
+
+            if len(packet) < _HEADER_SIZE:
+                continue
+
+            fid, pkt_idx, total = struct.unpack(_HEADER_FMT, packet[:_HEADER_SIZE])
+            self._udp_frames.setdefault(fid, {})[pkt_idx] = packet[_HEADER_SIZE:]
+
+            if len(self._udp_frames[fid]) == total:
+                data = b''.join(self._udp_frames[fid][i] for i in range(total))
+                del self._udp_frames[fid]
+
+                stale = [f for f in list(self._udp_frames) if f < fid - 30]
+                for f in stale:
+                    del self._udp_frames[f]
+
+                img = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+                if img is not None:
+                    return img
 
     # --------------------------------------------------------------- helpers
 

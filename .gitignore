@@ -19,3 +19,6 @@ TASK_PLAN.md
 # 학습용 영상 및 추출 프레임 (대용량 바이너리)
 *.avi
 src/just_pick_it/just_pick_it_perception/result/jetcobot_1/
+
+# YOLO 추론 결과
+runs/
