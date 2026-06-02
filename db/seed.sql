@@ -4,8 +4,8 @@
 -- *_ZONE_* = PICKY 주행/주차 pose. *_SLOT_* = COBOT 작업용 물리 pose(z=0.35 선반/슬롯 높이).
 -- TRAFFIC_*/CHARGING_DOCK_* 그래프 노드 좌표는 DB 가 아니라 DEFAULT_ZONE_COORDS 에 있다.
 INSERT INTO zone (zone_name, zone_type, pos_x, pos_y, pos_z, pos_theta) VALUES
-    ('STANDBY_ZONE_1', 'STANDBY', 0.14, 0.40, 0.00, 0.00),
-    ('STANDBY_ZONE_2', 'STANDBY', 0.31, 0.40, 0.00, 0.00),
+    ('STANDBY_ZONE_1', 'STANDBY', 0.11, 0.40, 0.00, 1.5708),
+    ('STANDBY_ZONE_2', 'STANDBY', 0.28, 0.40, 0.00, 1.5708),
     ('STOCK_ZONE', 'STOCK', 0.18, 0.85, 0.00, 0.00),
     ('STOCK_SLOT', 'STOCK_SLOT', 0.05, 0.85, 0.35, 0.00),
     ('PRODUCT_ZONE_1', 'PRODUCT', 0.70, 0.60, 0.00, 0.00),
@@ -27,11 +27,11 @@ INSERT INTO zone (zone_name, zone_type, pos_x, pos_y, pos_z, pos_theta) VALUES
     -- 충전 도크 + 교통(라우팅) 노드. TrafficManager 그래프 경로를 MoveCommand waypoint
     -- 리스트로 로봇에 전송하려면 중간 경유지도 DB pose 가 있어야 한다.
     -- 좌표는 traffic_manager.py DEFAULT_ZONE_COORDS 와 일치(좌하단 원점).
-    ('CHARGING_DOCK_1', 'CHARGING', 0.14, 0.15, 0.00, 0.00),
-    ('CHARGING_DOCK_2', 'CHARGING', 0.31, 0.15, 0.00, 0.00),
-    ('TRAFFIC_L1', 'TRAFFIC', 0.45, 0.85, 0.00, 0.00),
-    ('TRAFFIC_L2', 'TRAFFIC', 0.45, 0.40, 0.00, 0.00),
-    ('TRAFFIC_L3', 'TRAFFIC', 0.45, 0.15, 0.00, 0.00),
+    ('CHARGING_DOCK_1', 'CHARGING', 0.11, 0.07, 0.00, 1.5708),
+    ('CHARGING_DOCK_2', 'CHARGING', 0.28, 0.07, 0.00, 1.5708),
+    ('TRAFFIC_L1', 'TRAFFIC', 0.52, 0.85, 0.00, 0.00),
+    ('TRAFFIC_L2', 'TRAFFIC', 0.52, 0.40, 0.00, 0.00),
+    ('TRAFFIC_L3', 'TRAFFIC', 0.52, 0.15, 0.00, 0.00),
     ('TRAFFIC_T1', 'TRAFFIC', 0.70, 0.85, 0.00, 0.00),
     ('TRAFFIC_T2', 'TRAFFIC', 1.05, 0.85, 0.00, 0.00),
     ('TRAFFIC_T3', 'TRAFFIC', 1.40, 0.85, 0.00, 0.00),
