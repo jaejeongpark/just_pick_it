@@ -6,7 +6,7 @@ import time
 import rclpy
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
 from rclpy.node import Node
 
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
@@ -395,15 +395,37 @@ def main(args=None) -> None:
     reverse_docking_node = ReverseDocking()
     state_mgr = StateManager(move_node, reverse_docking_node)
 
-    executor = MultiThreadedExecutor(num_threads=4)
-    executor.add_node(move_node)
-    executor.add_node(reverse_docking_node)
-    executor.add_node(state_mgr)
+    # 노드별로 executor 를 분리한다. 셋을 하나의 MultiThreadedExecutor 에 모으면
+    # rclpy(7.1.x)가 wait 마다 "세 노드 전체"의 wait set 을 재구성하는데, move_to_goal 의
+    # /tf 구독이 ~58Hz 라 이 큰 재구성이 초당 58회 돌아 한 코어를 태운다(Dynamixel 시리얼까지
+    # 굶겼던 원인). executor 를 쪼개면 /tf 가 깨우는 건 move_to_goal 의 작은 wait set 뿐이고,
+    # state_manager 의 ActionServer 들은 저빈도 wait set 으로 빠져 비용이 크게 준다.
+    #
+    # move_to_goal / reverse_docking 의 blocking 메서드(move_to_goal(), reverse_dock())는
+    # state_manager 의 executor 스레드(action 콜백)에서 호출되고, 두 노드는 각자 executor 에서
+    # 계속 스핀하므로 _cur 위치 갱신·nav 액션 피드백이 막히지 않는다. 두 노드는 실행 중
+    # cancel 동시처리가 필요 없어 SingleThreaded 로 충분하다. state_manager 는 ActionServer 가
+    # 실행 중 cancel 을 받아야 하므로 MultiThreaded(Reentrant)를 유지한다.
+    move_exec = SingleThreadedExecutor()
+    move_exec.add_node(move_node)
+    dock_exec = SingleThreadedExecutor()
+    dock_exec.add_node(reverse_docking_node)
+    state_exec = MultiThreadedExecutor(num_threads=2)
+    state_exec.add_node(state_mgr)
+
+    spin_threads = [
+        threading.Thread(target=move_exec.spin, daemon=True),
+        threading.Thread(target=dock_exec.spin, daemon=True),
+    ]
+    for t in spin_threads:
+        t.start()
 
     try:
-        executor.spin()
+        state_exec.spin()
     finally:
-        executor.shutdown()
+        state_exec.shutdown()
+        move_exec.shutdown()
+        dock_exec.shutdown()
         rclpy.shutdown()
 
 
