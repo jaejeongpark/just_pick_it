@@ -1,12 +1,12 @@
+import cv2
+import numpy as np
 import rclpy
+from cv_bridge import CvBridge
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import Header
-from cv_bridge import CvBridge
 
 from just_pick_it_interfaces.msg import TrackedObject, TrackedObjectArray
-
-import numpy as np
 
 
 class DetectionTrackerNode(Node):
@@ -59,7 +59,20 @@ class DetectionTrackerNode(Node):
 
         model_path = self.get_parameter('model_path').value
         model = YOLO(model_path)
-        self.get_logger().info(f'YOLO 모델 로드: {model_path}')
+        self.get_logger().info(f'YOLO 모델 로드: {model_path}, 클래스: {model.names}')
+
+        target_classes_param = self.get_parameter('target_classes').value
+        if target_classes_param:
+            name_to_id = {v: k for k, v in model.names.items()}
+            self._classes_filter = [
+                name_to_id[c] for c in target_classes_param if c in name_to_id
+            ]
+            missing = [c for c in target_classes_param if c not in name_to_id]
+            if missing:
+                self.get_logger().warn(f'모델에 없는 클래스: {missing}')
+        else:
+            self._classes_filter = None
+
         return model
 
     # ---------------------------------------------------------------- callback
@@ -70,8 +83,7 @@ class DetectionTrackerNode(Node):
 
         conf = self.get_parameter('confidence').value
         iou = self.get_parameter('iou_threshold').value
-        target_classes_param = self.get_parameter('target_classes').value
-        classes = target_classes_param if target_classes_param else None
+        classes = self._classes_filter
 
         results = self._model.track(
             frame,
@@ -150,15 +162,34 @@ class DetectionTrackerNode(Node):
                 pts_arr = np.array(pts)
                 obj.mask_cx = float(pts_arr[:, 0].mean())
                 obj.mask_cy = float(pts_arr[:, 1].mean())
+                obj.orientation_angle = DetectionTrackerNode._compute_obb_angle(pts_arr)
             else:
                 obj.mask_cx = cx
                 obj.mask_cy = cy
+                obj.orientation_angle = 0.0
         else:
             obj.mask_cx = cx
             obj.mask_cy = cy
+            obj.orientation_angle = 0.0
 
         obj.pose_valid = False
         return obj
+
+    @staticmethod
+    def _compute_obb_angle(pts: np.ndarray) -> float:
+        """세그멘테이션 마스크 폴리곤에서 OBB 장축 각도를 계산한다.
+
+        Returns:
+            장축 각도 (deg). 0=수평, +90=수직, 범위 [-90, 90).
+        """
+        if len(pts) < 3:
+            return 0.0
+        rect = cv2.minAreaRect(np.array(pts, dtype=np.float32))
+        w, h = rect[1]
+        angle = rect[2]       # OpenCV 반환값: (-90, 0]
+        if w < h:
+            angle += 90.0     # 장축이 수직에 가까운 경우 보정
+        return float(angle)
 
     def _cleanup_stale_tracks(self, boxes):
         if boxes is None or len(boxes) == 0:

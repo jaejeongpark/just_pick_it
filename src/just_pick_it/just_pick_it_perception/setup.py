@@ -19,6 +19,7 @@ setup(
         (os.path.join('share', package_name, 'result'), glob('result/*.yaml')),
         (os.path.join('share', package_name, 'result', 'picky_1'), glob('result/picky_1/*.yaml')),
         (os.path.join('share', package_name, 'result', 'picky_2'), glob('result/picky_2/*.yaml')),
+        (os.path.join('share', package_name, 'result', 'models'), glob('result/models/*.pt')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -42,11 +43,9 @@ setup(
             'target_manager = just_pick_it_perception.target_manager_node:main',
             'udp_image_sender = just_pick_it_perception.udp_image_sender:main',
             'udp_image_receiver = just_pick_it_perception.udp_image_receiver:main',
-<<<<<<< Updated upstream
-            'apriltag_detector_real = just_pick_it_perception.apriltag_detector_real:main',
-=======
+            'udp_image_video_gen = just_pick_it_perception.udp_image_video_gen:main',
             'usb_camera = just_pick_it_perception.usb_camera_node:main',
->>>>>>> Stashed changes
+            'apriltag_detector_real = just_pick_it_perception.apriltag_detector_real:main',
         ],
     },
 )

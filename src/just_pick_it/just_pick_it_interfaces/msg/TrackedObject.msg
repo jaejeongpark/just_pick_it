@@ -11,6 +11,7 @@ float32 bbox_h
 
 float32 mask_cx
 float32 mask_cy
+float32 orientation_angle
 
 geometry_msgs/PoseStamped estimated_pose
 bool pose_valid

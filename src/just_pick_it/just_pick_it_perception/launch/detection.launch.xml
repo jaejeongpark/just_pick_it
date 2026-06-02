@@ -6,6 +6,7 @@
     <arg name="consistency_frames"      default="5"/>
     <arg name="camera_frame"            default="camera_head_link"/>
     <arg name="world_frame"             default="world"/>
+    <arg name="output_frame"            default="camera_head_link"/>
     <arg name="shelf_height_z"          default="0.15"/>
     <arg name="use_sim_time"            default="true"/>
 
@@ -33,6 +34,7 @@
         <param name="apriltag_poses_file"       value="$(var apriltag_poses_file)"/>
         <param name="camera_frame"              value="$(var camera_frame)"/>
         <param name="world_frame"               value="$(var world_frame)"/>
+        <param name="output_frame"              value="$(var output_frame)"/>
         <param name="shelf_height_z"            value="$(var shelf_height_z)"/>
         <param name="image_topic"               value="$(var image_topic)"/>
         <param from="$(var params_file)"/>

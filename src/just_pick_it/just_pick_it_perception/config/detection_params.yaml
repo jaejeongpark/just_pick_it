@@ -3,7 +3,7 @@ detection_tracker_node:
     model_path: "yolov8n-seg.pt"
     confidence: 0.5
     iou_threshold: 0.45
-    target_classes: []
+    target_classes: ["watermelon", "fanta"]
     consistency_frames: 5
     image_topic: "/camera_head/color/image_raw"
 
@@ -14,5 +14,6 @@ target_manager_node:
     apriltag_poses_file: ""
     camera_frame: "camera_head_link"
     world_frame: "world"
+    output_frame: "camera_head_link"
     image_topic: "/camera_head/color/image_raw"
     apriltag_tag_size: 0.15
