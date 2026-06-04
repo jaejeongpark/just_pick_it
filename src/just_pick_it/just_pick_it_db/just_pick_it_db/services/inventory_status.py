@@ -1,6 +1,6 @@
 LOW_STOCK_MAX = 0
-WARNING_STOCK_QTY = 1
-NORMAL_STOCK_MIN = 2
+WARNING_STOCK_QTY = 2
+NORMAL_STOCK_MIN = 3
 
 
 def stock_level(stock_qty: int) -> str:

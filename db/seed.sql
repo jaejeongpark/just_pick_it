@@ -40,12 +40,12 @@ INSERT INTO zone (zone_name, zone_type, pos_x, pos_y, pos_z, pos_theta) VALUES
     ('TRAFFIC_B3', 'TRAFFIC', 1.40, 0.15, 0.00, 0.00);
 
 INSERT INTO product (name, image_url, stock_qty, storage_zone_id) VALUES
-    ('우유', '/static/img/milk.png', 2, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_1')),
-    ('시리얼', '/static/img/cereal.png', 2, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_2')),
-    ('바나나 우유', '/static/img/banana_milk.png', 2, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_3')),
-    ('식빵', '/static/img/bread.png', 2, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_4')),
-    ('투게더', '/static/img/together.png', 2, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_5')),
-    ('바나나', '/static/img/banana.png', 2, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_6'));
+    ('우유', '/static/img/milk.png', 3, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_1')),
+    ('시리얼', '/static/img/cereal.png', 3, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_2')),
+    ('바나나 우유', '/static/img/banana_milk.png', 3, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_3')),
+    ('식빵', '/static/img/bread.png', 3, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_4')),
+    ('투게더', '/static/img/together.png', 3, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_5')),
+    ('바나나', '/static/img/banana.png', 3, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_6'));
 
 INSERT INTO pickup_slot (slot_name, status) VALUES
     ('PICKUP_SLOT_1', 'EMPTY'),
