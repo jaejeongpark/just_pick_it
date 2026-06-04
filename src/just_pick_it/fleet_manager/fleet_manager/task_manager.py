@@ -2515,8 +2515,9 @@ class TaskManager:
             )
             return
 
-        next_status = "SUCCESS" if success else "FAILED"
-        if success and task_type in COBOT_TASK_TYPES:
+        next_status = self._task_status_from_result(result, success)
+        task_succeeded = next_status == "SUCCESS"
+        if task_succeeded and task_type in COBOT_TASK_TYPES:
             self._apply_cobot_result_payload(task, result)
 
         self._repo.update_task_status(
@@ -2529,25 +2530,26 @@ class TaskManager:
 
         if task_type in PATH_RESERVED_TASK_TYPES and robot_name:
             waypoints = self._move_waypoints_by_task.get(task_id)
-            if success and waypoints and task_type in MOVE_TASK_TYPES:
+            if task_succeeded and waypoints and task_type in MOVE_TASK_TYPES:
                 self._completed_move_target_by_task[task_id] = waypoints[-1]
             self._traffic.release_path(robot_name, task_id)
             self._move_waypoints_by_task.pop(task_id, None)
 
         if task_type in COBOT_TASK_TYPES:
-            if success:
+            if task_succeeded:
                 self._preplanned_created_tasks_by_trigger.pop(task_id, None)
                 self._preplanned_move_tasks_by_trigger.pop(task_id, None)
             else:
                 self._cancel_preplanned_after_cobot_failure(task_id)
 
-        if not success:
-            self._repo.create_exception(
-                exception_type="NAVIGATION_FAILED" if task_type in PATH_RESERVED_TASK_TYPES else "SYSTEM_ERROR",
-                robot_name=robot_name,
-                task_id=task_id,
-                detail=message,
-            )
+        if not task_succeeded:
+            if next_status != "CANCELLED":
+                self._repo.create_exception(
+                    exception_type="NAVIGATION_FAILED" if task_type in PATH_RESERVED_TASK_TYPES else "SYSTEM_ERROR",
+                    robot_name=robot_name,
+                    task_id=task_id,
+                    detail=message,
+                )
             self._cleanup_finished_flow_memory(task)
             return
 
@@ -2558,6 +2560,13 @@ class TaskManager:
         self._advance_flow_after_task_success(task)
         self._dispatch_ready_tasks()
         self._cleanup_finished_flow_memory(task)
+
+    def _task_status_from_result(self, result: dict[str, Any], success: bool) -> str:
+        """Action result의 status를 우선하되, 없으면 success boolean으로 보정한다."""
+        status = str(result.get("status") or "").upper()
+        if status in FINAL_TASK_STATUSES:
+            return status
+        return "SUCCESS" if success else "FAILED"
 
     def _apply_cobot_result_payload(
         self,
@@ -2570,11 +2579,11 @@ class TaskManager:
             return
 
         updates: dict[str, int] = {}
-        detected_quantity = self._positive_int_or_none(result.get("detected_quantity"))
+        processed_quantity = self._positive_int_or_none(result.get("processed_quantity"))
         stock_delta = self._positive_int_or_none(result.get("stock_delta"))
 
-        if detected_quantity is not None:
-            updates["detected_quantity"] = detected_quantity
+        if processed_quantity is not None:
+            updates["processed_quantity"] = processed_quantity
         if stock_delta is not None:
             updates["stock_delta"] = stock_delta
 

@@ -968,7 +968,7 @@ class FleetRepository:
         *,
         product_id: int,
         requested_quantity: int | None = None,
-        detected_quantity: int | None = None,
+        processed_quantity: int | None = None,
         stock_delta: int | None = None,
         display_policy: str | None = None,
         assigned_unit_id: int | None = None,
@@ -990,7 +990,7 @@ class FleetRepository:
                     db,
                     product_id=product_id,
                     requested_quantity=requested_quantity,
-                    detected_quantity=detected_quantity,
+                    processed_quantity=processed_quantity,
                     stock_delta=stock_delta,
                     display_policy=display_policy,
                     status="REQUESTED",
@@ -1008,14 +1008,14 @@ class FleetRepository:
         *,
         status: str | None = None,
         assigned_unit_id: int | None = None,
-        detected_quantity: int | None = None,
+        processed_quantity: int | None = None,
         stock_delta: int | None = None,
     ) -> dict[str, Any] | None:
         """display_item 상태나 진열 수량 정보를 갱신한다."""
         if (
             status is None
             and assigned_unit_id is None
-            and detected_quantity is None
+            and processed_quantity is None
             and stock_delta is None
         ):
             self._log().warn(f"[FleetRepository] display_item_id={display_item_id} 변경 인자 없음")
@@ -1036,8 +1036,8 @@ class FleetRepository:
                     self._validate_robot_unit(db, assigned_unit_id)
                     display_item.assigned_unit_id = assigned_unit_id
 
-                if detected_quantity is not None:
-                    display_item.detected_quantity = detected_quantity
+                if processed_quantity is not None:
+                    display_item.processed_quantity = processed_quantity
                 if stock_delta is not None:
                     display_item.stock_delta = stock_delta
                 if status is not None:
@@ -1439,7 +1439,7 @@ class FleetRepository:
             "product_id": int(product_id),
             "product_name": (display_item.get("product_name") or product.get("name")),
             "requested_quantity": display_item.get("requested_quantity"),
-            "detected_quantity": display_item.get("detected_quantity"),
+            "processed_quantity": display_item.get("processed_quantity"),
             "stock_delta": display_item.get("stock_delta"),
             "display_policy": display_item.get("display_policy"),
             "priority": display_item.get("priority") or 2,

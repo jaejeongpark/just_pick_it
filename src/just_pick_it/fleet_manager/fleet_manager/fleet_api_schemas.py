@@ -62,7 +62,7 @@ class PickupSlotStateUpdateIn(BaseModel):
 class DisplayItemCreateIn(BaseModel):
     product_id: int
     requested_quantity: int | None = Field(default=None, gt=0)
-    detected_quantity: int | None = Field(default=None, ge=0)
+    processed_quantity: int | None = Field(default=None, ge=0)
     stock_delta: int | None = Field(default=None, ge=0)
     display_policy: str | None = None
     assigned_unit_id: int | None = None

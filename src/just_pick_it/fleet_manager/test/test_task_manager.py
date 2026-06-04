@@ -26,6 +26,7 @@ class FakeRepo:
         self.updated_tasks = []
         self.created_tasks = []
         self.exceptions = []
+        self.updated_display_items = []
 
     def list_waiting_orders(self):
         return list(self.orders)
@@ -66,6 +67,15 @@ class FakeRepo:
     def create_exception(self, **kwargs):
         self.exceptions.append(kwargs)
         return kwargs
+
+    def update_display_item(self, display_item_id: int, **kwargs):
+        self.updated_display_items.append({"display_item_id": display_item_id, **kwargs})
+        for item in self.display_items:
+            if int(item.get("display_item_id") or 0) != display_item_id:
+                continue
+            item.update(kwargs)
+            return dict(item)
+        return None
 
     def get_zone_map(self):
         names = [
@@ -212,6 +222,55 @@ def test_cobot_stowing_feedback_triggers_preplan(mock_node):
 
     manager.handle_cobot_feedback({"task_id": 11, "status": "STOWING_ARM"})
     manager.preplan_after_cobot_stowing.assert_called_once_with(11)
+
+
+def test_cobot_cancelled_result_sets_cancelled_without_exception(mock_node):
+    task = {
+        "task_id": 12,
+        "task_type": "SORTING_AND_LOAD",
+        "status": "RUNNING",
+        "assigned_robot_name": "COBOT1",
+    }
+    repo = FakeRepo(tasks=[task])
+    manager = make_manager(mock_node, repo)
+
+    manager.handle_task_result(
+        {
+            "task_id": 12,
+            "robot_name": "COBOT1",
+            "task_type": "SORTING_AND_LOAD",
+            "success": False,
+            "status": "CANCELLED",
+            "message": "작업 취소됨",
+        }
+    )
+
+    assert task["status"] == "CANCELLED"
+    assert repo.exceptions == []
+
+
+def test_cobot_processed_quantity_updates_display_item(mock_node):
+    task = {
+        "task_id": 13,
+        "task_type": "DISPLAY_PLACE",
+        "status": "RUNNING",
+        "assigned_robot_name": "COBOT1",
+        "display_item_id": 7,
+    }
+    repo = FakeRepo(tasks=[task], display_items=[{"display_item_id": 7}])
+    manager = make_manager(mock_node, repo)
+
+    manager._apply_cobot_result_payload(
+        task,
+        {
+            "processed_quantity": 3,
+            "stock_delta": 3,
+        },
+    )
+
+    assert repo.updated_display_items == [
+        {"display_item_id": 7, "processed_quantity": 3, "stock_delta": 3}
+    ]
 
 
 def test_charge_task_completes_only_above_threshold(mock_node):
