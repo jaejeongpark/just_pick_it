@@ -2,42 +2,184 @@
 
 import queue
 import signal
+import socket
+import struct
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk
+
+import cv2
+import numpy as np
 
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float64MultiArray, Empty
 
+try:
+    from PIL import Image, ImageTk
+except ImportError:
+    Image = None
+    ImageTk = None
+
 
 CMD_JOINT = 0
 CMD_COORD = 1
 
+HEADER_FMT = ">IHH"
+HEADER_SIZE = struct.calcsize(HEADER_FMT)
 
 JOINT_LIMITS = [
-    (-168.0, 168.0),   # J1
-    (-135.0, 135.0),   # J2
-    (-150.0, 150.0),   # J3
-    (-145.0, 145.0),   # J4
-    (-155.0, 160.0),   # J5
-    (-180.0, 180.0),   # J6
+    (-168.0, 168.0),
+    (-135.0, 135.0),
+    (-150.0, 150.0),
+    (-145.0, 145.0),
+    (-155.0, 160.0),
+    (-180.0, 180.0),
 ]
 
 COORD_LIMITS = [
-    (-280.0, 280.0),   # x
-    (-280.0, 280.0),   # y
-    (-70.0, 523.0),    # z
-    (-180.0, 180.0),   # rx
-    (-180.0, 180.0),   # ry
-    (-180.0, 180.0),   # rz
+    (-280.0, 280.0),
+    (-280.0, 280.0),
+    (-70.0, 523.0),
+    (-180.0, 180.0),
+    (-180.0, 180.0),
+    (-180.0, 180.0),
 ]
 
 JOINT_LABELS = ["J1", "J2", "J3", "J4", "J5", "J6"]
 COORD_LABELS = ["X", "Y", "Z", "RX", "RY", "RZ"]
 
 DEFAULT_SPEED = 20
+
+
+class UdpVideoReceiver:
+    def __init__(self, frame_queue, status_queue):
+        self.frame_queue = frame_queue
+        self.status_queue = status_queue
+
+        self.sock = None
+        self.thread = None
+        self.running = False
+        self.port = None
+
+        self.frames = {}
+        self.last_frame_time = 0.0
+
+    def start(self, port):
+        self.stop()
+
+        self.port = int(port)
+        self.running = True
+        self.frames = {}
+        self.last_frame_time = 0.0
+
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.running = False
+
+        if self.sock is not None:
+            try:
+                self.sock.close()
+            except Exception:
+                pass
+            self.sock = None
+
+    def _run(self):
+        try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.sock.bind(("", self.port))
+            self.sock.settimeout(0.5)
+
+            self.status_queue.put(f"Listening UDP video on port {self.port}")
+
+        except Exception as e:
+            self.status_queue.put(f"UDP bind failed on port {self.port}: {e}")
+            self.running = False
+            return
+
+        while self.running:
+            try:
+                packet, addr = self.sock.recvfrom(65536)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            except Exception as e:
+                self.status_queue.put(f"UDP receive error: {e}")
+                continue
+
+            if len(packet) <= HEADER_SIZE:
+                continue
+
+            try:
+                frame_id, packet_idx, total_packets = struct.unpack(
+                    HEADER_FMT,
+                    packet[:HEADER_SIZE],
+                )
+                chunk = packet[HEADER_SIZE:]
+            except Exception:
+                continue
+
+            if total_packets <= 0:
+                continue
+
+            if frame_id not in self.frames:
+                self.frames[frame_id] = {
+                    "total": total_packets,
+                    "chunks": {},
+                    "time": time.time(),
+                }
+
+            self.frames[frame_id]["chunks"][packet_idx] = chunk
+
+            # 오래된 incomplete frame 정리
+            now = time.time()
+            old_ids = [
+                fid for fid, info in self.frames.items()
+                if now - info["time"] > 2.0
+            ]
+            for fid in old_ids:
+                self.frames.pop(fid, None)
+
+            info = self.frames.get(frame_id)
+            if info is None:
+                continue
+
+            if len(info["chunks"]) == info["total"]:
+                try:
+                    jpg_data = b"".join(
+                        info["chunks"][i] for i in range(info["total"])
+                    )
+                except KeyError:
+                    self.frames.pop(frame_id, None)
+                    continue
+
+                self.frames.pop(frame_id, None)
+
+                np_data = np.frombuffer(jpg_data, dtype=np.uint8)
+                img_bgr = cv2.imdecode(np_data, cv2.IMREAD_COLOR)
+
+                if img_bgr is None:
+                    continue
+
+                img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+
+                # 큐가 밀리면 최신 프레임만 유지
+                try:
+                    while not self.frame_queue.empty():
+                        self.frame_queue.get_nowait()
+                except queue.Empty:
+                    pass
+
+                self.frame_queue.put(img_rgb)
+                self.last_frame_time = time.time()
+
+        self.status_queue.put("UDP video receiver stopped")
 
 
 class JetcobotGuiPublisher(Node):
@@ -148,6 +290,17 @@ class JetcobotSliderGUI:
         self.gripper_value_var = tk.DoubleVar(value=50.0)
         self.gripper_entry_var = tk.StringVar(value="50.00")
 
+        self.udp_port_var = tk.StringVar(value="")
+        self.video_status_var = tk.StringVar(value="UDP port 입력 후 Enter")
+        self.video_frame_queue = queue.Queue(maxsize=1)
+        self.video_status_queue = queue.Queue()
+        self.video_receiver = UdpVideoReceiver(
+            self.video_frame_queue,
+            self.video_status_queue,
+        )
+        self.video_photo = None
+        self.last_video_frame_time = 0.0
+
         self.center_angles = [-82.88, 56.42, -19.86, -93.51, 16.78, -124.71]
         self.left_scan_angles = [-82.88, 56.51, -19.33, -93.60, 24.96, -121.46]
         self.right_scan_angles = [-82.88, 56.51, -19.77, -94.65, 2.10, -129.55]
@@ -157,6 +310,8 @@ class JetcobotSliderGUI:
         self.apply_mode_ui()
 
         self.root.after(100, self.poll_status_queue)
+        self.root.after(30, self.poll_video_frame_queue)
+        self.root.after(300, self.poll_video_status_queue)
         self.ros_node.request_status()
 
     def current_limits(self):
@@ -193,9 +348,20 @@ class JetcobotSliderGUI:
             text="Jetcobot Motion Control",
             font=("Arial", 15, "bold"),
         )
-        title.pack(pady=10)
+        title.pack(pady=8)
 
-        top_frame = ttk.Frame(self.motion_tab)
+        body_frame = ttk.Frame(self.motion_tab)
+        body_frame.pack(fill="both", expand=True)
+
+        left_panel = ttk.Frame(body_frame)
+        left_panel.pack(side="left", fill="both", expand=True)
+
+        right_panel = ttk.Frame(body_frame)
+        right_panel.pack(side="right", fill="both", padx=10, pady=5)
+
+        self.motion_control_parent = left_panel
+
+        top_frame = ttk.Frame(left_panel)
         top_frame.pack(fill="x", padx=15, pady=5)
 
         self.mode_button = ttk.Button(
@@ -224,7 +390,7 @@ class JetcobotSliderGUI:
 
         ttk.Label(top_frame, textvariable=self.speed_var, width=5).pack(side="left")
 
-        self.coord_mode_frame = ttk.Frame(self.motion_tab)
+        self.coord_mode_frame = ttk.Frame(left_panel)
         self.coord_mode_frame.pack(fill="x", padx=15, pady=5)
 
         ttk.Label(self.coord_mode_frame, text="send_coords move mode").pack(side="left")
@@ -243,12 +409,12 @@ class JetcobotSliderGUI:
             value=1,
         ).pack(side="left", padx=10)
 
-        main_frame = ttk.Frame(self.motion_tab)
-        main_frame.pack(fill="both", expand=True, padx=15, pady=10)
+        main_frame = ttk.Frame(left_panel)
+        main_frame.pack(fill="both", expand=True, padx=15, pady=8)
 
         for i in range(6):
             row = ttk.Frame(main_frame)
-            row.pack(fill="x", pady=5)
+            row.pack(fill="x", pady=4)
 
             name_label = ttk.Label(row, text=f"J{i+1}", width=5)
             name_label.pack(side="left")
@@ -283,10 +449,10 @@ class JetcobotSliderGUI:
             limit_label.pack(side="left")
             self.limit_labels.append(limit_label)
 
-        self.build_gripper_control()
+        self.build_gripper_control(left_panel)
 
-        button_frame = ttk.Frame(self.motion_tab)
-        button_frame.pack(fill="x", padx=15, pady=10)
+        button_frame = ttk.Frame(left_panel)
+        button_frame.pack(fill="x", padx=15, pady=8)
 
         ttk.Button(
             button_frame,
@@ -318,7 +484,7 @@ class JetcobotSliderGUI:
             command=lambda: self.go_joint_pose("Right Scan", self.right_scan_angles),
         ).pack(side="left", padx=5)
 
-        status_frame = ttk.LabelFrame(self.motion_tab, text="Robot Status")
+        status_frame = ttk.LabelFrame(left_panel, text="Robot Status")
         status_frame.pack(fill="x", padx=15, pady=8)
 
         self.tool_ref_var = tk.StringVar(value="tool_reference : -")
@@ -338,14 +504,155 @@ class JetcobotSliderGUI:
         ttk.Label(status_frame, textvariable=self.gripper_var).pack(anchor="w", padx=8)
 
         self.status_var = tk.StringVar(value="Ready")
-        ttk.Label(self.motion_tab, textvariable=self.status_var).pack(
+        ttk.Label(left_panel, textvariable=self.status_var).pack(
             fill="x",
             padx=15,
             pady=5,
         )
 
-    def build_gripper_control(self):
-        gripper_frame = ttk.LabelFrame(self.motion_tab, text="Gripper Control")
+        self.build_video_monitor(right_panel)
+
+    def build_video_monitor(self, parent):
+        video_frame = ttk.LabelFrame(parent, text="Camera UDP Monitor")
+        video_frame.pack(fill="both", expand=True)
+
+        top = ttk.Frame(video_frame)
+        top.pack(fill="x", padx=8, pady=6)
+
+        ttk.Label(top, text="UDP Port").pack(side="left", padx=5)
+
+        port_entry = ttk.Entry(top, textvariable=self.udp_port_var, width=10)
+        port_entry.pack(side="left", padx=5)
+        port_entry.bind("<Return>", lambda event: self.start_video_receiver())
+
+        ttk.Button(
+            top,
+            text="Start",
+            command=self.start_video_receiver,
+        ).pack(side="left", padx=5)
+
+        ttk.Button(
+            top,
+            text="Stop",
+            command=self.stop_video_receiver,
+        ).pack(side="left", padx=5)
+
+        self.video_label = tk.Label(
+            video_frame,
+            text="UDP port 입력 후 Enter\n아직 영상을 받지 못했습니다.",
+            width=56,
+            height=22,
+            bg="black",
+            fg="white",
+            anchor="center",
+            justify="center",
+        )
+        self.video_label.pack(fill="both", expand=True, padx=8, pady=8)
+
+        ttk.Label(video_frame, textvariable=self.video_status_var).pack(
+            fill="x",
+            padx=8,
+            pady=4,
+        )
+
+    def start_video_receiver(self):
+        port_text = self.udp_port_var.get().strip()
+
+        try:
+            port = int(port_text)
+            if not (1 <= port <= 65535):
+                raise ValueError()
+        except ValueError:
+            self.video_status_var.set("Invalid UDP port")
+            self.video_label.config(
+                image="",
+                text="Invalid UDP port\n1~65535 사이 값을 입력하세요.",
+            )
+            return
+
+        if Image is None or ImageTk is None:
+            self.video_status_var.set("Pillow not installed: pip install pillow")
+            self.video_label.config(
+                image="",
+                text="Pillow가 필요합니다.\npip install pillow",
+            )
+            return
+
+        self.video_receiver.start(port)
+        self.video_status_var.set(f"Listening UDP video on port {port}")
+        self.video_label.config(
+            image="",
+            text=f"Listening on UDP port {port}\n아직 영상을 받지 못했습니다.",
+        )
+
+    def stop_video_receiver(self):
+        self.video_receiver.stop()
+        self.video_status_var.set("UDP video stopped")
+        self.video_label.config(
+            image="",
+            text="UDP video stopped",
+        )
+
+    def poll_video_status_queue(self):
+        try:
+            while True:
+                msg = self.video_status_queue.get_nowait()
+                self.video_status_var.set(str(msg))
+        except queue.Empty:
+            pass
+
+        if self.video_receiver.running:
+            now = time.time()
+            if self.last_video_frame_time == 0.0:
+                pass
+            elif now - self.last_video_frame_time > 2.0:
+                self.video_status_var.set(
+                    "Listening... 최근 2초 동안 새 프레임 없음"
+                )
+
+        self.root.after(300, self.poll_video_status_queue)
+
+    def poll_video_frame_queue(self):
+        try:
+            frame_rgb = self.video_frame_queue.get_nowait()
+        except queue.Empty:
+            self.root.after(30, self.poll_video_frame_queue)
+            return
+
+        self.last_video_frame_time = time.time()
+        self.show_video_frame(frame_rgb)
+        self.root.after(30, self.poll_video_frame_queue)
+
+    def show_video_frame(self, frame_rgb):
+        if Image is None or ImageTk is None:
+            return
+
+        max_w = 640
+        max_h = 480
+
+        h, w = frame_rgb.shape[:2]
+        scale = min(max_w / w, max_h / h, 1.0)
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+
+        if scale != 1.0:
+            frame_rgb = cv2.resize(frame_rgb, (new_w, new_h))
+
+        image = Image.fromarray(frame_rgb)
+        self.video_photo = ImageTk.PhotoImage(image=image)
+
+        self.video_label.config(
+            image=self.video_photo,
+            text="",
+            width=new_w,
+            height=new_h,
+        )
+        self.video_status_var.set(
+            f"Receiving video: {w}x{h}, display={new_w}x{new_h}"
+        )
+
+    def build_gripper_control(self, parent):
+        gripper_frame = ttk.LabelFrame(parent, text="Gripper Control")
         gripper_frame.pack(fill="x", padx=15, pady=8)
 
         ttk.Label(gripper_frame, text="Open amount").pack(side="left", padx=5)
@@ -455,12 +762,6 @@ class JetcobotSliderGUI:
             anchor="w",
             pady=8,
         )
-
-        note = (
-            "주의: tool_reference는 send_coords 해석에 영향을 줄 수 있습니다.\n"
-            "end_type=1인 경우 tool/TCP 기준 좌표에 특히 영향이 큽니다."
-        )
-        ttk.Label(frame, text=note).pack(anchor="w", pady=8)
 
     def request_robot_status(self):
         self.ros_node.request_status()
@@ -584,17 +885,6 @@ class JetcobotSliderGUI:
 
         return values
 
-    def get_slider_values(self):
-        values = []
-        limits = self.current_limits()
-
-        for i, var in enumerate(self.value_vars):
-            low, high = limits[i]
-            value = self.clamp(var.get(), low, high)
-            values.append(round(value, 2))
-
-        return values
-
     def set_slider_values(self, values):
         limits = self.current_limits()
 
@@ -607,7 +897,6 @@ class JetcobotSliderGUI:
             self.value_labels[i].config(text=f"{value:.2f}")
 
     def publish_current(self):
-        # entry 값이 slider 값보다 우선
         values = self.apply_all_entries_to_sliders()
 
         speed = int(self.speed_var.get())
@@ -626,7 +915,6 @@ class JetcobotSliderGUI:
         )
 
     def go_joint_pose(self, name, angles):
-        # named pose는 항상 joint command로 보냄
         self.command_type = CMD_JOINT
         self.pending_mode = None
         self.apply_mode_ui()
@@ -714,6 +1002,9 @@ class JetcobotSliderGUI:
         self.status_var.set("set_tool_reference reset requested: [0,0,0,0,0,0]")
         self.tool_ref_status_var.set("tool_reference requested: [0,0,0,0,0,0]")
 
+    def shutdown(self):
+        self.video_receiver.stop()
+
 
 def spin_ros(node):
     try:
@@ -741,6 +1032,11 @@ def main():
 
     def shutdown():
         print("Shutting down local GUI publisher...")
+
+        try:
+            gui.shutdown()
+        except Exception:
+            pass
 
         try:
             root.quit()

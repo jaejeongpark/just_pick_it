@@ -16,21 +16,21 @@ GRIPPER_MAX = 100.0
 
 
 JOINT_LIMITS = [
-    (-168.0, 168.0),   # J1
-    (-135.0, 135.0),   # J2
-    (-150.0, 150.0),   # J3
-    (-145.0, 145.0),   # J4
-    (-155.0, 160.0),   # J5
-    (-180.0, 180.0),   # J6
+    (-168.0, 168.0),
+    (-135.0, 135.0),
+    (-150.0, 150.0),
+    (-145.0, 145.0),
+    (-155.0, 160.0),
+    (-180.0, 180.0),
 ]
 
 COORD_LIMITS = [
-    (-280.0, 280.0),   # x
-    (-280.0, 280.0),   # y
-    (-70.0, 523.0),    # z
-    (-180.0, 180.0),   # rx
-    (-180.0, 180.0),   # ry
-    (-180.0, 180.0),   # rz
+    (-280.0, 280.0),
+    (-280.0, 280.0),
+    (-70.0, 523.0),
+    (-180.0, 180.0),
+    (-180.0, 180.0),
+    (-180.0, 180.0),
 ]
 
 
@@ -90,13 +90,6 @@ class JetcobotCommandSubscriber(Node):
         self.get_logger().info("Sub: /jetcobot/set_tool_reference")
         self.get_logger().info("Sub: /jetcobot/set_gripper")
         self.get_logger().info("Pub: /jetcobot/status")
-        self.get_logger().info(
-            "/jetcobot/target_pose data = "
-            "[command_type, v1, v2, v3, v4, v5, v6, speed, coord_move_mode]"
-        )
-        self.get_logger().info(
-            "/jetcobot/set_gripper data = [gripper_value, speed]"
-        )
 
         self.publish_status()
 
@@ -176,14 +169,6 @@ class JetcobotCommandSubscriber(Node):
             "gripper_value",
         )
 
-        # status data layout:
-        # 0~5   : tool_reference
-        # 6~11  : world_reference
-        # 12    : reference_frame
-        # 13    : end_type
-        # 14~19 : current_angles
-        # 20~25 : current_coords
-        # 26    : gripper_value
         msg = Float64MultiArray()
         msg.data = (
             tool_reference
@@ -226,7 +211,6 @@ class JetcobotCommandSubscriber(Node):
         try:
             self.mc.set_tool_reference(tool_reference)
             self.publish_status()
-
         except Exception as e:
             self.get_logger().error(f"set_tool_reference failed: {e}")
 
@@ -241,11 +225,7 @@ class JetcobotCommandSubscriber(Node):
             return
 
         value = float(data[0])
-
-        if len(data) >= 2:
-            speed = int(data[1])
-        else:
-            speed = self.default_speed
+        speed = int(data[1]) if len(data) >= 2 else self.default_speed
 
         value = max(GRIPPER_MIN, min(GRIPPER_MAX, value))
         speed = max(1, min(100, speed))
@@ -259,7 +239,6 @@ class JetcobotCommandSubscriber(Node):
                 self.mc.set_gripper_value(int(value), speed)
 
             self.publish_status()
-
         except Exception as e:
             self.get_logger().error(f"set_gripper_value failed: {e}")
 
@@ -293,24 +272,15 @@ class JetcobotCommandSubscriber(Node):
         command_type = int(data[0])
         values = data[1:7]
 
-        if len(data) >= 8:
-            speed = int(data[7])
-        else:
-            speed = self.default_speed
-
+        speed = int(data[7]) if len(data) >= 8 else self.default_speed
         speed = max(1, min(100, speed))
 
-        if len(data) >= 9:
-            coord_move_mode = int(data[8])
-        else:
-            coord_move_mode = 0
+        coord_move_mode = int(data[8]) if len(data) >= 9 else 0
 
         if command_type == CMD_JOINT:
             self.handle_joint_command(values, speed)
-
         elif command_type == CMD_COORD:
             self.handle_coord_command(values, speed, coord_move_mode)
-
         else:
             self.get_logger().warn(f"Unknown command_type: {command_type}")
 
@@ -324,7 +294,6 @@ class JetcobotCommandSubscriber(Node):
                 self.mc.send_angles(angles, speed, _async=True)
             except TypeError:
                 self.mc.send_angles(angles, speed)
-
         except Exception as e:
             self.get_logger().error(f"send_angles failed: {e}")
 
@@ -346,7 +315,6 @@ class JetcobotCommandSubscriber(Node):
                 self.mc.send_coords(coords, speed, coord_move_mode, _async=True)
             except TypeError:
                 self.mc.send_coords(coords, speed, coord_move_mode)
-
         except Exception as e:
             self.get_logger().error(f"send_coords failed: {e}")
 
