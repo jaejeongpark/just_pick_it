@@ -151,6 +151,9 @@ const STOCK_LEVEL_LABELS = {
   warning: "부족 임박",
   normal: "정상",
 };
+const STOCK_LOW_MAX = 0;
+const STOCK_WARNING_QTY = 2;
+const STOCK_NORMAL_MIN = 3;
 const STOCK_LEVEL_CLASSES = {
   low: "table-danger",
   warning: "table-warning",
@@ -1216,7 +1219,21 @@ function stockLevel(product) {
     return product.stock_level;
   }
 
-  return "normal";
+  const stockQty = Number(product.stock_qty);
+
+  if (stockQty <= STOCK_LOW_MAX) {
+    return "low";
+  }
+
+  if (stockQty === STOCK_WARNING_QTY) {
+    return "warning";
+  }
+
+  if (stockQty >= STOCK_NORMAL_MIN) {
+    return "normal";
+  }
+
+  return "low";
 }
 
 function stockLevelLabel(level) {
