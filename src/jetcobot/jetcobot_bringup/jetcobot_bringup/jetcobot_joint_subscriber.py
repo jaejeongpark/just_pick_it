@@ -5,28 +5,29 @@ from rclpy.node import Node
 
 from std_msgs.msg import Float64MultiArray, Empty
 
-from pymycobot.mycobot280 import MyCobot280 as MyCobot
+from pymycobot.mycobot280 import MyCobot280
 
 
 CMD_JOINT = 0
 CMD_COORD = 1
 
+
 JOINT_LIMITS = [
-    (-168.0, 168.0),
-    (-135.0, 135.0),
-    (-150.0, 150.0),
-    (-145.0, 145.0),
-    (-155.0, 160.0),
-    (-180.0, 180.0),
+    (-168.0, 168.0),   # J1
+    (-135.0, 135.0),   # J2
+    (-150.0, 150.0),   # J3
+    (-145.0, 145.0),   # J4
+    (-155.0, 160.0),   # J5
+    (-180.0, 180.0),   # J6
 ]
 
 COORD_LIMITS = [
-    (-280.0, 280.0),
-    (-280.0, 280.0),
-    (-70.0, 523.0),
-    (-180.0, 180.0),
-    (-180.0, 180.0),
-    (-180.0, 180.0),
+    (-280.0, 280.0),   # x
+    (-280.0, 280.0),   # y
+    (-70.0, 523.0),    # z
+    (-180.0, 180.0),   # rx
+    (-180.0, 180.0),   # ry
+    (-180.0, 180.0),   # rz
 ]
 
 
@@ -42,7 +43,7 @@ class JetcobotCommandSubscriber(Node):
         self.baudrate = int(self.get_parameter("baudrate").value)
         self.default_speed = int(self.get_parameter("default_speed").value)
 
-        self.mc = MyCobot(self.port, self.baudrate)
+        self.mc = MyCobot280(self.port, self.baudrate)
         self.mc.thread_lock = True
 
         self.command_sub = self.create_subscription(
@@ -59,6 +60,13 @@ class JetcobotCommandSubscriber(Node):
             10,
         )
 
+        self.tool_reference_sub = self.create_subscription(
+            Float64MultiArray,
+            "/jetcobot/set_tool_reference",
+            self.tool_reference_callback,
+            10,
+        )
+
         self.status_pub = self.create_publisher(
             Float64MultiArray,
             "/jetcobot/status",
@@ -66,57 +74,96 @@ class JetcobotCommandSubscriber(Node):
         )
 
         self.get_logger().info("Jetcobot command subscriber started")
+        self.get_logger().info(f"port={self.port}, baudrate={self.baudrate}")
         self.get_logger().info("Sub: /jetcobot/target_pose")
         self.get_logger().info("Sub: /jetcobot/request_status")
+        self.get_logger().info("Sub: /jetcobot/set_tool_reference")
         self.get_logger().info("Pub: /jetcobot/status")
+        self.get_logger().info(
+            "/jetcobot/target_pose data = "
+            "[command_type, v1, v2, v3, v4, v5, v6, speed, coord_move_mode]"
+        )
 
+        # 시작 시 현재 상태 한 번 publish
         self.publish_status()
 
-    def safe_read_6(self, read_fn, name):
+    def safe_read_6(self, func_name, default, label):
+        if not hasattr(self.mc, func_name):
+            self.get_logger().warn(f"{label}: API not available: {func_name}")
+            return default
+
         try:
-            value = read_fn()
+            fn = getattr(self.mc, func_name)
+            value = fn()
+
             if isinstance(value, list) and len(value) == 6:
                 return [float(v) for v in value]
-            self.get_logger().warn(f"{name} invalid: {value}")
+
+            self.get_logger().warn(f"{label} invalid: {value}")
+            return default
+
         except Exception as e:
-            self.get_logger().warn(f"{name} read failed: {e}")
+            self.get_logger().warn(f"{label} read failed: {e}")
+            return default
 
-        return [0.0] * 6
+    def safe_read_scalar(self, func_name, default, label):
+        if not hasattr(self.mc, func_name):
+            self.get_logger().warn(f"{label}: API not available: {func_name}")
+            return default
 
-    def safe_read_scalar(self, read_fn, name):
         try:
-            value = read_fn()
+            fn = getattr(self.mc, func_name)
+            value = fn()
             return float(value)
+
         except Exception as e:
-            self.get_logger().warn(f"{name} read failed: {e}")
-            return -1.0
+            self.get_logger().warn(f"{label} read failed: {e}")
+            return default
 
     def publish_status(self):
         tool_reference = self.safe_read_6(
-            self.mc.get_tool_reference,
+            "get_tool_reference",
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             "tool_reference",
         )
+
         world_reference = self.safe_read_6(
-            self.mc.get_world_reference,
+            "get_world_reference",
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             "world_reference",
         )
+
         reference_frame = self.safe_read_scalar(
-            self.mc.get_reference_frame,
+            "get_reference_frame",
+            -1.0,
             "reference_frame",
         )
+
         end_type = self.safe_read_scalar(
-            self.mc.get_end_type,
+            "get_end_type",
+            -1.0,
             "end_type",
         )
+
         angles = self.safe_read_6(
-            self.mc.get_angles,
+            "get_angles",
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             "angles",
         )
+
         coords = self.safe_read_6(
-            self.mc.get_coords,
+            "get_coords",
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             "coords",
         )
 
+        # status data layout:
+        # 0~5   : tool_reference
+        # 6~11  : world_reference
+        # 12    : reference_frame
+        # 13    : end_type
+        # 14~19 : current_angles
+        # 20~25 : current_coords
         msg = Float64MultiArray()
         msg.data = (
             tool_reference
@@ -129,13 +176,37 @@ class JetcobotCommandSubscriber(Node):
         self.status_pub.publish(msg)
 
         self.get_logger().info(
-            f"status published | ref_frame={reference_frame}, end_type={end_type}, "
-            f"angles={angles}, coords={coords}"
+            f"status published | "
+            f"tool_ref={tool_reference}, "
+            f"ref_frame={reference_frame}, "
+            f"end_type={end_type}, "
+            f"angles={angles}, "
+            f"coords={coords}"
         )
 
     def status_request_callback(self, msg):
         self.get_logger().info("status request received")
         self.publish_status()
+
+    def tool_reference_callback(self, msg):
+        data = list(msg.data)
+
+        if len(data) != 6:
+            self.get_logger().warn(
+                f"Invalid tool_reference length: {len(data)}. Expected 6."
+            )
+            return
+
+        tool_reference = [float(v) for v in data]
+
+        self.get_logger().info(f"set_tool_reference: {tool_reference}")
+
+        try:
+            self.mc.set_tool_reference(tool_reference)
+            self.publish_status()
+
+        except Exception as e:
+            self.get_logger().error(f"set_tool_reference failed: {e}")
 
     def clamp_values(self, values, limits, label):
         clamped = []
@@ -160,7 +231,7 @@ class JetcobotCommandSubscriber(Node):
 
         if len(data) < 7:
             self.get_logger().warn(
-                f"Invalid message length: {len(data)}. Expected at least 7."
+                f"Invalid target_pose length: {len(data)}. Expected at least 7."
             )
             return
 

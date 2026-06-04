@@ -15,22 +15,23 @@ from std_msgs.msg import Float64MultiArray, Empty
 CMD_JOINT = 0
 CMD_COORD = 1
 
+
 JOINT_LIMITS = [
-    (-168.0, 168.0),
-    (-135.0, 135.0),
-    (-150.0, 150.0),
-    (-145.0, 145.0),
-    (-155.0, 160.0),
-    (-180.0, 180.0),
+    (-168.0, 168.0),   # J1
+    (-135.0, 135.0),   # J2
+    (-150.0, 150.0),   # J3
+    (-145.0, 145.0),   # J4
+    (-155.0, 160.0),   # J5
+    (-180.0, 180.0),   # J6
 ]
 
 COORD_LIMITS = [
-    (-280.0, 280.0),
-    (-280.0, 280.0),
-    (-70.0, 523.0),
-    (-180.0, 180.0),
-    (-180.0, 180.0),
-    (-180.0, 180.0),
+    (-280.0, 280.0),   # x
+    (-280.0, 280.0),   # y
+    (-70.0, 523.0),    # z
+    (-180.0, 180.0),   # rx
+    (-180.0, 180.0),   # ry
+    (-180.0, 180.0),   # rz
 ]
 
 JOINT_LABELS = ["J1", "J2", "J3", "J4", "J5", "J6"]
@@ -57,6 +58,12 @@ class JetcobotGuiPublisher(Node):
             10,
         )
 
+        self.tool_reference_pub = self.create_publisher(
+            Float64MultiArray,
+            "/jetcobot/set_tool_reference",
+            10,
+        )
+
         self.status_sub = self.create_subscription(
             Float64MultiArray,
             "/jetcobot/status",
@@ -75,6 +82,11 @@ class JetcobotGuiPublisher(Node):
 
     def request_status(self):
         self.status_request_pub.publish(Empty())
+
+    def publish_tool_reference(self, values):
+        msg = Float64MultiArray()
+        msg.data = [float(v) for v in values]
+        self.tool_reference_pub.publish(msg)
 
     def status_callback(self, msg):
         data = list(msg.data)
@@ -103,7 +115,7 @@ class JetcobotSliderGUI:
         self.ros_node = ros_node
         self.status_queue = status_queue
 
-        self.root.title("Local Jetcobot Slider Controller")
+        self.root.title("Local Jetcobot Controller")
 
         self.command_type = CMD_JOINT
         self.pending_mode = None
@@ -116,6 +128,8 @@ class JetcobotSliderGUI:
         self.sliders = []
         self.limit_labels = []
 
+        self.tool_ref_entry_vars = []
+
         self.speed_var = tk.IntVar(value=DEFAULT_SPEED)
         self.coord_move_mode_var = tk.IntVar(value=0)
 
@@ -127,7 +141,7 @@ class JetcobotSliderGUI:
         self.build_ui()
         self.apply_mode_ui()
 
-        self.root.after(200, self.poll_status_queue)
+        self.root.after(100, self.poll_status_queue)
         self.ros_node.request_status()
 
     def current_limits(self):
@@ -146,14 +160,27 @@ class JetcobotSliderGUI:
         return "COORD / send_coords"
 
     def build_ui(self):
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill="both", expand=True)
+
+        self.motion_tab = ttk.Frame(self.notebook)
+        self.tool_tab = ttk.Frame(self.notebook)
+
+        self.notebook.add(self.motion_tab, text="Motion Control")
+        self.notebook.add(self.tool_tab, text="Tool Reference")
+
+        self.build_motion_tab()
+        self.build_tool_reference_tab()
+
+    def build_motion_tab(self):
         title = ttk.Label(
-            self.root,
-            text="Jetcobot Slider Publisher",
+            self.motion_tab,
+            text="Jetcobot Motion Control",
             font=("Arial", 15, "bold"),
         )
         title.pack(pady=10)
 
-        top_frame = ttk.Frame(self.root)
+        top_frame = ttk.Frame(self.motion_tab)
         top_frame.pack(fill="x", padx=15, pady=5)
 
         self.mode_button = ttk.Button(
@@ -182,7 +209,7 @@ class JetcobotSliderGUI:
 
         ttk.Label(top_frame, textvariable=self.speed_var, width=5).pack(side="left")
 
-        self.coord_mode_frame = ttk.Frame(self.root)
+        self.coord_mode_frame = ttk.Frame(self.motion_tab)
         self.coord_mode_frame.pack(fill="x", padx=15, pady=5)
 
         ttk.Label(self.coord_mode_frame, text="send_coords move mode").pack(side="left")
@@ -201,7 +228,7 @@ class JetcobotSliderGUI:
             value=1,
         ).pack(side="left", padx=10)
 
-        main_frame = ttk.Frame(self.root)
+        main_frame = ttk.Frame(self.motion_tab)
         main_frame.pack(fill="both", expand=True, padx=15, pady=10)
 
         for i in range(6):
@@ -241,7 +268,7 @@ class JetcobotSliderGUI:
             limit_label.pack(side="left")
             self.limit_labels.append(limit_label)
 
-        button_frame = ttk.Frame(self.root)
+        button_frame = ttk.Frame(self.motion_tab)
         button_frame.pack(fill="x", padx=15, pady=10)
 
         ttk.Button(
@@ -274,7 +301,7 @@ class JetcobotSliderGUI:
             command=lambda: self.go_joint_pose("Right Scan", self.right_scan_angles),
         ).pack(side="left", padx=5)
 
-        status_frame = ttk.LabelFrame(self.root, text="Robot Status")
+        status_frame = ttk.LabelFrame(self.motion_tab, text="Robot Status")
         status_frame.pack(fill="x", padx=15, pady=8)
 
         self.tool_ref_var = tk.StringVar(value="tool_reference : -")
@@ -292,7 +319,84 @@ class JetcobotSliderGUI:
         ttk.Label(status_frame, textvariable=self.coords_var).pack(anchor="w", padx=8)
 
         self.status_var = tk.StringVar(value="Ready")
-        ttk.Label(self.root, textvariable=self.status_var).pack(fill="x", padx=15, pady=5)
+        ttk.Label(self.motion_tab, textvariable=self.status_var).pack(
+            fill="x",
+            padx=15,
+            pady=5,
+        )
+
+    def build_tool_reference_tab(self):
+        frame = ttk.Frame(self.tool_tab)
+        frame.pack(fill="both", expand=True, padx=15, pady=15)
+
+        ttk.Label(
+            frame,
+            text="Tool Reference Setting",
+            font=("Arial", 14, "bold"),
+        ).pack(anchor="w", pady=8)
+
+        desc = (
+            "tool_reference = [x, y, z, rx, ry, rz]\n"
+            "flange 기준 tool/TCP offset 설정값입니다.\n"
+            "reference_frame은 base로 유지하고, 여기서는 tool_reference만 변경합니다."
+        )
+        ttk.Label(frame, text=desc).pack(anchor="w", pady=5)
+
+        editor = ttk.LabelFrame(
+            frame,
+            text="set_tool_reference([x, y, z, rx, ry, rz])",
+        )
+        editor.pack(fill="x", pady=10)
+
+        labels = ["x", "y", "z", "rx", "ry", "rz"]
+
+        row = ttk.Frame(editor)
+        row.pack(fill="x", padx=8, pady=8)
+
+        for label in labels:
+            cell = ttk.Frame(row)
+            cell.pack(side="left", padx=5)
+
+            ttk.Label(cell, text=label).pack()
+
+            var = tk.StringVar(value="0.00")
+            entry = ttk.Entry(cell, textvariable=var, width=10)
+            entry.pack()
+
+            self.tool_ref_entry_vars.append(var)
+
+        button_row = ttk.Frame(editor)
+        button_row.pack(fill="x", padx=8, pady=8)
+
+        ttk.Button(
+            button_row,
+            text="Apply Tool Reference",
+            command=self.apply_tool_reference,
+        ).pack(side="left", padx=5)
+
+        ttk.Button(
+            button_row,
+            text="Reset [0,0,0,0,0,0]",
+            command=self.reset_tool_reference,
+        ).pack(side="left", padx=5)
+
+        ttk.Button(
+            button_row,
+            text="Robot 상태 읽기",
+            command=self.request_robot_status,
+        ).pack(side="left", padx=5)
+
+        self.tool_ref_status_var = tk.StringVar(value="tool_reference: -")
+        ttk.Label(frame, textvariable=self.tool_ref_status_var).pack(
+            anchor="w",
+            pady=8,
+        )
+
+        note = (
+            "주의: tool_reference는 send_coords 해석에 영향을 줄 수 있습니다.\n"
+            "end_type=1인 경우 tool/TCP 기준 좌표에 특히 영향이 큽니다."
+        )
+        ttk.Label(frame, text=note).pack(anchor="w", pady=8)
 
     def request_robot_status(self):
         self.ros_node.request_status()
@@ -322,6 +426,9 @@ class JetcobotSliderGUI:
         self.end_type_var.set(f"end_type       : {status['end_type']}")
         self.angles_var.set(f"angles         : {angles}")
         self.coords_var.set(f"coords         : {coords}")
+
+        self.set_tool_reference_entries(status["tool_reference"])
+        self.tool_ref_status_var.set(f"tool_reference: {tool_reference}")
 
         if self.pending_mode is not None:
             self.command_type = self.pending_mode
@@ -450,7 +557,7 @@ class JetcobotSliderGUI:
         )
 
     def go_joint_pose(self, name, angles):
-        # named pose는 항상 joint command로만 보냄
+        # named pose는 항상 joint command로 보냄
         self.command_type = CMD_JOINT
         self.pending_mode = None
         self.apply_mode_ui()
@@ -467,6 +574,38 @@ class JetcobotSliderGUI:
         )
 
         self.status_var.set(f"Published {name}: {angles}, speed={speed}")
+
+    def read_tool_reference_entries(self):
+        values = []
+
+        for var in self.tool_ref_entry_vars:
+            try:
+                values.append(float(var.get()))
+            except ValueError:
+                values.append(0.0)
+
+        return values
+
+    def set_tool_reference_entries(self, values):
+        for var, value in zip(self.tool_ref_entry_vars, values):
+            var.set(f"{float(value):.2f}")
+
+    def apply_tool_reference(self):
+        values = self.read_tool_reference_entries()
+
+        self.ros_node.publish_tool_reference(values)
+
+        self.status_var.set(f"set_tool_reference requested: {values}")
+        self.tool_ref_status_var.set(f"tool_reference requested: {values}")
+
+    def reset_tool_reference(self):
+        values = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+        self.set_tool_reference_entries(values)
+        self.ros_node.publish_tool_reference(values)
+
+        self.status_var.set("set_tool_reference reset requested: [0,0,0,0,0,0]")
+        self.tool_ref_status_var.set("tool_reference requested: [0,0,0,0,0,0]")
 
 
 def spin_ros(node):
@@ -494,6 +633,8 @@ def main():
     gui = JetcobotSliderGUI(root, ros_node, status_queue)
 
     def shutdown():
+        print("Shutting down local GUI publisher...")
+
         try:
             root.quit()
         except Exception:
