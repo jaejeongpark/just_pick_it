@@ -5009,7 +5009,7 @@ body {
 }
 
 .admin-console .summary-strip {
-  grid-template-columns: 1.35fr repeat(3, minmax(0, 0.75fr)) 0.86fr 0.62fr;
+  grid-template-columns: 1.35fr repeat(3, minmax(0, 0.75fr)) 0.6fr 0.62fr;
 }
 
 .admin-console .summary-card:not(.robot-summary-card) {
@@ -5067,8 +5067,9 @@ body {
 }
 
 .admin-console .pickup-summary-card .pickup-summary-list {
-  gap: 10px;
-  margin-top: 10px;
+  grid-template-columns: 1fr;
+  gap: 6px;
+  margin-top: 8px;
 }
 
 .pickup-summary-item {
@@ -5093,10 +5094,10 @@ body {
 }
 
 .admin-console .pickup-summary-card .pickup-summary-item {
-  min-height: 64px;
-  padding: 10px 14px;
+  min-height: 34px;
+  padding: 7px 14px;
   border-left-width: 4px;
-  gap: 10px;
+  gap: 8px;
 }
 
 .pickup-summary-item:hover {
