@@ -64,6 +64,12 @@ class JetcobotGuiPublisher(Node):
             10,
         )
 
+        self.gripper_pub = self.create_publisher(
+            Float64MultiArray,
+            "/jetcobot/set_gripper",
+            10,
+        )
+
         self.status_sub = self.create_subscription(
             Float64MultiArray,
             "/jetcobot/status",
@@ -88,12 +94,17 @@ class JetcobotGuiPublisher(Node):
         msg.data = [float(v) for v in values]
         self.tool_reference_pub.publish(msg)
 
+    def publish_gripper(self, value, speed):
+        msg = Float64MultiArray()
+        msg.data = [float(value), float(speed)]
+        self.gripper_pub.publish(msg)
+
     def status_callback(self, msg):
         data = list(msg.data)
 
-        if len(data) != 26:
+        if len(data) not in [26, 27]:
             self.get_logger().warn(
-                f"Invalid status length: {len(data)}. Expected 26."
+                f"Invalid status length: {len(data)}. Expected 26 or 27."
             )
             return
 
@@ -104,6 +115,7 @@ class JetcobotGuiPublisher(Node):
             "end_type": int(data[13]),
             "angles": data[14:20],
             "coords": data[20:26],
+            "gripper_value": data[26] if len(data) == 27 else -1.0,
         }
 
         self.status_queue.put(status)
@@ -132,6 +144,9 @@ class JetcobotSliderGUI:
 
         self.speed_var = tk.IntVar(value=DEFAULT_SPEED)
         self.coord_move_mode_var = tk.IntVar(value=0)
+
+        self.gripper_value_var = tk.DoubleVar(value=50.0)
+        self.gripper_entry_var = tk.StringVar(value="50.00")
 
         self.center_angles = [-82.88, 56.42, -19.86, -93.51, 16.78, -124.71]
         self.left_scan_angles = [-82.88, 56.51, -19.33, -93.60, 24.96, -121.46]
@@ -268,6 +283,8 @@ class JetcobotSliderGUI:
             limit_label.pack(side="left")
             self.limit_labels.append(limit_label)
 
+        self.build_gripper_control()
+
         button_frame = ttk.Frame(self.motion_tab)
         button_frame.pack(fill="x", padx=15, pady=10)
 
@@ -310,6 +327,7 @@ class JetcobotSliderGUI:
         self.end_type_var = tk.StringVar(value="end_type       : -")
         self.angles_var = tk.StringVar(value="angles         : -")
         self.coords_var = tk.StringVar(value="coords         : -")
+        self.gripper_var = tk.StringVar(value="gripper       : -")
 
         ttk.Label(status_frame, textvariable=self.tool_ref_var).pack(anchor="w", padx=8)
         ttk.Label(status_frame, textvariable=self.world_ref_var).pack(anchor="w", padx=8)
@@ -317,6 +335,7 @@ class JetcobotSliderGUI:
         ttk.Label(status_frame, textvariable=self.end_type_var).pack(anchor="w", padx=8)
         ttk.Label(status_frame, textvariable=self.angles_var).pack(anchor="w", padx=8)
         ttk.Label(status_frame, textvariable=self.coords_var).pack(anchor="w", padx=8)
+        ttk.Label(status_frame, textvariable=self.gripper_var).pack(anchor="w", padx=8)
 
         self.status_var = tk.StringVar(value="Ready")
         ttk.Label(self.motion_tab, textvariable=self.status_var).pack(
@@ -324,6 +343,51 @@ class JetcobotSliderGUI:
             padx=15,
             pady=5,
         )
+
+    def build_gripper_control(self):
+        gripper_frame = ttk.LabelFrame(self.motion_tab, text="Gripper Control")
+        gripper_frame.pack(fill="x", padx=15, pady=8)
+
+        ttk.Label(gripper_frame, text="Open amount").pack(side="left", padx=5)
+
+        self.gripper_slider = ttk.Scale(
+            gripper_frame,
+            from_=0.0,
+            to=100.0,
+            orient="horizontal",
+            variable=self.gripper_value_var,
+            command=self.on_gripper_slider_change,
+        )
+        self.gripper_slider.pack(side="left", fill="x", expand=True, padx=8)
+
+        self.gripper_entry = ttk.Entry(
+            gripper_frame,
+            textvariable=self.gripper_entry_var,
+            width=10,
+        )
+        self.gripper_entry.pack(side="left", padx=5)
+        self.gripper_entry.bind("<Return>", lambda event: self.apply_gripper_entry())
+
+        self.gripper_value_label = ttk.Label(gripper_frame, text="50.00", width=8)
+        self.gripper_value_label.pack(side="left", padx=5)
+
+        ttk.Button(
+            gripper_frame,
+            text="Apply Gripper",
+            command=self.publish_gripper_current,
+        ).pack(side="left", padx=5)
+
+        ttk.Button(
+            gripper_frame,
+            text="Open 100",
+            command=lambda: self.set_and_publish_gripper(100.0),
+        ).pack(side="left", padx=5)
+
+        ttk.Button(
+            gripper_frame,
+            text="Close 0",
+            command=lambda: self.set_and_publish_gripper(0.0),
+        ).pack(side="left", padx=5)
 
     def build_tool_reference_tab(self):
         frame = ttk.Frame(self.tool_tab)
@@ -419,6 +483,7 @@ class JetcobotSliderGUI:
         world_reference = self.round_list(status["world_reference"])
         angles = self.round_list(status["angles"])
         coords = self.round_list(status["coords"])
+        gripper_value = float(status.get("gripper_value", -1.0))
 
         self.tool_ref_var.set(f"tool_reference : {tool_reference}")
         self.world_ref_var.set(f"world_reference: {world_reference}")
@@ -426,9 +491,13 @@ class JetcobotSliderGUI:
         self.end_type_var.set(f"end_type       : {status['end_type']}")
         self.angles_var.set(f"angles         : {angles}")
         self.coords_var.set(f"coords         : {coords}")
+        self.gripper_var.set(f"gripper       : {gripper_value:.2f}")
 
         self.set_tool_reference_entries(status["tool_reference"])
         self.tool_ref_status_var.set(f"tool_reference: {tool_reference}")
+
+        if gripper_value >= 0.0:
+            self.set_gripper_value(gripper_value)
 
         if self.pending_mode is not None:
             self.command_type = self.pending_mode
@@ -574,6 +643,44 @@ class JetcobotSliderGUI:
         )
 
         self.status_var.set(f"Published {name}: {angles}, speed={speed}")
+
+    def on_gripper_slider_change(self, value):
+        value = float(value)
+        self.gripper_entry_var.set(f"{value:.2f}")
+        self.gripper_value_label.config(text=f"{value:.2f}")
+
+    def apply_gripper_entry(self):
+        try:
+            value = float(self.gripper_entry_var.get())
+        except ValueError:
+            value = self.gripper_value_var.get()
+
+        value = max(0.0, min(100.0, value))
+
+        self.set_gripper_value(value)
+
+        return value
+
+    def set_gripper_value(self, value):
+        value = max(0.0, min(100.0, float(value)))
+
+        self.gripper_value_var.set(value)
+        self.gripper_entry_var.set(f"{value:.2f}")
+        self.gripper_value_label.config(text=f"{value:.2f}")
+
+    def publish_gripper_current(self):
+        value = self.apply_gripper_entry()
+        speed = int(self.speed_var.get())
+
+        self.ros_node.publish_gripper(value, speed)
+
+        self.status_var.set(
+            f"Published gripper: value={value:.2f}, speed={speed}"
+        )
+
+    def set_and_publish_gripper(self, value):
+        self.set_gripper_value(value)
+        self.publish_gripper_current()
 
     def read_tool_reference_entries(self):
         values = []

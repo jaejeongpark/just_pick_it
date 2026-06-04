@@ -11,6 +11,9 @@ from pymycobot.mycobot280 import MyCobot280
 CMD_JOINT = 0
 CMD_COORD = 1
 
+GRIPPER_MIN = 0.0
+GRIPPER_MAX = 100.0
+
 
 JOINT_LIMITS = [
     (-168.0, 168.0),   # J1
@@ -67,6 +70,13 @@ class JetcobotCommandSubscriber(Node):
             10,
         )
 
+        self.gripper_sub = self.create_subscription(
+            Float64MultiArray,
+            "/jetcobot/set_gripper",
+            self.gripper_callback,
+            10,
+        )
+
         self.status_pub = self.create_publisher(
             Float64MultiArray,
             "/jetcobot/status",
@@ -78,13 +88,16 @@ class JetcobotCommandSubscriber(Node):
         self.get_logger().info("Sub: /jetcobot/target_pose")
         self.get_logger().info("Sub: /jetcobot/request_status")
         self.get_logger().info("Sub: /jetcobot/set_tool_reference")
+        self.get_logger().info("Sub: /jetcobot/set_gripper")
         self.get_logger().info("Pub: /jetcobot/status")
         self.get_logger().info(
             "/jetcobot/target_pose data = "
             "[command_type, v1, v2, v3, v4, v5, v6, speed, coord_move_mode]"
         )
+        self.get_logger().info(
+            "/jetcobot/set_gripper data = [gripper_value, speed]"
+        )
 
-        # 시작 시 현재 상태 한 번 publish
         self.publish_status()
 
     def safe_read_6(self, func_name, default, label):
@@ -157,6 +170,12 @@ class JetcobotCommandSubscriber(Node):
             "coords",
         )
 
+        gripper_value = self.safe_read_scalar(
+            "get_gripper_value",
+            -1.0,
+            "gripper_value",
+        )
+
         # status data layout:
         # 0~5   : tool_reference
         # 6~11  : world_reference
@@ -164,6 +183,7 @@ class JetcobotCommandSubscriber(Node):
         # 13    : end_type
         # 14~19 : current_angles
         # 20~25 : current_coords
+        # 26    : gripper_value
         msg = Float64MultiArray()
         msg.data = (
             tool_reference
@@ -171,6 +191,7 @@ class JetcobotCommandSubscriber(Node):
             + [reference_frame, end_type]
             + angles
             + coords
+            + [gripper_value]
         )
 
         self.status_pub.publish(msg)
@@ -181,7 +202,8 @@ class JetcobotCommandSubscriber(Node):
             f"ref_frame={reference_frame}, "
             f"end_type={end_type}, "
             f"angles={angles}, "
-            f"coords={coords}"
+            f"coords={coords}, "
+            f"gripper={gripper_value}"
         )
 
     def status_request_callback(self, msg):
@@ -207,6 +229,39 @@ class JetcobotCommandSubscriber(Node):
 
         except Exception as e:
             self.get_logger().error(f"set_tool_reference failed: {e}")
+
+    def gripper_callback(self, msg):
+        data = list(msg.data)
+
+        if len(data) < 1:
+            self.get_logger().warn(
+                f"Invalid gripper message length: {len(data)}. "
+                "Expected [value, speed]."
+            )
+            return
+
+        value = float(data[0])
+
+        if len(data) >= 2:
+            speed = int(data[1])
+        else:
+            speed = self.default_speed
+
+        value = max(GRIPPER_MIN, min(GRIPPER_MAX, value))
+        speed = max(1, min(100, speed))
+
+        self.get_logger().info(f"set_gripper_value: value={value}, speed={speed}")
+
+        try:
+            try:
+                self.mc.set_gripper_value(int(value), speed, _async=True)
+            except TypeError:
+                self.mc.set_gripper_value(int(value), speed)
+
+            self.publish_status()
+
+        except Exception as e:
+            self.get_logger().error(f"set_gripper_value failed: {e}")
 
     def clamp_values(self, values, limits, label):
         clamped = []
