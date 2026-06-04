@@ -74,7 +74,7 @@ class CobotStateManager(Node):
         self._task_action_server = ActionServer(
             self,
             ExecuteTask,
-            'execute_task',
+            f'{self._robot_id}/execute_task',
             execute_callback=self._execute_task,
             goal_callback=self._on_task_goal,
             cancel_callback=self._on_task_cancel,
@@ -177,11 +177,11 @@ class CobotStateManager(Node):
         request    = goal_handle.request
         task_type  = request.task_type
         task_id    = request.task_id
-        robot_name = request.robot_name
+        
 
         self.get_logger().info(
             f'[CobotStateManager] TASK 실행: task_id={task_id}, '
-            f'task_type={task_type}, robot={robot_name}'
+            f'task_type={task_type}'
         )
 
         feedback = ExecuteTask.Feedback()
@@ -190,7 +190,7 @@ class CobotStateManager(Node):
         feedback.state             = 'ACCEPTED'
         feedback.message           = f'task {task_id} accepted'
         feedback.progress          = 0.0
-        feedback.detected_quantity = 0
+        feedback.processed_quantity = 0
         goal_handle.publish_feedback(feedback)
 
         # ── 작업 단계별 실행 ─────────────────────────────────────────
@@ -206,7 +206,7 @@ class CobotStateManager(Node):
                     success=False,
                     status='CANCELLED',
                     message='task cancelled',
-                    detected_quantity=detected_qty,
+                    processed_quantity=detected_qty,
                     stock_delta=0,
                 )
 
@@ -218,7 +218,7 @@ class CobotStateManager(Node):
                         success=False,
                         status='FAILED',
                         message='emergency stop triggered',
-                        detected_quantity=detected_qty,
+                        processed_quantity=detected_qty,
                         stock_delta=0,
                     )
 
@@ -226,7 +226,7 @@ class CobotStateManager(Node):
             feedback.state             = phase
             feedback.message           = f'{phase} in progress'
             feedback.progress          = float(idx) / total_phases
-            feedback.detected_quantity = detected_qty
+            feedback.processed_quantity = detected_qty
             goal_handle.publish_feedback(feedback)
 
             success, detected_qty = self._run_phase(task_type, phase, request)
@@ -238,12 +238,12 @@ class CobotStateManager(Node):
                     success=False,
                     status='FAILED',
                     message=f'{phase} failed',
-                    detected_quantity=detected_qty,
+                    processed_quantity=detected_qty,
                     stock_delta=0,
                 )
 
             # 중간 인식 수량 feedback 갱신
-            feedback.detected_quantity = detected_qty
+            feedback.processed_quantity = detected_qty
             goal_handle.publish_feedback(feedback)
 
         # ── STOWING_ARM feedback 발행 (Fleet 다음 PICKY 경로 선계획 트리거) ──
@@ -262,7 +262,7 @@ class CobotStateManager(Node):
                 success=False,
                 status='FAILED',
                 message='arm stowing failed',
-                detected_quantity=detected_qty,
+                processed_quantity=detected_qty,
                 stock_delta=0,
             )
 
@@ -273,7 +273,7 @@ class CobotStateManager(Node):
             success=True,
             status='SUCCESS',
             message='ok',
-            detected_quantity=detected_qty,
+            processed_quantity=detected_qty,
             stock_delta=0,  # [구현 필요] 실제 재고 반영 수량 반환
         )
 
