@@ -27,6 +27,7 @@ setup(
             'async_test = jetcobot_sorting.async_test:main',
             'visual_servoing = jetcobot_sorting.visual_servoing:main',
             'fake_yolo_detection_publisher = jetcobot_sorting.fake_yolo_detection_publisher:main',
+            'phase_1_test = jetcobot_sorting.phase_1_test:main',
         ],
     },
 )
