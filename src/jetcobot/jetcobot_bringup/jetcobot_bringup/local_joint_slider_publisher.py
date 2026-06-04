@@ -7,11 +7,14 @@ import struct
 import sys
 import threading
 import time
+from datetime import datetime
+from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
 
 import cv2
 import numpy as np
+import yaml
 
 import rclpy
 from rclpy.node import Node
@@ -52,6 +55,7 @@ JOINT_LABELS = ["J1", "J2", "J3", "J4", "J5", "J6"]
 COORD_LABELS = ["X", "Y", "Z", "RX", "RY", "RZ"]
 
 DEFAULT_SPEED = 20
+MIN_CALIB_IMAGES = 15
 
 
 class UdpVideoReceiver:
@@ -137,7 +141,6 @@ class UdpVideoReceiver:
 
             self.frames[frame_id]["chunks"][packet_idx] = chunk
 
-            # 오래된 incomplete frame 정리
             now = time.time()
             old_ids = [
                 fid for fid, info in self.frames.items()
@@ -169,7 +172,6 @@ class UdpVideoReceiver:
 
                 img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-                # 큐가 밀리면 최신 프레임만 유지
                 try:
                     while not self.frame_queue.empty():
                         self.frame_queue.get_nowait()
@@ -283,6 +285,7 @@ class JetcobotSliderGUI:
         self.limit_labels = []
 
         self.tool_ref_entry_vars = []
+        self.corner_preview_photos = []
 
         self.speed_var = tk.IntVar(value=DEFAULT_SPEED)
         self.coord_move_mode_var = tk.IntVar(value=0)
@@ -292,14 +295,33 @@ class JetcobotSliderGUI:
 
         self.udp_port_var = tk.StringVar(value="")
         self.video_status_var = tk.StringVar(value="UDP port 입력 후 Enter")
+        self.capture_status_var = tk.StringVar(value="Capture: -")
+        self.calib_status_var = tk.StringVar(value="Calibration: -")
+
         self.video_frame_queue = queue.Queue(maxsize=1)
         self.video_status_queue = queue.Queue()
         self.video_receiver = UdpVideoReceiver(
             self.video_frame_queue,
             self.video_status_queue,
         )
-        self.video_photo = None
+        self.video_photo_raw = None
+        self.video_photo_rect = None
         self.last_video_frame_time = 0.0
+        self.latest_frame_rgb = None
+
+        self.capture_dir = Path.cwd() / "jetcobot_captures"
+        self.capture_dir.mkdir(parents=True, exist_ok=True)
+
+        self.calib_K = None
+        self.calib_dist = None
+        self.calib_image_size = None
+
+        self.calib_board_w_var = tk.StringVar(value="8")
+        self.calib_board_h_var = tk.StringVar(value="6")
+        self.calib_square_size_var = tk.StringVar(value="0.025")
+        self.calib_output_var = tk.StringVar(
+            value=str(self.capture_dir / "camera_calibration.yaml")
+        )
 
         self.center_angles = [-82.88, 56.42, -19.86, -93.51, 16.78, -124.71]
         self.left_scan_angles = [-82.88, 56.51, -19.33, -93.60, 24.96, -121.46]
@@ -308,6 +330,9 @@ class JetcobotSliderGUI:
 
         self.build_ui()
         self.apply_mode_ui()
+
+        self.load_calibration_if_exists()
+        self.refresh_corner_preview_slots()
 
         self.root.after(100, self.poll_status_queue)
         self.root.after(30, self.poll_video_frame_queue)
@@ -358,8 +383,6 @@ class JetcobotSliderGUI:
 
         right_panel = ttk.Frame(body_frame)
         right_panel.pack(side="right", fill="both", padx=10, pady=5)
-
-        self.motion_control_parent = left_panel
 
         top_frame = ttk.Frame(left_panel)
         top_frame.pack(fill="x", padx=15, pady=5)
@@ -537,23 +560,463 @@ class JetcobotSliderGUI:
             command=self.stop_video_receiver,
         ).pack(side="left", padx=5)
 
-        self.video_label = tk.Label(
-            video_frame,
+        image_row = ttk.Frame(video_frame)
+        image_row.pack(fill="both", expand=True, padx=8, pady=8)
+
+        raw_frame = ttk.LabelFrame(image_row, text="Raw")
+        raw_frame.pack(side="left", fill="both", expand=True, padx=4)
+
+        rect_frame = ttk.LabelFrame(image_row, text="Rectified")
+        rect_frame.pack(side="left", fill="both", expand=True, padx=4)
+
+        self.video_label_raw = tk.Label(
+            raw_frame,
             text="UDP port 입력 후 Enter\n아직 영상을 받지 못했습니다.",
-            width=56,
-            height=22,
+            width=40,
+            height=18,
             bg="black",
             fg="white",
             anchor="center",
             justify="center",
         )
-        self.video_label.pack(fill="both", expand=True, padx=8, pady=8)
+        self.video_label_raw.pack(fill="both", expand=True, padx=4, pady=4)
+
+        self.video_label_rect = tk.Label(
+            rect_frame,
+            text="calibration.yaml 없음\ncalibration 후 rectified 표시",
+            width=40,
+            height=18,
+            bg="black",
+            fg="white",
+            anchor="center",
+            justify="center",
+        )
+        self.video_label_rect.pack(fill="both", expand=True, padx=4, pady=4)
+
+        capture_row = ttk.Frame(video_frame)
+        capture_row.pack(fill="x", padx=8, pady=4)
+
+        ttk.Button(
+            capture_row,
+            text="Capture Image",
+            command=self.capture_current_frame,
+        ).pack(side="left", padx=5)
+
+        ttk.Label(
+            capture_row,
+            text=f"Save dir: {self.capture_dir}",
+        ).pack(side="left", padx=5)
+
+        calib_frame = ttk.LabelFrame(video_frame, text="Camera Calibration")
+        calib_frame.pack(fill="x", padx=8, pady=6)
+
+        info = (
+            "최소 15장 이상, 다양한 자세/화면 위치/측정 거리 중심으로 캡쳐하세요."
+        )
+        ttk.Label(calib_frame, text=info).pack(anchor="w", padx=5, pady=3)
+
+        row1 = ttk.Frame(calib_frame)
+        row1.pack(fill="x", padx=5, pady=4)
+
+        ttk.Label(row1, text="Board W").pack(side="left", padx=3)
+        ttk.Entry(row1, textvariable=self.calib_board_w_var, width=6).pack(
+            side="left",
+            padx=3,
+        )
+
+        ttk.Label(row1, text="Board H").pack(side="left", padx=3)
+        ttk.Entry(row1, textvariable=self.calib_board_h_var, width=6).pack(
+            side="left",
+            padx=3,
+        )
+
+        ttk.Label(row1, text="Square m").pack(side="left", padx=3)
+        ttk.Entry(row1, textvariable=self.calib_square_size_var, width=8).pack(
+            side="left",
+            padx=3,
+        )
+
+        row2 = ttk.Frame(calib_frame)
+        row2.pack(fill="x", padx=5, pady=4)
+
+        ttk.Label(row2, text="Output").pack(side="left", padx=3)
+        ttk.Entry(row2, textvariable=self.calib_output_var, width=45).pack(
+            side="left",
+            padx=3,
+            fill="x",
+            expand=True,
+        )
+
+        ttk.Button(
+            row2,
+            text="Run Calibration",
+            command=self.run_camera_calibration,
+        ).pack(side="left", padx=5)
+
+        ttk.Button(
+            row2,
+            text="Refresh Corners",
+            command=self.refresh_corner_preview_slots,
+        ).pack(side="left", padx=5)
 
         ttk.Label(video_frame, textvariable=self.video_status_var).pack(
             fill="x",
             padx=8,
-            pady=4,
+            pady=2,
         )
+
+        ttk.Label(video_frame, textvariable=self.capture_status_var).pack(
+            fill="x",
+            padx=8,
+            pady=2,
+        )
+
+        ttk.Label(video_frame, textvariable=self.calib_status_var).pack(
+            fill="x",
+            padx=8,
+            pady=2,
+        )
+
+        preview_frame = ttk.LabelFrame(video_frame, text="Detected Corner Preview Slots")
+        preview_frame.pack(fill="both", expand=True, padx=8, pady=6)
+
+        self.corner_canvas = tk.Canvas(preview_frame, height=170)
+        self.corner_canvas.pack(side="left", fill="both", expand=True)
+
+        self.corner_scrollbar = ttk.Scrollbar(
+            preview_frame,
+            orient="vertical",
+            command=self.corner_canvas.yview,
+        )
+        self.corner_scrollbar.pack(side="right", fill="y")
+
+        self.corner_canvas.configure(yscrollcommand=self.corner_scrollbar.set)
+
+        self.corner_inner = ttk.Frame(self.corner_canvas)
+        self.corner_canvas_window = self.corner_canvas.create_window(
+            (0, 0),
+            window=self.corner_inner,
+            anchor="nw",
+        )
+
+        self.corner_inner.bind(
+            "<Configure>",
+            lambda event: self.corner_canvas.configure(
+                scrollregion=self.corner_canvas.bbox("all")
+            ),
+        )
+
+    def get_capture_image_paths(self):
+        return sorted(
+            list(self.capture_dir.glob("*.png"))
+            + list(self.capture_dir.glob("*.jpg"))
+            + list(self.capture_dir.glob("*.jpeg"))
+        )
+
+    def get_calib_params(self):
+        board_w = int(self.calib_board_w_var.get())
+        board_h = int(self.calib_board_h_var.get())
+        square_size = float(self.calib_square_size_var.get())
+        output_file = Path(self.calib_output_var.get()).expanduser()
+        return board_w, board_h, square_size, output_file
+
+    def find_chessboard_on_image(self, img_bgr, board_w, board_h):
+        pattern_size = (board_w, board_h)
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+        found, corners = cv2.findChessboardCorners(gray, pattern_size, None)
+
+        if not found:
+            return False, None
+
+        refine_criteria = (
+            cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
+            30,
+            0.001,
+        )
+
+        corners_refined = cv2.cornerSubPix(
+            gray,
+            corners,
+            (11, 11),
+            (-1, -1),
+            refine_criteria,
+        )
+
+        return True, corners_refined
+
+    def refresh_corner_preview_slots(self):
+        if Image is None or ImageTk is None:
+            return
+
+        for child in self.corner_inner.winfo_children():
+            child.destroy()
+
+        self.corner_preview_photos.clear()
+
+        try:
+            board_w, board_h, _, _ = self.get_calib_params()
+        except Exception:
+            self.calib_status_var.set("Corner preview failed: calibration parameter error")
+            return
+
+        paths = self.get_capture_image_paths()
+        total = len(paths)
+
+        if total < MIN_CALIB_IMAGES:
+            self.calib_status_var.set(
+                f"Warning: captured {total}/{MIN_CALIB_IMAGES}. 더 다양한 자세/거리에서 캡쳐하세요."
+            )
+
+        valid = 0
+
+        for idx, path in enumerate(paths):
+            img_bgr = cv2.imread(str(path))
+            if img_bgr is None:
+                continue
+
+            found, corners = self.find_chessboard_on_image(img_bgr, board_w, board_h)
+
+            if not found:
+                continue
+
+            valid += 1
+            display = img_bgr.copy()
+            cv2.drawChessboardCorners(display, (board_w, board_h), corners, found)
+
+            display_rgb = cv2.cvtColor(display, cv2.COLOR_BGR2RGB)
+
+            h, w = display_rgb.shape[:2]
+            thumb_w = 180
+            thumb_h = max(1, int(h * thumb_w / w))
+            display_rgb = cv2.resize(display_rgb, (thumb_w, thumb_h))
+
+            pil_img = Image.fromarray(display_rgb)
+            photo = ImageTk.PhotoImage(pil_img)
+            self.corner_preview_photos.append(photo)
+
+            slot = ttk.Frame(self.corner_inner)
+            slot.grid(row=valid - 1, column=0, sticky="w", padx=4, pady=4)
+
+            img_label = ttk.Label(slot, image=photo)
+            img_label.pack(side="left")
+
+            text = f"{idx + 1:03d}. {path.name}\ncorner: OK"
+            ttk.Label(slot, text=text).pack(side="left", padx=8)
+
+        if total >= MIN_CALIB_IMAGES:
+            self.calib_status_var.set(
+                f"Corner preview: valid={valid}, total={total}. "
+                f"검출 실패 이미지는 preview에서 제외됨."
+            )
+
+    def run_camera_calibration(self):
+        try:
+            board_w, board_h, square_size, output_file = self.get_calib_params()
+        except Exception:
+            self.calib_status_var.set("Calibration failed: board/square/output 설정 오류")
+            return
+
+        image_paths = self.get_capture_image_paths()
+        total = len(image_paths)
+
+        if total < MIN_CALIB_IMAGES:
+            self.calib_status_var.set(
+                f"Calibration warning: 캡쳐 이미지 {total}/{MIN_CALIB_IMAGES}. "
+                f"최소 15장 이상 더 찍으세요."
+            )
+            self.refresh_corner_preview_slots()
+            return
+
+        pattern_size = (board_w, board_h)
+
+        objp = np.zeros((board_h * board_w, 3), np.float32)
+        objp[:, :2] = np.mgrid[0:board_w, 0:board_h].T.reshape(-1, 2)
+        objp *= square_size
+
+        obj_points = []
+        img_points = []
+        img_size = None
+
+        ok_count = 0
+
+        for path in image_paths:
+            img_bgr = cv2.imread(str(path))
+            if img_bgr is None:
+                continue
+
+            gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+            if img_size is None:
+                img_size = (gray.shape[1], gray.shape[0])
+
+            found, corners = self.find_chessboard_on_image(img_bgr, board_w, board_h)
+
+            if not found:
+                continue
+
+            obj_points.append(objp)
+            img_points.append(corners)
+            ok_count += 1
+
+        self.refresh_corner_preview_slots()
+
+        if ok_count < MIN_CALIB_IMAGES:
+            self.calib_status_var.set(
+                f"Calibration failed: corner 유효 이미지 {ok_count}/{MIN_CALIB_IMAGES}. "
+                f"검출 잘되는 이미지를 더 찍으세요."
+            )
+            return
+
+        ret, K, dist, _, _ = cv2.calibrateCamera(
+            obj_points,
+            img_points,
+            img_size,
+            None,
+            None,
+        )
+
+        self.save_camera_calibration_yaml(
+            output_file=output_file,
+            img_size=img_size,
+            K=K,
+            dist=dist,
+            rms=ret,
+            valid_count=ok_count,
+            total_count=total,
+        )
+
+        self.calib_K = K
+        self.calib_dist = dist
+        self.calib_image_size = img_size
+
+        self.calib_status_var.set(
+            f"Calibration done: RMS={ret:.4f}px, valid={ok_count}/{total}, saved={output_file}"
+        )
+
+        if self.latest_frame_rgb is not None:
+            self.show_video_frame(self.latest_frame_rgb)
+
+    def save_camera_calibration_yaml(
+        self,
+        output_file,
+        img_size,
+        K,
+        dist,
+        rms,
+        valid_count,
+        total_count,
+    ):
+        output_file = Path(output_file).expanduser()
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+
+        calib = {
+            "image_width": int(img_size[0]),
+            "image_height": int(img_size[1]),
+            "camera_name": "jetcobot_camera",
+            "distortion_model": "plumb_bob",
+            "camera_matrix": {
+                "rows": 3,
+                "cols": 3,
+                "data": K.ravel().tolist(),
+            },
+            "distortion_coefficients": {
+                "rows": 1,
+                "cols": int(dist.size),
+                "data": dist.ravel().tolist(),
+            },
+            "rectification_matrix": {
+                "rows": 3,
+                "cols": 3,
+                "data": np.eye(3).ravel().tolist(),
+            },
+            "projection_matrix": {
+                "rows": 3,
+                "cols": 4,
+                "data": np.hstack([K, np.zeros((3, 1))]).ravel().tolist(),
+            },
+            "calibration_info": {
+                "rms_reprojection_error_px": float(rms),
+                "source_image_dir": str(self.capture_dir),
+                "valid_images": int(valid_count),
+                "total_images": int(total_count),
+            },
+        }
+
+        with open(output_file, "w") as f:
+            yaml.dump(calib, f, default_flow_style=False, sort_keys=False)
+
+    def load_calibration_if_exists(self):
+        path = Path(self.calib_output_var.get()).expanduser()
+
+        if not path.exists():
+            self.calib_status_var.set(
+                f"Calibration YAML 없음: {path}. calibration 후 rectified 표시."
+            )
+            return False
+
+        try:
+            with open(path, "r") as f:
+                data = yaml.safe_load(f)
+
+            K_data = data["camera_matrix"]["data"]
+            dist_data = data["distortion_coefficients"]["data"]
+
+            self.calib_K = np.array(K_data, dtype=np.float64).reshape(3, 3)
+            self.calib_dist = np.array(dist_data, dtype=np.float64).reshape(1, -1)
+            self.calib_image_size = (
+                int(data["image_width"]),
+                int(data["image_height"]),
+            )
+
+            self.calib_status_var.set(f"Calibration loaded: {path}")
+            return True
+
+        except Exception as e:
+            self.calib_K = None
+            self.calib_dist = None
+            self.calib_image_size = None
+            self.calib_status_var.set(f"Calibration load failed: {e}")
+            return False
+
+    def rectify_frame_rgb(self, frame_rgb):
+        if self.calib_K is None or self.calib_dist is None:
+            return None
+
+        try:
+            return cv2.undistort(frame_rgb, self.calib_K, self.calib_dist)
+        except Exception:
+            return None
+
+    def capture_current_frame(self):
+        if self.latest_frame_rgb is None:
+            self.capture_status_var.set("Capture failed: 아직 수신된 프레임이 없습니다.")
+            return
+
+        try:
+            self.capture_dir.mkdir(parents=True, exist_ok=True)
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            save_path = self.capture_dir / f"jetcobot_capture_{timestamp}.png"
+
+            frame_bgr = cv2.cvtColor(self.latest_frame_rgb, cv2.COLOR_RGB2BGR)
+            ok = cv2.imwrite(str(save_path), frame_bgr)
+
+            if ok:
+                paths = self.get_capture_image_paths()
+                if len(paths) < MIN_CALIB_IMAGES:
+                    self.capture_status_var.set(
+                        f"Captured: {save_path} | {len(paths)}/{MIN_CALIB_IMAGES}, 더 찍으세요."
+                    )
+                else:
+                    self.capture_status_var.set(f"Captured: {save_path}")
+
+                self.refresh_corner_preview_slots()
+            else:
+                self.capture_status_var.set("Capture failed: cv2.imwrite returned False")
+
+        except Exception as e:
+            self.capture_status_var.set(f"Capture failed: {e}")
 
     def start_video_receiver(self):
         port_text = self.udp_port_var.get().strip()
@@ -564,7 +1027,7 @@ class JetcobotSliderGUI:
                 raise ValueError()
         except ValueError:
             self.video_status_var.set("Invalid UDP port")
-            self.video_label.config(
+            self.video_label_raw.config(
                 image="",
                 text="Invalid UDP port\n1~65535 사이 값을 입력하세요.",
             )
@@ -572,23 +1035,35 @@ class JetcobotSliderGUI:
 
         if Image is None or ImageTk is None:
             self.video_status_var.set("Pillow not installed: pip install pillow")
-            self.video_label.config(
+            self.video_label_raw.config(
                 image="",
                 text="Pillow가 필요합니다.\npip install pillow",
             )
             return
 
+        self.load_calibration_if_exists()
+
         self.video_receiver.start(port)
+        self.latest_frame_rgb = None
+        self.last_video_frame_time = 0.0
+
         self.video_status_var.set(f"Listening UDP video on port {port}")
-        self.video_label.config(
+        self.capture_status_var.set("Capture: 아직 수신된 프레임 없음")
+        self.video_label_raw.config(
             image="",
             text=f"Listening on UDP port {port}\n아직 영상을 받지 못했습니다.",
         )
 
+        if self.calib_K is None:
+            self.video_label_rect.config(
+                image="",
+                text="calibration.yaml 없음\ncalibration 후 rectified 표시",
+            )
+
     def stop_video_receiver(self):
         self.video_receiver.stop()
         self.video_status_var.set("UDP video stopped")
-        self.video_label.config(
+        self.video_label_raw.config(
             image="",
             text="UDP video stopped",
         )
@@ -620,6 +1095,8 @@ class JetcobotSliderGUI:
             return
 
         self.last_video_frame_time = time.time()
+        self.latest_frame_rgb = frame_rgb.copy()
+
         self.show_video_frame(frame_rgb)
         self.root.after(30, self.poll_video_frame_queue)
 
@@ -627,28 +1104,60 @@ class JetcobotSliderGUI:
         if Image is None or ImageTk is None:
             return
 
-        max_w = 640
-        max_h = 480
+        self.show_image_on_label(
+            frame_rgb,
+            self.video_label_raw,
+            is_raw=True,
+        )
+
+        rectified = self.rectify_frame_rgb(frame_rgb)
+
+        if rectified is None:
+            self.video_label_rect.config(
+                image="",
+                text="calibration.yaml 없음\ncalibration 후 rectified 표시",
+                width=40,
+                height=18,
+            )
+        else:
+            self.show_image_on_label(
+                rectified,
+                self.video_label_rect,
+                is_raw=False,
+            )
+
+        h, w = frame_rgb.shape[:2]
+        if rectified is None:
+            self.video_status_var.set(f"Receiving raw video: {w}x{h}")
+        else:
+            self.video_status_var.set(f"Receiving raw + rectified: {w}x{h}")
+
+    def show_image_on_label(self, frame_rgb, label, is_raw):
+        max_w = 380
+        max_h = 300
 
         h, w = frame_rgb.shape[:2]
         scale = min(max_w / w, max_h / h, 1.0)
         new_w = int(w * scale)
         new_h = int(h * scale)
 
+        display_rgb = frame_rgb
         if scale != 1.0:
-            frame_rgb = cv2.resize(frame_rgb, (new_w, new_h))
+            display_rgb = cv2.resize(frame_rgb, (new_w, new_h))
 
-        image = Image.fromarray(frame_rgb)
-        self.video_photo = ImageTk.PhotoImage(image=image)
+        image = Image.fromarray(display_rgb)
+        photo = ImageTk.PhotoImage(image=image)
 
-        self.video_label.config(
-            image=self.video_photo,
+        if is_raw:
+            self.video_photo_raw = photo
+        else:
+            self.video_photo_rect = photo
+
+        label.config(
+            image=photo,
             text="",
             width=new_w,
             height=new_h,
-        )
-        self.video_status_var.set(
-            f"Receiving video: {w}x{h}, display={new_w}x{new_h}"
         )
 
     def build_gripper_control(self, parent):

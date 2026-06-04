@@ -181,18 +181,7 @@ class JetcobotCommandSubscriber(Node):
 
         self.status_pub.publish(msg)
 
-        self.get_logger().info(
-            f"status published | "
-            f"tool_ref={tool_reference}, "
-            f"ref_frame={reference_frame}, "
-            f"end_type={end_type}, "
-            f"angles={angles}, "
-            f"coords={coords}, "
-            f"gripper={gripper_value}"
-        )
-
     def status_request_callback(self, msg):
-        self.get_logger().info("status request received")
         self.publish_status()
 
     def tool_reference_callback(self, msg):
@@ -206,9 +195,8 @@ class JetcobotCommandSubscriber(Node):
 
         tool_reference = [float(v) for v in data]
 
-        self.get_logger().info(f"set_tool_reference: {tool_reference}")
-
         try:
+            self.get_logger().info(f"set_tool_reference: {tool_reference}")
             self.mc.set_tool_reference(tool_reference)
             self.publish_status()
         except Exception as e:
@@ -219,8 +207,7 @@ class JetcobotCommandSubscriber(Node):
 
         if len(data) < 1:
             self.get_logger().warn(
-                f"Invalid gripper message length: {len(data)}. "
-                "Expected [value, speed]."
+                f"Invalid gripper message length: {len(data)}. Expected [value, speed]."
             )
             return
 
@@ -230,9 +217,9 @@ class JetcobotCommandSubscriber(Node):
         value = max(GRIPPER_MIN, min(GRIPPER_MAX, value))
         speed = max(1, min(100, speed))
 
-        self.get_logger().info(f"set_gripper_value: value={value}, speed={speed}")
-
         try:
+            self.get_logger().info(f"set_gripper_value: value={value}, speed={speed}")
+
             try:
                 self.mc.set_gripper_value(int(value), speed, _async=True)
             except TypeError:
