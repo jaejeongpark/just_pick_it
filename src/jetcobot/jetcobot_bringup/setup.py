@@ -28,6 +28,8 @@ setup(
             'joint_control = jetcobot_bringup.joint_control:main',
             'joint_state_switcher = jetcobot_bringup.joint_state_switcher:main',
             'camera_info_publisher = jetcobot_bringup.camera_info_publisher:main',
+            'jetcobot_joint_subscriber = jetcobot_bringup.jetcobot_joint_subscriber:main',
+            'local_joint_slider_publisher = jetcobot_bringup.local_joint_slider_publisher:main',
         ],
     },
 )
