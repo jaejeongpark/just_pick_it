@@ -487,25 +487,16 @@ class RobotCommandGateway:
             task.get("product_quantity")
             or task.get("quantity")
             or task.get("requested_quantity")
-            or task.get("detected_quantity")
+            or task.get("processed_quantity")
         )
 
         self._set_goal_field(goal, "task_id", self._int_or_zero(task.get("task_id")))
-        self._set_goal_field(goal, "robot_name", str(task.get("assigned_robot_name") or ""))
         self._set_goal_field(goal, "task_type", str(task.get("task_type") or ""))
         self._set_goal_field(goal, "order_id", self._int_or_zero(task.get("order_id")))
-        self._set_goal_field(goal, "order_item_id", self._int_or_zero(task.get("order_item_id")))
         self._set_goal_field(goal, "display_item_id", self._int_or_zero(task.get("display_item_id")))
-        self._set_goal_field(goal, "product_id", self._int_or_zero(task.get("product_id")))
         self._set_goal_field(goal, "product_name", str(task.get("product_name") or ""))
         self._set_goal_field(goal, "quantity", quantity)
-        self._set_goal_field(goal, "requested_quantity", self._int_or_zero(task.get("requested_quantity")))
-        self._set_goal_field(goal, "detected_quantity", self._int_or_zero(task.get("detected_quantity")))
-        self._set_goal_field(goal, "source_zone_id", self._int_or_zero(task.get("source_zone_id")))
-        self._set_goal_field(goal, "target_zone_id", self._int_or_zero(task.get("target_zone_id")))
-        self._set_goal_field(goal, "source_zone_name", str(task.get("source_zone_name") or ""))
         self._set_goal_field(goal, "target_zone_name", str(task.get("target_zone_name") or ""))
-        self._set_goal_field(goal, "pickup_slot_id", self._int_or_zero(task.get("pickup_slot_id")))
         return goal
 
     def _on_cobot_goal_response(
@@ -569,9 +560,7 @@ class RobotCommandGateway:
             "state": str(status),
             "message": str(self._get_message_field(feedback, "message") or ""),
             "progress": float(self._get_message_field(feedback, "progress") or 0.0),
-            "detected_quantity": self._int_or_zero(
-                self._get_message_field(feedback, "detected_quantity")
-            ),
+            "processed_quantity": self._quantity_from_message(feedback),
         }
 
         if feedback_callback is not None:
@@ -603,9 +592,7 @@ class RobotCommandGateway:
             "success": bool(self._get_message_field(result, "success")),
             "status": status,
             "message": str(message),
-            "detected_quantity": self._int_or_zero(
-                self._get_message_field(result, "detected_quantity")
-            ),
+            "processed_quantity": self._quantity_from_message(result),
             "stock_delta": self._int_or_zero(self._get_message_field(result, "stock_delta")),
         }
 
@@ -803,3 +790,7 @@ class RobotCommandGateway:
         if hasattr(message, field_name):
             return getattr(message, field_name)
         return None
+
+    def _quantity_from_message(self, message: Any) -> int:
+        """ROS message/action object에서 처리 수량을 읽는다."""
+        return self._int_or_zero(self._get_message_field(message, "processed_quantity"))

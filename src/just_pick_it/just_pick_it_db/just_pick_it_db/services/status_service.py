@@ -80,12 +80,15 @@ def build_task_summary(db: Session, task: Task):
 
     if order_item:
         product = db.get(Product, order_item.product_id)
+        processed_quantity = None
         product_quantity = order_item.quantity
     elif display_item:
         product = db.get(Product, display_item.product_id)
-        product_quantity = display_item.requested_quantity or display_item.detected_quantity
+        processed_quantity = display_item.processed_quantity
+        product_quantity = display_item.requested_quantity or processed_quantity
     else:
         product = None
+        processed_quantity = None
         product_quantity = None
 
     source_zone = db.get(Zone, task.source_zone_id) if task.source_zone_id else None
@@ -102,7 +105,7 @@ def build_task_summary(db: Session, task: Task):
         "product_name": product.name if product else None,
         "product_quantity": product_quantity,
         "requested_quantity": display_item.requested_quantity if display_item else None,
-        "detected_quantity": display_item.detected_quantity if display_item else None,
+        "processed_quantity": processed_quantity,
         "stock_delta": display_item.stock_delta if display_item else None,
         "display_policy": display_item.display_policy if display_item else None,
         "display_status": display_item.status if display_item else None,
