@@ -379,7 +379,9 @@ function taskRouteLabel(task) {
 
 function taskQuantityLabel(task) {
   const productName = taskProductName(task);
-  const quantity = task?.product_quantity;
+  const quantity =
+    task?.product_quantity ??
+    task?.processed_quantity;
 
   if (productName && quantity !== null && quantity !== undefined) {
     return `${productName} ${quantity}개`;
@@ -2327,6 +2329,8 @@ function taskSearchText(task) {
     label(task.status),
     task.product_name,
     task.product_quantity,
+    task.processed_quantity,
+    task.stock_delta,
     task.priority,
     task.sequence_no,
     task.source_zone_name,

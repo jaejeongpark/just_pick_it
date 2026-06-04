@@ -103,7 +103,7 @@ CREATE TYPE exception_type AS ENUM (
 
 CREATE TYPE display_policy AS ENUM (
     'REQUESTED_QUANTITY',
-    'ALL_DETECTED'
+    'ALL_PROCESSED'
 );
 
 CREATE TYPE display_item_status AS ENUM (
@@ -166,7 +166,7 @@ CREATE TABLE display_item (
     display_item_id SERIAL PRIMARY KEY,
     product_id INT NOT NULL REFERENCES product(product_id),
     requested_quantity INT CHECK (requested_quantity IS NULL OR requested_quantity > 0),
-    detected_quantity INT CHECK (detected_quantity IS NULL OR detected_quantity >= 0),
+    processed_quantity INT CHECK (processed_quantity IS NULL OR processed_quantity >= 0),
     stock_delta INT CHECK (stock_delta IS NULL OR stock_delta >= 0),
     display_policy display_policy NOT NULL,
     status display_item_status NOT NULL DEFAULT 'REQUESTED',
@@ -174,7 +174,7 @@ CREATE TABLE display_item (
     CHECK (
         (display_policy = 'REQUESTED_QUANTITY' AND requested_quantity IS NOT NULL)
         OR
-        (display_policy = 'ALL_DETECTED' AND requested_quantity IS NULL)
+        (display_policy = 'ALL_PROCESSED' AND requested_quantity IS NULL)
     )
 );
 
