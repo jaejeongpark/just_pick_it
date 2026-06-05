@@ -6,7 +6,7 @@
     <title>Just Pick It Admin</title>
     <link
       rel="stylesheet"
-      href="/static/css/style.css?v=20260604-pickup-summary"
+      href="/static/css/style.css?v=20260605-muted-map"
     />
   </head>
   <body class="admin-console" data-admin-page="{{ page }}">
@@ -91,9 +91,9 @@
             </div>
           </div>
           <div class="summary-card">
-            <span>진행 중인 주문</span>
+            <span>진행 중인 작업</span>
             <strong id="summary-tasks">0</strong>
-            <a class="summary-link" href="/admin/orders">주문 목록 보기 〉</a>
+            <a class="summary-link" href="/admin/orders">작업 목록 보기 〉</a>
           </div>
           <div class="summary-card alert-card">
             <span>예외/알람</span>
@@ -780,7 +780,7 @@
                 id="dashboard-llm-input"
                 type="text"
                 autocomplete="off"
-                placeholder="예: 우유 5개 진열해줘"
+                placeholder="예: 생수 5개 진열해줘"
               />
               <button
                 id="dashboard-llm-submit"
@@ -801,8 +801,8 @@
 
           <section class="section-band task-summary-section">
             <div class="section-heading">
-              <h2>진행 중인 주문 (최근)</h2>
-              <a class="section-link" href="/admin/orders">전체 주문 보기 〉</a>
+              <h2>진행 중인 작업 (최근)</h2>
+              <a class="section-link" href="/admin/orders">전체 작업 보기 〉</a>
             </div>
             <div id="task-list" class="table-placeholder">No tasks loaded</div>
           </section>
@@ -979,13 +979,13 @@
         <main class="page-shell admin-page-grid orders-management-page">
           <section id="order-panel" class="section-band orders-primary-section">
             <div class="section-heading">
-              <h2>주문 목록</h2>
+              <h2>주문/진열 목록</h2>
               <button
                 id="order-history-button"
                 class="ghost-button"
                 type="button"
               >
-                완료 주문 보기
+                완료 작업 보기
               </button>
             </div>
             <div id="order-list" class="table-placeholder">
@@ -1100,7 +1100,7 @@
           id="llm-input"
           type="text"
           autocomplete="off"
-          placeholder="예: 우유 5개 진열해줘"
+          placeholder="예: 생수 5개 진열해줘"
         />
         <button class="small-action-button" type="submit">Send</button>
       </form>
@@ -1125,6 +1125,6 @@
       </section>
     </div>
 
-    <script src="/static/js/admin.js?v=20260520-fleet-ui-26"></script>
+    <script src="/static/js/admin.js?v=20260605-web-cleanup-2"></script>
   </body>
 </html>

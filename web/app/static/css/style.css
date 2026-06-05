@@ -2036,13 +2036,28 @@ body {
   color: #f8fafc;
 }
 
-.admin-console .modal-summary div,
+.admin-console .modal-panel .modal-summary div,
+.admin-console .modal-panel .modal-item-row,
+.admin-console .modal-panel .history-row,
 .admin-console .modal-body .cart-row,
 .admin-console .state-editor-form,
 .admin-console .inventory-create-form,
 .admin-console .inventory-editor-row {
-  border-color: rgba(148, 163, 184, 0.16);
-  background: rgba(15, 23, 42, 0.56);
+  border-color: rgba(96, 165, 250, 0.24);
+  background: rgba(15, 23, 42, 0.82);
+}
+
+.admin-console .modal-panel .modal-summary span,
+.admin-console .modal-panel .modal-item-row span,
+.admin-console .modal-panel .history-row span {
+  color: #9fb1c8;
+}
+
+.admin-console .modal-panel .modal-summary strong,
+.admin-console .modal-panel .modal-item-row strong,
+.admin-console .modal-panel .history-row strong {
+  color: #f8fafc;
+  font-weight: 900;
 }
 
 .admin-console .modal-body .cart-row {
@@ -2347,8 +2362,33 @@ body {
   padding-right: 18px;
 }
 
+.admin-console .exception-table-row[data-open-exception-modal],
+.admin-console .history-row[data-open-exception-modal] {
+  cursor: pointer;
+}
+
+.admin-console .exception-table-row[data-open-exception-modal]:hover,
+.admin-console .history-row[data-open-exception-modal]:hover {
+  background: rgba(30, 41, 59, 0.92);
+}
+
 .admin-console .exception-table-row .small-action-button {
   min-width: 78px;
+}
+
+.exception-detail-message {
+  min-height: 120px;
+  margin: 0;
+  padding: 14px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 8px;
+  background: rgba(2, 6, 23, 0.42);
+  color: #dbeafe;
+  font: inherit;
+  line-height: 1.55;
 }
 
 .robot-name-cell {
@@ -3376,6 +3416,7 @@ body {
 }
 
 .robot-map-marker {
+  --marker-dot-size: 28px;
   position: absolute;
   left: var(--marker-x);
   top: var(--marker-y);
@@ -3384,7 +3425,7 @@ body {
   gap: 8px;
   color: #94a3b8;
   background: transparent;
-  transform: translate(-50%, -50%);
+  transform: translate(-50%, calc(var(--marker-dot-size) / -2));
   filter: drop-shadow(0 8px 14px rgba(0, 0, 0, 0.5));
 }
 
@@ -3407,13 +3448,40 @@ body {
 
 .robot-map-marker .marker-heading {
   display: block;
-  width: 28px;
-  height: 28px;
+  width: var(--marker-dot-size);
+  height: var(--marker-dot-size);
   border-radius: 999px;
   background: currentColor;
   box-shadow:
     0 0 0 4px rgba(15, 23, 42, 0.72),
     0 0 0 5px currentColor;
+}
+
+.robot-map-marker.is-moving .marker-heading {
+  animation: map-marker-moving-pulse 2.2s ease-in-out infinite;
+}
+
+.robot-map-marker.is-moving span {
+  opacity: 0.9;
+}
+
+@keyframes map-marker-moving-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow:
+      0 0 0 4px rgba(15, 23, 42, 0.72),
+      0 0 0 5px currentColor,
+      0 0 0 0 rgba(148, 163, 184, 0);
+  }
+
+  50% {
+    opacity: 0.82;
+    box-shadow:
+      0 0 0 4px rgba(15, 23, 42, 0.72),
+      0 0 0 5px currentColor,
+      0 0 0 9px rgba(148, 163, 184, 0.16);
+  }
 }
 
 .robot-map-marker.robot-dot-amr1 {
@@ -5451,40 +5519,58 @@ body {
 }
 
 .dashboard-grid .warehouse-map {
+  --map-visual-offset-x: 0px;
   height: calc(100% - 36px);
   min-height: 0;
   display: block;
   position: relative;
   overflow: visible;
-  background:
-    url("/static/img/minimap.png") center / auto calc(100% - 10px)
-      no-repeat,
-    #111827;
+  background: #111827;
+}
+
+.dashboard-grid .warehouse-map::before {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  left: calc(50% + var(--map-visual-offset-x));
+  top: 50%;
+  display: block;
+  width: var(--map-visual-width, calc(100% - 10px));
+  height: var(--map-visual-height, auto);
+  aspect-ratio: 2 / 1;
+  border: 0;
+  border-radius: 2px;
+  background: url("/static/img/minimap.png?v=20260605-muted-map")
+    center / 100% 100% no-repeat;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
 }
 
 .dashboard-grid .warehouse-map .map-robot-layer {
   inset: auto;
-  left: 50%;
+  left: calc(50% + var(--map-visual-offset-x));
   top: 50%;
-  width: auto;
-  height: calc(100% - 10px);
+  width: var(--map-visual-width, calc(100% - 10px));
+  height: var(--map-visual-height, auto);
   aspect-ratio: 2 / 1;
   transform: translate(-50%, -50%);
 }
 
 .dashboard-grid .warehouse-map .map-robot-legend {
   position: absolute;
-  top: 12px;
-  right: 4px;
+  top: -28px;
+  left: 50%;
   z-index: 6;
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
   width: auto;
-  min-width: 86px;
+  min-width: 210px;
   margin: 0;
-  gap: 6px;
-  padding: 6px 8px;
+  gap: 12px;
+  padding: 4px 10px;
+  transform: translateX(-50%);
 }
 
 

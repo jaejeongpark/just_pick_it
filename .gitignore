@@ -7,6 +7,7 @@ __pycache__/
 .venv/
 web/.venv/
 web/.env
+scripts/demo/full_flow_demo.env
 .claude/
 .vscode/
 AGENTS.md

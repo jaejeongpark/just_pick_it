@@ -40,6 +40,7 @@ COBOT_TASK_TYPES = {
 }
 
 FINAL_TASK_STATUSES = {"SUCCESS", "FAILED", "CANCELLED"}
+UNAVAILABLE_ROBOT_STATUSES = {"EMERGENCY_STOP", "ERROR", "OFFLINE"}
 CHARGE_BATTERY_THRESHOLD = 30
 DEFAULT_ORDER_PRIORITY = 2
 DEFAULT_DISPLAY_PRIORITY = 1
@@ -1823,6 +1824,7 @@ class TaskManager:
             decision = self._evaluate_housekeeping_decision(picky_name)
             if reason == HOUSEKEEPING_REASON_PARKING and not decision["should_return_home"]:
                 self._housekeeping_stopped_flows.add(flow_key)
+                self._release_picky_after_housekeeping_stop(last_housekeeping)
                 return []
 
             return self._create_housekeeping_task(
@@ -2074,6 +2076,23 @@ class TaskManager:
         flow_key = self._flow_key_for_task(task)
         if flow_key is not None:
             self._housekeeping_stopped_flows.add(flow_key)
+
+    def _release_picky_after_housekeeping_stop(self, task: dict[str, Any]) -> None:
+        """PARKING RETURN_HOME에서 추가 도킹을 멈출 때 PICKY를 신규 작업 가능 상태로 푼다."""
+        robot_name = str(task.get("assigned_robot_name") or "")
+        if not robot_name:
+            return
+
+        robot = self._robot_by_name(robot_name)
+        if robot and robot.get("robot_status") in UNAVAILABLE_ROBOT_STATUSES:
+            return
+
+        self._repo.update_robot_state(
+            robot_name,
+            robot_status="IDLE",
+            picky_state="STANDBY",
+            current_task_id=None,
+        )
 
     def _flow_key_for_task(self, task: dict[str, Any]) -> tuple[str, int] | None:
         """task가 속한 주문/진열 흐름 key를 반환한다."""

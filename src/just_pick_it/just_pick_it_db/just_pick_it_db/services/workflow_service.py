@@ -35,6 +35,10 @@ COBOT_STATE_BY_TASK = {
 
 COBOT_TASKS_REQUIRING_PICKY_WAIT = frozenset(COBOT_STATE_BY_TASK)
 
+ORDER_FLOW_RELEASE_TASKS = frozenset({"UNLOAD"})
+DISPLAY_FLOW_RELEASE_TASKS = frozenset({"DISPLAY_PLACE"})
+HOUSEKEEPING_RELEASE_TASKS = frozenset({"CHARGE"})
+
 
 def create_order_workflow(_db: Session, order: Order) -> None:
     """Move a newly created order into the Fleet Manager waiting queue.
@@ -98,8 +102,9 @@ def finish_runtime_task(
     previous_status: str | None = None,
 ) -> None:
     order = db.get(Order, task.order_id) if task.order_id else None
-    clear_robot_task(db, task)
-    clear_companion_picky_waiting(db, task)
+    release_robot = should_release_robot_after_success(task)
+    clear_robot_task(db, task, release_robot=release_robot)
+    clear_companion_picky_waiting(db, task, release_robot=release_robot)
 
     if task.task_type == "DISPLAY_PLACE":
         apply_display_success(db, task, previous_status)
@@ -129,7 +134,18 @@ def apply_robot_state_for_task(robot: Robot, task_type: str) -> None:
         robot.cobot_state = COBOT_STATE_BY_TASK.get(task_type, robot.cobot_state)
 
 
-def clear_robot_task(db: Session, task: Task) -> None:
+def should_release_robot_after_success(task: Task) -> bool:
+    """성공한 task 이후 robot_status를 IDLE로 풀어도 되는지 판단한다."""
+    if task.order_id is not None:
+        return task.task_type in ORDER_FLOW_RELEASE_TASKS | HOUSEKEEPING_RELEASE_TASKS
+
+    if task.display_item_id is not None:
+        return task.task_type in DISPLAY_FLOW_RELEASE_TASKS | HOUSEKEEPING_RELEASE_TASKS
+
+    return True
+
+
+def clear_robot_task(db: Session, task: Task, *, release_robot: bool = True) -> None:
     if not task.assigned_robot_id:
         return
 
@@ -140,7 +156,7 @@ def clear_robot_task(db: Session, task: Task) -> None:
 
     robot.current_task_id = None
 
-    if robot.robot_status not in UNAVAILABLE_ROBOT_STATUSES:
+    if release_robot and robot.robot_status not in UNAVAILABLE_ROBOT_STATUSES:
         robot.robot_status = "IDLE"
 
     if robot.robot_type == "PICKY":
@@ -166,7 +182,12 @@ def mark_companion_picky_waiting(db: Session, task: Task, robot: Robot) -> None:
     picky.picky_state = "WAITING_FOR_COBOT"
 
 
-def clear_companion_picky_waiting(db: Session, task: Task) -> None:
+def clear_companion_picky_waiting(
+    db: Session,
+    task: Task,
+    *,
+    release_robot: bool = True,
+) -> None:
     """COBOT 작업 종료 시 같은 unit의 PICKY 대기 상태를 해제한다."""
     if task.task_type not in COBOT_TASKS_REQUIRING_PICKY_WAIT:
         return
@@ -180,7 +201,7 @@ def clear_companion_picky_waiting(db: Session, task: Task) -> None:
         return
 
     picky.current_task_id = None
-    if picky.robot_status not in UNAVAILABLE_ROBOT_STATUSES:
+    if release_robot and picky.robot_status not in UNAVAILABLE_ROBOT_STATUSES:
         picky.robot_status = "IDLE"
     picky.picky_state = "STANDBY"
 

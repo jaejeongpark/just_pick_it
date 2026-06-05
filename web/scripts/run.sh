@@ -30,6 +30,47 @@ FLEET_API_BASE_URL="${FLEET_API_BASE_URL:-http://localhost:8100}"
 FLEET_API_WS_BASE_URL="${FLEET_API_WS_BASE_URL:-ws://localhost:8100}"
 export FLEET_API_BASE_URL FLEET_API_WS_BASE_URL
 
+web_is_listening() {
+  ss -ltn "sport = :${APP_PORT}" 2>/dev/null | grep -q LISTEN
+}
+
+web_owner_pids() {
+  ss -ltnp "sport = :${APP_PORT}" 2>/dev/null |
+    sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' |
+    sort -u
+}
+
+stop_existing_web_gateway() {
+  local pids
+  pids="$(web_owner_pids || true)"
+  [ -n "$pids" ] || return 0
+
+  echo "[web-run] port ${APP_PORT} already in use; stopping existing Web Gateway owner(s)"
+  while read -r pid; do
+    [ -n "$pid" ] || continue
+    echo "[web-run] stopping pid=$pid cmd=$(ps -p "$pid" -o args= 2>/dev/null || echo unknown)"
+    kill "$pid" >/dev/null 2>&1 || true
+  done <<< "$pids"
+
+  for _ in $(seq 1 10); do
+    web_is_listening || return 0
+    sleep 0.5
+  done
+
+  if command -v fuser >/dev/null 2>&1; then
+    echo "[web-run] port ${APP_PORT} still busy; using fuser cleanup"
+    fuser -k "${APP_PORT}/tcp" >/dev/null 2>&1 || true
+    sleep 1
+  fi
+
+  if web_is_listening; then
+    echo "[web-run] port ${APP_PORT} is still busy after cleanup." >&2
+    exit 1
+  fi
+}
+
+stop_existing_web_gateway
+
 if command -v curl >/dev/null 2>&1; then
   if ! curl -fsS --max-time 1 "$FLEET_API_BASE_URL/api/health/db" >/dev/null 2>&1; then
     echo "[web-run] warning: Fleet API is not responding yet: $FLEET_API_BASE_URL" >&2
