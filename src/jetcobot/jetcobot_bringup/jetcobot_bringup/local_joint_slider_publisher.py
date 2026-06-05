@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import queue
 import signal
 import socket
@@ -29,6 +30,9 @@ except ImportError:
 
 CMD_JOINT = 0
 CMD_COORD = 1
+
+ARM_RELEASE = 0
+ARM_POWER_ON = 1
 
 HEADER_FMT = ">IHH"
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
@@ -62,29 +66,24 @@ class UdpVideoReceiver:
     def __init__(self, frame_queue, status_queue):
         self.frame_queue = frame_queue
         self.status_queue = status_queue
-
         self.sock = None
         self.thread = None
         self.running = False
         self.port = None
-
         self.frames = {}
         self.last_frame_time = 0.0
 
     def start(self, port):
         self.stop()
-
         self.port = int(port)
         self.running = True
         self.frames = {}
         self.last_frame_time = 0.0
-
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
 
     def stop(self):
         self.running = False
-
         if self.sock is not None:
             try:
                 self.sock.close()
@@ -98,9 +97,7 @@ class UdpVideoReceiver:
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.sock.bind(("", self.port))
             self.sock.settimeout(0.5)
-
             self.status_queue.put(f"Listening UDP video on port {self.port}")
-
         except Exception as e:
             self.status_queue.put(f"UDP bind failed on port {self.port}: {e}")
             self.running = False
@@ -108,7 +105,7 @@ class UdpVideoReceiver:
 
         while self.running:
             try:
-                packet, addr = self.sock.recvfrom(65536)
+                packet, _ = self.sock.recvfrom(65536)
             except socket.timeout:
                 continue
             except OSError:
@@ -185,41 +182,58 @@ class UdpVideoReceiver:
 
 
 class JetcobotGuiPublisher(Node):
-    def __init__(self, status_queue):
-        super().__init__("local_jetcobot_gui_publisher")
+    def __init__(self, status_queue, robot_name):
+        node_name = f"local_{robot_name}_gui_publisher"
+        super().__init__(node_name)
 
         self.status_queue = status_queue
+        self.robot_name = robot_name
+        self.ns = f"/{robot_name}"
 
         self.command_pub = self.create_publisher(
             Float64MultiArray,
-            "/jetcobot/target_pose",
+            f"{self.ns}/target_pose",
             10,
         )
 
         self.status_request_pub = self.create_publisher(
             Empty,
-            "/jetcobot/request_status",
+            f"{self.ns}/request_status",
             10,
         )
 
         self.tool_reference_pub = self.create_publisher(
             Float64MultiArray,
-            "/jetcobot/set_tool_reference",
+            f"{self.ns}/set_tool_reference",
             10,
         )
 
         self.gripper_pub = self.create_publisher(
             Float64MultiArray,
-            "/jetcobot/set_gripper",
+            f"{self.ns}/set_gripper",
+            10,
+        )
+
+        self.arm_pub = self.create_publisher(
+            Float64MultiArray,
+            f"{self.ns}/set_arm",
             10,
         )
 
         self.status_sub = self.create_subscription(
             Float64MultiArray,
-            "/jetcobot/status",
+            f"{self.ns}/status",
             self.status_callback,
             10,
         )
+
+        self.get_logger().info(f"GUI namespace: {self.ns}")
+        self.get_logger().info(f"Pub: {self.ns}/target_pose")
+        self.get_logger().info(f"Pub: {self.ns}/set_gripper")
+        self.get_logger().info(f"Pub: {self.ns}/set_tool_reference")
+        self.get_logger().info(f"Pub: {self.ns}/set_arm")
+        self.get_logger().info(f"Pub: {self.ns}/request_status")
+        self.get_logger().info(f"Sub: {self.ns}/status")
 
     def publish_command(self, command_type, values, speed, coord_move_mode=0):
         msg = Float64MultiArray()
@@ -242,6 +256,11 @@ class JetcobotGuiPublisher(Node):
         msg = Float64MultiArray()
         msg.data = [float(value), float(speed)]
         self.gripper_pub.publish(msg)
+
+    def publish_arm(self, command):
+        msg = Float64MultiArray()
+        msg.data = [float(command)]
+        self.arm_pub.publish(msg)
 
     def status_callback(self, msg):
         data = list(msg.data)
@@ -266,12 +285,13 @@ class JetcobotGuiPublisher(Node):
 
 
 class JetcobotSliderGUI:
-    def __init__(self, root, ros_node, status_queue):
+    def __init__(self, root, ros_node, status_queue, robot_name, initial_udp_port=""):
         self.root = root
         self.ros_node = ros_node
         self.status_queue = status_queue
+        self.robot_name = robot_name
 
-        self.root.title("Local Jetcobot Controller")
+        self.root.title(f"Local Jetcobot Controller - {robot_name}")
 
         self.command_type = CMD_JOINT
         self.pending_mode = None
@@ -293,7 +313,7 @@ class JetcobotSliderGUI:
         self.gripper_value_var = tk.DoubleVar(value=50.0)
         self.gripper_entry_var = tk.StringVar(value="50.00")
 
-        self.udp_port_var = tk.StringVar(value="")
+        self.udp_port_var = tk.StringVar(value=str(initial_udp_port) if initial_udp_port else "")
         self.video_status_var = tk.StringVar(value="UDP port 입력 후 Enter")
         self.capture_status_var = tk.StringVar(value="Capture: -")
         self.calib_status_var = tk.StringVar(value="Calibration: -")
@@ -304,12 +324,13 @@ class JetcobotSliderGUI:
             self.video_frame_queue,
             self.video_status_queue,
         )
+
         self.video_photo_raw = None
         self.video_photo_rect = None
         self.last_video_frame_time = 0.0
         self.latest_frame_rgb = None
 
-        self.capture_dir = Path.cwd() / "jetcobot_captures"
+        self.capture_dir = Path.cwd() / f"{robot_name}_captures"
         self.capture_dir.mkdir(parents=True, exist_ok=True)
 
         self.calib_K = None
@@ -339,20 +360,17 @@ class JetcobotSliderGUI:
         self.root.after(300, self.poll_video_status_queue)
         self.ros_node.request_status()
 
+        if initial_udp_port:
+            self.root.after(500, self.start_video_receiver)
+
     def current_limits(self):
-        if self.command_type == CMD_JOINT:
-            return JOINT_LIMITS
-        return COORD_LIMITS
+        return JOINT_LIMITS if self.command_type == CMD_JOINT else COORD_LIMITS
 
     def current_labels(self):
-        if self.command_type == CMD_JOINT:
-            return JOINT_LABELS
-        return COORD_LABELS
+        return JOINT_LABELS if self.command_type == CMD_JOINT else COORD_LABELS
 
     def current_mode_name(self):
-        if self.command_type == CMD_JOINT:
-            return "JOINT / send_angles"
-        return "COORD / send_coords"
+        return "JOINT / send_angles" if self.command_type == CMD_JOINT else "COORD / send_coords"
 
     def build_ui(self):
         self.notebook = ttk.Notebook(self.root)
@@ -370,10 +388,16 @@ class JetcobotSliderGUI:
     def build_motion_tab(self):
         title = ttk.Label(
             self.motion_tab,
-            text="Jetcobot Motion Control",
+            text=f"Jetcobot Motion Control - {self.robot_name}",
             font=("Arial", 15, "bold"),
         )
         title.pack(pady=8)
+
+        ns_label = ttk.Label(
+            self.motion_tab,
+            text=f"ROS namespace: /{self.robot_name}",
+        )
+        ns_label.pack(pady=2)
 
         body_frame = ttk.Frame(self.motion_tab)
         body_frame.pack(fill="both", expand=True)
@@ -412,6 +436,21 @@ class JetcobotSliderGUI:
         speed_slider.pack(side="left", fill="x", expand=True, padx=5)
 
         ttk.Label(top_frame, textvariable=self.speed_var, width=5).pack(side="left")
+
+        arm_frame = ttk.LabelFrame(left_panel, text="Arming Control")
+        arm_frame.pack(fill="x", padx=15, pady=6)
+
+        ttk.Button(
+            arm_frame,
+            text="Power ON / Arm",
+            command=self.arm_power_on,
+        ).pack(side="left", padx=5, pady=5)
+
+        ttk.Button(
+            arm_frame,
+            text="Release Servos / Disarm",
+            command=self.arm_release,
+        ).pack(side="left", padx=5, pady=5)
 
         self.coord_mode_frame = ttk.Frame(left_panel)
         self.coord_mode_frame.pack(fill="x", padx=15, pady=5)
@@ -536,7 +575,7 @@ class JetcobotSliderGUI:
         self.build_video_monitor(right_panel)
 
     def build_video_monitor(self, parent):
-        video_frame = ttk.LabelFrame(parent, text="Camera UDP Monitor")
+        video_frame = ttk.LabelFrame(parent, text=f"Camera UDP Monitor - {self.robot_name}")
         video_frame.pack(fill="both", expand=True)
 
         top = ttk.Frame(video_frame)
@@ -548,17 +587,8 @@ class JetcobotSliderGUI:
         port_entry.pack(side="left", padx=5)
         port_entry.bind("<Return>", lambda event: self.start_video_receiver())
 
-        ttk.Button(
-            top,
-            text="Start",
-            command=self.start_video_receiver,
-        ).pack(side="left", padx=5)
-
-        ttk.Button(
-            top,
-            text="Stop",
-            command=self.stop_video_receiver,
-        ).pack(side="left", padx=5)
+        ttk.Button(top, text="Start", command=self.start_video_receiver).pack(side="left", padx=5)
+        ttk.Button(top, text="Stop", command=self.stop_video_receiver).pack(side="left", padx=5)
 
         image_row = ttk.Frame(video_frame)
         image_row.pack(fill="both", expand=True, padx=8, pady=8)
@@ -602,39 +632,27 @@ class JetcobotSliderGUI:
             command=self.capture_current_frame,
         ).pack(side="left", padx=5)
 
-        ttk.Label(
-            capture_row,
-            text=f"Save dir: {self.capture_dir}",
-        ).pack(side="left", padx=5)
+        ttk.Label(capture_row, text=f"Save dir: {self.capture_dir}").pack(side="left", padx=5)
 
         calib_frame = ttk.LabelFrame(video_frame, text="Camera Calibration")
         calib_frame.pack(fill="x", padx=8, pady=6)
 
-        info = (
-            "최소 15장 이상, 다양한 자세/화면 위치/측정 거리 중심으로 캡쳐하세요."
-        )
-        ttk.Label(calib_frame, text=info).pack(anchor="w", padx=5, pady=3)
+        ttk.Label(
+            calib_frame,
+            text="최소 15장 이상, 다양한 자세/화면 위치/측정 거리 중심으로 캡쳐하세요.",
+        ).pack(anchor="w", padx=5, pady=3)
 
         row1 = ttk.Frame(calib_frame)
         row1.pack(fill="x", padx=5, pady=4)
 
         ttk.Label(row1, text="Board W").pack(side="left", padx=3)
-        ttk.Entry(row1, textvariable=self.calib_board_w_var, width=6).pack(
-            side="left",
-            padx=3,
-        )
+        ttk.Entry(row1, textvariable=self.calib_board_w_var, width=6).pack(side="left", padx=3)
 
         ttk.Label(row1, text="Board H").pack(side="left", padx=3)
-        ttk.Entry(row1, textvariable=self.calib_board_h_var, width=6).pack(
-            side="left",
-            padx=3,
-        )
+        ttk.Entry(row1, textvariable=self.calib_board_h_var, width=6).pack(side="left", padx=3)
 
         ttk.Label(row1, text="Square m").pack(side="left", padx=3)
-        ttk.Entry(row1, textvariable=self.calib_square_size_var, width=8).pack(
-            side="left",
-            padx=3,
-        )
+        ttk.Entry(row1, textvariable=self.calib_square_size_var, width=8).pack(side="left", padx=3)
 
         row2 = ttk.Frame(calib_frame)
         row2.pack(fill="x", padx=5, pady=4)
@@ -647,35 +665,12 @@ class JetcobotSliderGUI:
             expand=True,
         )
 
-        ttk.Button(
-            row2,
-            text="Run Calibration",
-            command=self.run_camera_calibration,
-        ).pack(side="left", padx=5)
+        ttk.Button(row2, text="Run Calibration", command=self.run_camera_calibration).pack(side="left", padx=5)
+        ttk.Button(row2, text="Refresh Corners", command=self.refresh_corner_preview_slots).pack(side="left", padx=5)
 
-        ttk.Button(
-            row2,
-            text="Refresh Corners",
-            command=self.refresh_corner_preview_slots,
-        ).pack(side="left", padx=5)
-
-        ttk.Label(video_frame, textvariable=self.video_status_var).pack(
-            fill="x",
-            padx=8,
-            pady=2,
-        )
-
-        ttk.Label(video_frame, textvariable=self.capture_status_var).pack(
-            fill="x",
-            padx=8,
-            pady=2,
-        )
-
-        ttk.Label(video_frame, textvariable=self.calib_status_var).pack(
-            fill="x",
-            padx=8,
-            pady=2,
-        )
+        ttk.Label(video_frame, textvariable=self.video_status_var).pack(fill="x", padx=8, pady=2)
+        ttk.Label(video_frame, textvariable=self.capture_status_var).pack(fill="x", padx=8, pady=2)
+        ttk.Label(video_frame, textvariable=self.calib_status_var).pack(fill="x", padx=8, pady=2)
 
         preview_frame = ttk.LabelFrame(video_frame, text="Detected Corner Preview Slots")
         preview_frame.pack(fill="both", expand=True, padx=8, pady=6)
@@ -689,22 +684,96 @@ class JetcobotSliderGUI:
             command=self.corner_canvas.yview,
         )
         self.corner_scrollbar.pack(side="right", fill="y")
-
         self.corner_canvas.configure(yscrollcommand=self.corner_scrollbar.set)
 
         self.corner_inner = ttk.Frame(self.corner_canvas)
-        self.corner_canvas_window = self.corner_canvas.create_window(
-            (0, 0),
-            window=self.corner_inner,
-            anchor="nw",
-        )
+        self.corner_canvas.create_window((0, 0), window=self.corner_inner, anchor="nw")
 
         self.corner_inner.bind(
             "<Configure>",
-            lambda event: self.corner_canvas.configure(
-                scrollregion=self.corner_canvas.bbox("all")
-            ),
+            lambda event: self.corner_canvas.configure(scrollregion=self.corner_canvas.bbox("all")),
         )
+
+    def build_gripper_control(self, parent):
+        gripper_frame = ttk.LabelFrame(parent, text="Gripper Control")
+        gripper_frame.pack(fill="x", padx=15, pady=8)
+
+        ttk.Label(gripper_frame, text="Open amount").pack(side="left", padx=5)
+
+        self.gripper_slider = ttk.Scale(
+            gripper_frame,
+            from_=0.0,
+            to=100.0,
+            orient="horizontal",
+            variable=self.gripper_value_var,
+            command=self.on_gripper_slider_change,
+        )
+        self.gripper_slider.pack(side="left", fill="x", expand=True, padx=8)
+
+        self.gripper_entry = ttk.Entry(gripper_frame, textvariable=self.gripper_entry_var, width=10)
+        self.gripper_entry.pack(side="left", padx=5)
+        self.gripper_entry.bind("<Return>", lambda event: self.apply_gripper_entry())
+
+        self.gripper_value_label = ttk.Label(gripper_frame, text="50.00", width=8)
+        self.gripper_value_label.pack(side="left", padx=5)
+
+        ttk.Button(gripper_frame, text="Apply Gripper", command=self.publish_gripper_current).pack(side="left", padx=5)
+        ttk.Button(gripper_frame, text="Open 100", command=lambda: self.set_and_publish_gripper(100.0)).pack(side="left", padx=5)
+        ttk.Button(gripper_frame, text="Close 0", command=lambda: self.set_and_publish_gripper(0.0)).pack(side="left", padx=5)
+
+    def build_tool_reference_tab(self):
+        frame = ttk.Frame(self.tool_tab)
+        frame.pack(fill="both", expand=True, padx=15, pady=15)
+
+        ttk.Label(
+            frame,
+            text=f"Tool Reference Setting - {self.robot_name}",
+            font=("Arial", 14, "bold"),
+        ).pack(anchor="w", pady=8)
+
+        desc = (
+            "tool_reference = [x, y, z, rx, ry, rz]\n"
+            "flange 기준 tool/TCP offset 설정값입니다.\n"
+            "reference_frame은 base로 유지하고, 여기서는 tool_reference만 변경합니다."
+        )
+        ttk.Label(frame, text=desc).pack(anchor="w", pady=5)
+
+        editor = ttk.LabelFrame(frame, text="set_tool_reference([x, y, z, rx, ry, rz])")
+        editor.pack(fill="x", pady=10)
+
+        labels = ["x", "y", "z", "rx", "ry", "rz"]
+        row = ttk.Frame(editor)
+        row.pack(fill="x", padx=8, pady=8)
+
+        for label in labels:
+            cell = ttk.Frame(row)
+            cell.pack(side="left", padx=5)
+
+            ttk.Label(cell, text=label).pack()
+
+            var = tk.StringVar(value="0.00")
+            entry = ttk.Entry(cell, textvariable=var, width=10)
+            entry.pack()
+
+            self.tool_ref_entry_vars.append(var)
+
+        button_row = ttk.Frame(editor)
+        button_row.pack(fill="x", padx=8, pady=8)
+
+        ttk.Button(button_row, text="Apply Tool Reference", command=self.apply_tool_reference).pack(side="left", padx=5)
+        ttk.Button(button_row, text="Reset [0,0,0,0,0,0]", command=self.reset_tool_reference).pack(side="left", padx=5)
+        ttk.Button(button_row, text="Robot 상태 읽기", command=self.request_robot_status).pack(side="left", padx=5)
+
+        self.tool_ref_status_var = tk.StringVar(value="tool_reference: -")
+        ttk.Label(frame, textvariable=self.tool_ref_status_var).pack(anchor="w", pady=8)
+
+    def arm_power_on(self):
+        self.ros_node.publish_arm(ARM_POWER_ON)
+        self.status_var.set(f"ARM requested to /{self.robot_name}: power_on()")
+
+    def arm_release(self):
+        self.ros_node.publish_arm(ARM_RELEASE)
+        self.status_var.set(f"DISARM requested to /{self.robot_name}: release_all_servos()")
 
     def get_capture_image_paths(self):
         return sorted(
@@ -723,7 +792,6 @@ class JetcobotSliderGUI:
     def find_chessboard_on_image(self, img_bgr, board_w, board_h):
         pattern_size = (board_w, board_h)
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-
         found, corners = cv2.findChessboardCorners(gray, pattern_size, None)
 
         if not found:
@@ -735,14 +803,7 @@ class JetcobotSliderGUI:
             0.001,
         )
 
-        corners_refined = cv2.cornerSubPix(
-            gray,
-            corners,
-            (11, 11),
-            (-1, -1),
-            refine_criteria,
-        )
-
+        corners_refined = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), refine_criteria)
         return True, corners_refined
 
     def refresh_corner_preview_slots(self):
@@ -776,14 +837,12 @@ class JetcobotSliderGUI:
                 continue
 
             found, corners = self.find_chessboard_on_image(img_bgr, board_w, board_h)
-
             if not found:
                 continue
 
             valid += 1
             display = img_bgr.copy()
             cv2.drawChessboardCorners(display, (board_w, board_h), corners, found)
-
             display_rgb = cv2.cvtColor(display, cv2.COLOR_BGR2RGB)
 
             h, w = display_rgb.shape[:2]
@@ -806,8 +865,7 @@ class JetcobotSliderGUI:
 
         if total >= MIN_CALIB_IMAGES:
             self.calib_status_var.set(
-                f"Corner preview: valid={valid}, total={total}. "
-                f"검출 실패 이미지는 preview에서 제외됨."
+                f"Corner preview: valid={valid}, total={total}. 검출 실패 이미지는 preview에서 제외됨."
             )
 
     def run_camera_calibration(self):
@@ -822,13 +880,10 @@ class JetcobotSliderGUI:
 
         if total < MIN_CALIB_IMAGES:
             self.calib_status_var.set(
-                f"Calibration warning: 캡쳐 이미지 {total}/{MIN_CALIB_IMAGES}. "
-                f"최소 15장 이상 더 찍으세요."
+                f"Calibration warning: 캡쳐 이미지 {total}/{MIN_CALIB_IMAGES}. 최소 15장 이상 더 찍으세요."
             )
             self.refresh_corner_preview_slots()
             return
-
-        pattern_size = (board_w, board_h)
 
         objp = np.zeros((board_h * board_w, 3), np.float32)
         objp[:, :2] = np.mgrid[0:board_w, 0:board_h].T.reshape(-1, 2)
@@ -837,7 +892,6 @@ class JetcobotSliderGUI:
         obj_points = []
         img_points = []
         img_size = None
-
         ok_count = 0
 
         for path in image_paths:
@@ -851,7 +905,6 @@ class JetcobotSliderGUI:
                 img_size = (gray.shape[1], gray.shape[0])
 
             found, corners = self.find_chessboard_on_image(img_bgr, board_w, board_h)
-
             if not found:
                 continue
 
@@ -863,18 +916,11 @@ class JetcobotSliderGUI:
 
         if ok_count < MIN_CALIB_IMAGES:
             self.calib_status_var.set(
-                f"Calibration failed: corner 유효 이미지 {ok_count}/{MIN_CALIB_IMAGES}. "
-                f"검출 잘되는 이미지를 더 찍으세요."
+                f"Calibration failed: corner 유효 이미지 {ok_count}/{MIN_CALIB_IMAGES}. 검출 잘되는 이미지를 더 찍으세요."
             )
             return
 
-        ret, K, dist, _, _ = cv2.calibrateCamera(
-            obj_points,
-            img_points,
-            img_size,
-            None,
-            None,
-        )
+        ret, K, dist, _, _ = cv2.calibrateCamera(obj_points, img_points, img_size, None, None)
 
         self.save_camera_calibration_yaml(
             output_file=output_file,
@@ -897,23 +943,14 @@ class JetcobotSliderGUI:
         if self.latest_frame_rgb is not None:
             self.show_video_frame(self.latest_frame_rgb)
 
-    def save_camera_calibration_yaml(
-        self,
-        output_file,
-        img_size,
-        K,
-        dist,
-        rms,
-        valid_count,
-        total_count,
-    ):
+    def save_camera_calibration_yaml(self, output_file, img_size, K, dist, rms, valid_count, total_count):
         output_file = Path(output_file).expanduser()
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
         calib = {
             "image_width": int(img_size[0]),
             "image_height": int(img_size[1]),
-            "camera_name": "jetcobot_camera",
+            "camera_name": f"{self.robot_name}_camera",
             "distortion_model": "plumb_bob",
             "camera_matrix": {
                 "rows": 3,
@@ -936,6 +973,7 @@ class JetcobotSliderGUI:
                 "data": np.hstack([K, np.zeros((3, 1))]).ravel().tolist(),
             },
             "calibration_info": {
+                "robot_name": self.robot_name,
                 "rms_reprojection_error_px": float(rms),
                 "source_image_dir": str(self.capture_dir),
                 "valid_images": int(valid_count),
@@ -950,9 +988,7 @@ class JetcobotSliderGUI:
         path = Path(self.calib_output_var.get()).expanduser()
 
         if not path.exists():
-            self.calib_status_var.set(
-                f"Calibration YAML 없음: {path}. calibration 후 rectified 표시."
-            )
+            self.calib_status_var.set(f"Calibration YAML 없음: {path}. calibration 후 rectified 표시.")
             return False
 
         try:
@@ -964,10 +1000,7 @@ class JetcobotSliderGUI:
 
             self.calib_K = np.array(K_data, dtype=np.float64).reshape(3, 3)
             self.calib_dist = np.array(dist_data, dtype=np.float64).reshape(1, -1)
-            self.calib_image_size = (
-                int(data["image_width"]),
-                int(data["image_height"]),
-            )
+            self.calib_image_size = (int(data["image_width"]), int(data["image_height"]))
 
             self.calib_status_var.set(f"Calibration loaded: {path}")
             return True
@@ -997,7 +1030,7 @@ class JetcobotSliderGUI:
             self.capture_dir.mkdir(parents=True, exist_ok=True)
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            save_path = self.capture_dir / f"jetcobot_capture_{timestamp}.png"
+            save_path = self.capture_dir / f"{self.robot_name}_capture_{timestamp}.png"
 
             frame_bgr = cv2.cvtColor(self.latest_frame_rgb, cv2.COLOR_RGB2BGR)
             ok = cv2.imwrite(str(save_path), frame_bgr)
@@ -1027,46 +1060,30 @@ class JetcobotSliderGUI:
                 raise ValueError()
         except ValueError:
             self.video_status_var.set("Invalid UDP port")
-            self.video_label_raw.config(
-                image="",
-                text="Invalid UDP port\n1~65535 사이 값을 입력하세요.",
-            )
+            self.video_label_raw.config(image="", text="Invalid UDP port\n1~65535 사이 값을 입력하세요.")
             return
 
         if Image is None or ImageTk is None:
             self.video_status_var.set("Pillow not installed: pip install pillow")
-            self.video_label_raw.config(
-                image="",
-                text="Pillow가 필요합니다.\npip install pillow",
-            )
+            self.video_label_raw.config(image="", text="Pillow가 필요합니다.\npip install pillow")
             return
 
         self.load_calibration_if_exists()
-
         self.video_receiver.start(port)
         self.latest_frame_rgb = None
         self.last_video_frame_time = 0.0
 
         self.video_status_var.set(f"Listening UDP video on port {port}")
         self.capture_status_var.set("Capture: 아직 수신된 프레임 없음")
-        self.video_label_raw.config(
-            image="",
-            text=f"Listening on UDP port {port}\n아직 영상을 받지 못했습니다.",
-        )
+        self.video_label_raw.config(image="", text=f"Listening on UDP port {port}\n아직 영상을 받지 못했습니다.")
 
         if self.calib_K is None:
-            self.video_label_rect.config(
-                image="",
-                text="calibration.yaml 없음\ncalibration 후 rectified 표시",
-            )
+            self.video_label_rect.config(image="", text="calibration.yaml 없음\ncalibration 후 rectified 표시")
 
     def stop_video_receiver(self):
         self.video_receiver.stop()
         self.video_status_var.set("UDP video stopped")
-        self.video_label_raw.config(
-            image="",
-            text="UDP video stopped",
-        )
+        self.video_label_raw.config(image="", text="UDP video stopped")
 
     def poll_video_status_queue(self):
         try:
@@ -1078,12 +1095,8 @@ class JetcobotSliderGUI:
 
         if self.video_receiver.running:
             now = time.time()
-            if self.last_video_frame_time == 0.0:
-                pass
-            elif now - self.last_video_frame_time > 2.0:
-                self.video_status_var.set(
-                    "Listening... 최근 2초 동안 새 프레임 없음"
-                )
+            if self.last_video_frame_time != 0.0 and now - self.last_video_frame_time > 2.0:
+                self.video_status_var.set("Listening... 최근 2초 동안 새 프레임 없음")
 
         self.root.after(300, self.poll_video_status_queue)
 
@@ -1104,11 +1117,7 @@ class JetcobotSliderGUI:
         if Image is None or ImageTk is None:
             return
 
-        self.show_image_on_label(
-            frame_rgb,
-            self.video_label_raw,
-            is_raw=True,
-        )
+        self.show_image_on_label(frame_rgb, self.video_label_raw, is_raw=True)
 
         rectified = self.rectify_frame_rgb(frame_rgb)
 
@@ -1120,11 +1129,7 @@ class JetcobotSliderGUI:
                 height=18,
             )
         else:
-            self.show_image_on_label(
-                rectified,
-                self.video_label_rect,
-                is_raw=False,
-            )
+            self.show_image_on_label(rectified, self.video_label_rect, is_raw=False)
 
         h, w = frame_rgb.shape[:2]
         if rectified is None:
@@ -1153,128 +1158,11 @@ class JetcobotSliderGUI:
         else:
             self.video_photo_rect = photo
 
-        label.config(
-            image=photo,
-            text="",
-            width=new_w,
-            height=new_h,
-        )
-
-    def build_gripper_control(self, parent):
-        gripper_frame = ttk.LabelFrame(parent, text="Gripper Control")
-        gripper_frame.pack(fill="x", padx=15, pady=8)
-
-        ttk.Label(gripper_frame, text="Open amount").pack(side="left", padx=5)
-
-        self.gripper_slider = ttk.Scale(
-            gripper_frame,
-            from_=0.0,
-            to=100.0,
-            orient="horizontal",
-            variable=self.gripper_value_var,
-            command=self.on_gripper_slider_change,
-        )
-        self.gripper_slider.pack(side="left", fill="x", expand=True, padx=8)
-
-        self.gripper_entry = ttk.Entry(
-            gripper_frame,
-            textvariable=self.gripper_entry_var,
-            width=10,
-        )
-        self.gripper_entry.pack(side="left", padx=5)
-        self.gripper_entry.bind("<Return>", lambda event: self.apply_gripper_entry())
-
-        self.gripper_value_label = ttk.Label(gripper_frame, text="50.00", width=8)
-        self.gripper_value_label.pack(side="left", padx=5)
-
-        ttk.Button(
-            gripper_frame,
-            text="Apply Gripper",
-            command=self.publish_gripper_current,
-        ).pack(side="left", padx=5)
-
-        ttk.Button(
-            gripper_frame,
-            text="Open 100",
-            command=lambda: self.set_and_publish_gripper(100.0),
-        ).pack(side="left", padx=5)
-
-        ttk.Button(
-            gripper_frame,
-            text="Close 0",
-            command=lambda: self.set_and_publish_gripper(0.0),
-        ).pack(side="left", padx=5)
-
-    def build_tool_reference_tab(self):
-        frame = ttk.Frame(self.tool_tab)
-        frame.pack(fill="both", expand=True, padx=15, pady=15)
-
-        ttk.Label(
-            frame,
-            text="Tool Reference Setting",
-            font=("Arial", 14, "bold"),
-        ).pack(anchor="w", pady=8)
-
-        desc = (
-            "tool_reference = [x, y, z, rx, ry, rz]\n"
-            "flange 기준 tool/TCP offset 설정값입니다.\n"
-            "reference_frame은 base로 유지하고, 여기서는 tool_reference만 변경합니다."
-        )
-        ttk.Label(frame, text=desc).pack(anchor="w", pady=5)
-
-        editor = ttk.LabelFrame(
-            frame,
-            text="set_tool_reference([x, y, z, rx, ry, rz])",
-        )
-        editor.pack(fill="x", pady=10)
-
-        labels = ["x", "y", "z", "rx", "ry", "rz"]
-
-        row = ttk.Frame(editor)
-        row.pack(fill="x", padx=8, pady=8)
-
-        for label in labels:
-            cell = ttk.Frame(row)
-            cell.pack(side="left", padx=5)
-
-            ttk.Label(cell, text=label).pack()
-
-            var = tk.StringVar(value="0.00")
-            entry = ttk.Entry(cell, textvariable=var, width=10)
-            entry.pack()
-
-            self.tool_ref_entry_vars.append(var)
-
-        button_row = ttk.Frame(editor)
-        button_row.pack(fill="x", padx=8, pady=8)
-
-        ttk.Button(
-            button_row,
-            text="Apply Tool Reference",
-            command=self.apply_tool_reference,
-        ).pack(side="left", padx=5)
-
-        ttk.Button(
-            button_row,
-            text="Reset [0,0,0,0,0,0]",
-            command=self.reset_tool_reference,
-        ).pack(side="left", padx=5)
-
-        ttk.Button(
-            button_row,
-            text="Robot 상태 읽기",
-            command=self.request_robot_status,
-        ).pack(side="left", padx=5)
-
-        self.tool_ref_status_var = tk.StringVar(value="tool_reference: -")
-        ttk.Label(frame, textvariable=self.tool_ref_status_var).pack(
-            anchor="w",
-            pady=8,
-        )
+        label.config(image=photo, text="", width=new_w, height=new_h)
 
     def request_robot_status(self):
         self.ros_node.request_status()
-        self.status_var.set("Robot status requested")
+        self.status_var.set(f"Robot status requested: /{self.robot_name}/request_status")
 
     def poll_status_queue(self):
         try:
@@ -1387,12 +1275,7 @@ class JetcobotSliderGUI:
         return value
 
     def apply_all_entries_to_sliders(self):
-        values = []
-
-        for i in range(6):
-            values.append(self.apply_entry_to_slider(i))
-
-        return values
+        return [self.apply_entry_to_slider(i) for i in range(6)]
 
     def set_slider_values(self, values):
         limits = self.current_limits()
@@ -1407,19 +1290,13 @@ class JetcobotSliderGUI:
 
     def publish_current(self):
         values = self.apply_all_entries_to_sliders()
-
         speed = int(self.speed_var.get())
         coord_move_mode = int(self.coord_move_mode_var.get())
 
-        self.ros_node.publish_command(
-            self.command_type,
-            values,
-            speed,
-            coord_move_mode,
-        )
+        self.ros_node.publish_command(self.command_type, values, speed, coord_move_mode)
 
         self.status_var.set(
-            f"Published {self.current_mode_name()}: "
+            f"Published to /{self.robot_name}: {self.current_mode_name()}, "
             f"values={values}, speed={speed}, coord_move_mode={coord_move_mode}"
         )
 
@@ -1427,19 +1304,12 @@ class JetcobotSliderGUI:
         self.command_type = CMD_JOINT
         self.pending_mode = None
         self.apply_mode_ui()
-
         self.set_slider_values(angles)
 
         speed = int(self.speed_var.get())
+        self.ros_node.publish_command(CMD_JOINT, angles, speed, 0)
 
-        self.ros_node.publish_command(
-            CMD_JOINT,
-            angles,
-            speed,
-            0,
-        )
-
-        self.status_var.set(f"Published {name}: {angles}, speed={speed}")
+        self.status_var.set(f"Published {name} to /{self.robot_name}: {angles}, speed={speed}")
 
     def on_gripper_slider_change(self, value):
         value = float(value)
@@ -1453,14 +1323,11 @@ class JetcobotSliderGUI:
             value = self.gripper_value_var.get()
 
         value = max(0.0, min(100.0, value))
-
         self.set_gripper_value(value)
-
         return value
 
     def set_gripper_value(self, value):
         value = max(0.0, min(100.0, float(value)))
-
         self.gripper_value_var.set(value)
         self.gripper_entry_var.set(f"{value:.2f}")
         self.gripper_value_label.config(text=f"{value:.2f}")
@@ -1468,12 +1335,8 @@ class JetcobotSliderGUI:
     def publish_gripper_current(self):
         value = self.apply_gripper_entry()
         speed = int(self.speed_var.get())
-
         self.ros_node.publish_gripper(value, speed)
-
-        self.status_var.set(
-            f"Published gripper: value={value:.2f}, speed={speed}"
-        )
+        self.status_var.set(f"Published gripper to /{self.robot_name}: value={value:.2f}, speed={speed}")
 
     def set_and_publish_gripper(self, value):
         self.set_gripper_value(value)
@@ -1481,13 +1344,11 @@ class JetcobotSliderGUI:
 
     def read_tool_reference_entries(self):
         values = []
-
         for var in self.tool_ref_entry_vars:
             try:
                 values.append(float(var.get()))
             except ValueError:
                 values.append(0.0)
-
         return values
 
     def set_tool_reference_entries(self, values):
@@ -1496,19 +1357,15 @@ class JetcobotSliderGUI:
 
     def apply_tool_reference(self):
         values = self.read_tool_reference_entries()
-
         self.ros_node.publish_tool_reference(values)
-
-        self.status_var.set(f"set_tool_reference requested: {values}")
+        self.status_var.set(f"set_tool_reference requested to /{self.robot_name}: {values}")
         self.tool_ref_status_var.set(f"tool_reference requested: {values}")
 
     def reset_tool_reference(self):
         values = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-
         self.set_tool_reference_entries(values)
         self.ros_node.publish_tool_reference(values)
-
-        self.status_var.set("set_tool_reference reset requested: [0,0,0,0,0,0]")
+        self.status_var.set(f"set_tool_reference reset requested to /{self.robot_name}")
         self.tool_ref_status_var.set("tool_reference requested: [0,0,0,0,0,0]")
 
     def shutdown(self):
@@ -1522,12 +1379,24 @@ def spin_ros(node):
         print(f"ROS spin stopped: {e}")
 
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--robot-name", type=str, default="jetcobot1")
+    parser.add_argument("--udp-port", type=str, default="")
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+
     rclpy.init()
 
     status_queue = queue.Queue()
 
-    ros_node = JetcobotGuiPublisher(status_queue)
+    ros_node = JetcobotGuiPublisher(
+        status_queue=status_queue,
+        robot_name=args.robot_name,
+    )
 
     ros_thread = threading.Thread(
         target=spin_ros,
@@ -1537,7 +1406,13 @@ def main():
     ros_thread.start()
 
     root = tk.Tk()
-    gui = JetcobotSliderGUI(root, ros_node, status_queue)
+    gui = JetcobotSliderGUI(
+        root=root,
+        ros_node=ros_node,
+        status_queue=status_queue,
+        robot_name=args.robot_name,
+        initial_udp_port=args.udp_port,
+    )
 
     def shutdown():
         print("Shutting down local GUI publisher...")

@@ -2,18 +2,18 @@
 
 import rclpy
 from rclpy.node import Node
-
 from std_msgs.msg import Float64MultiArray, Empty
-
 from pymycobot.mycobot280 import MyCobot280
 
 
 CMD_JOINT = 0
 CMD_COORD = 1
 
+ARM_RELEASE = 0
+ARM_POWER_ON = 1
+
 GRIPPER_MIN = 0.0
 GRIPPER_MAX = 100.0
-
 
 JOINT_LIMITS = [
     (-168.0, 168.0),
@@ -38,58 +38,72 @@ class JetcobotCommandSubscriber(Node):
     def __init__(self):
         super().__init__("jetcobot_command_subscriber")
 
+        self.declare_parameter("robot_name", "jetcobot1")
         self.declare_parameter("port", "/dev/ttyJETCOBOT")
         self.declare_parameter("baudrate", 1000000)
         self.declare_parameter("default_speed", 20)
 
+        self.robot_name = self.get_parameter("robot_name").value
         self.port = self.get_parameter("port").value
         self.baudrate = int(self.get_parameter("baudrate").value)
         self.default_speed = int(self.get_parameter("default_speed").value)
+
+        self.ns = f"/{self.robot_name}"
 
         self.mc = MyCobot280(self.port, self.baudrate)
         self.mc.thread_lock = True
 
         self.command_sub = self.create_subscription(
             Float64MultiArray,
-            "/jetcobot/target_pose",
+            f"{self.ns}/target_pose",
             self.command_callback,
             10,
         )
 
         self.status_request_sub = self.create_subscription(
             Empty,
-            "/jetcobot/request_status",
+            f"{self.ns}/request_status",
             self.status_request_callback,
             10,
         )
 
         self.tool_reference_sub = self.create_subscription(
             Float64MultiArray,
-            "/jetcobot/set_tool_reference",
+            f"{self.ns}/set_tool_reference",
             self.tool_reference_callback,
             10,
         )
 
         self.gripper_sub = self.create_subscription(
             Float64MultiArray,
-            "/jetcobot/set_gripper",
+            f"{self.ns}/set_gripper",
             self.gripper_callback,
+            10,
+        )
+
+        self.arm_sub = self.create_subscription(
+            Float64MultiArray,
+            f"{self.ns}/set_arm",
+            self.arm_callback,
             10,
         )
 
         self.status_pub = self.create_publisher(
             Float64MultiArray,
-            "/jetcobot/status",
+            f"{self.ns}/status",
             10,
         )
 
         self.get_logger().info("Jetcobot command subscriber started")
+        self.get_logger().info(f"robot_name={self.robot_name}")
+        self.get_logger().info(f"namespace={self.ns}")
         self.get_logger().info(f"port={self.port}, baudrate={self.baudrate}")
-        self.get_logger().info("Sub: /jetcobot/target_pose")
-        self.get_logger().info("Sub: /jetcobot/request_status")
-        self.get_logger().info("Sub: /jetcobot/set_tool_reference")
-        self.get_logger().info("Sub: /jetcobot/set_gripper")
-        self.get_logger().info("Pub: /jetcobot/status")
+        self.get_logger().info(f"Sub: {self.ns}/target_pose")
+        self.get_logger().info(f"Sub: {self.ns}/request_status")
+        self.get_logger().info(f"Sub: {self.ns}/set_tool_reference")
+        self.get_logger().info(f"Sub: {self.ns}/set_gripper")
+        self.get_logger().info(f"Sub: {self.ns}/set_arm")
+        self.get_logger().info(f"Pub: {self.ns}/status")
 
         self.publish_status()
 
@@ -182,6 +196,7 @@ class JetcobotCommandSubscriber(Node):
         self.status_pub.publish(msg)
 
     def status_request_callback(self, msg):
+        self.get_logger().info(f"status request received: {self.ns}/request_status")
         self.publish_status()
 
     def tool_reference_callback(self, msg):
@@ -226,8 +241,36 @@ class JetcobotCommandSubscriber(Node):
                 self.mc.set_gripper_value(int(value), speed)
 
             self.publish_status()
+
         except Exception as e:
             self.get_logger().error(f"set_gripper_value failed: {e}")
+
+    def arm_callback(self, msg):
+        data = list(msg.data)
+
+        if len(data) < 1:
+            self.get_logger().warn("Invalid arm command. Expected [0] or [1].")
+            return
+
+        cmd = int(data[0])
+
+        try:
+            if cmd == ARM_RELEASE:
+                self.get_logger().warn("DISARM requested: release_all_servos()")
+                self.mc.release_all_servos()
+
+            elif cmd == ARM_POWER_ON:
+                self.get_logger().info("ARM requested: power_on()")
+                self.mc.power_on()
+
+            else:
+                self.get_logger().warn(f"Unknown arm command: {cmd}")
+                return
+
+            self.publish_status()
+
+        except Exception as e:
+            self.get_logger().error(f"arm command failed: {e}")
 
     def clamp_values(self, values, limits, label):
         clamped = []
@@ -266,8 +309,10 @@ class JetcobotCommandSubscriber(Node):
 
         if command_type == CMD_JOINT:
             self.handle_joint_command(values, speed)
+
         elif command_type == CMD_COORD:
             self.handle_coord_command(values, speed, coord_move_mode)
+
         else:
             self.get_logger().warn(f"Unknown command_type: {command_type}")
 
@@ -281,6 +326,7 @@ class JetcobotCommandSubscriber(Node):
                 self.mc.send_angles(angles, speed, _async=True)
             except TypeError:
                 self.mc.send_angles(angles, speed)
+
         except Exception as e:
             self.get_logger().error(f"send_angles failed: {e}")
 
@@ -302,6 +348,7 @@ class JetcobotCommandSubscriber(Node):
                 self.mc.send_coords(coords, speed, coord_move_mode, _async=True)
             except TypeError:
                 self.mc.send_coords(coords, speed, coord_move_mode)
+
         except Exception as e:
             self.get_logger().error(f"send_coords failed: {e}")
 
