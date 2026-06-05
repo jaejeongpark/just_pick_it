@@ -20,6 +20,8 @@ setup(
         (os.path.join('share', package_name, 'result', 'picky_1'), glob('result/picky_1/*.yaml')),
         (os.path.join('share', package_name, 'result', 'picky_2'), glob('result/picky_2/*.yaml')),
         (os.path.join('share', package_name, 'result', 'models'), glob('result/models/*.pt')),
+        (os.path.join('share', package_name, 'result', 'jetcobot_1'),
+            glob('result/jetcobot_1/*.pt') + glob('result/jetcobot_1/*.yaml')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -47,6 +49,7 @@ setup(
             'usb_camera = just_pick_it_perception.usb_camera_node:main',
             'apriltag_detector_real = just_pick_it_perception.apriltag_detector_real:main',
             'yolo_seg_trainer = just_pick_it_perception.yolo_seg_trainer:main',
+            'yolo_seg_infer = just_pick_it_perception.yolo_seg_infer_node:main',
         ],
     },
 )

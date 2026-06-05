@@ -19,6 +19,7 @@ class JetcobotCameraUdpSender(Node):
         self.declare_parameter("camera_device", "/dev/jetcocam0")
         self.declare_parameter("dest_ip", "192.168.1.21")
         self.declare_parameter("dest_port", 5003)
+        self.declare_parameter("dest_port_2", 0)
         self.declare_parameter("jpeg_quality", 80)
         self.declare_parameter("fps", 30.0)
         self.declare_parameter("width", 0)
@@ -27,6 +28,7 @@ class JetcobotCameraUdpSender(Node):
         self.camera_device = self.get_parameter("camera_device").value
         self.dest_ip = self.get_parameter("dest_ip").value
         self.dest_port = int(self.get_parameter("dest_port").value)
+        self.dest_port_2 = int(self.get_parameter("dest_port_2").value)
         self.jpeg_quality = int(self.get_parameter("jpeg_quality").value)
         self.fps = float(self.get_parameter("fps").value)
         self.width = int(self.get_parameter("width").value)
@@ -95,6 +97,8 @@ class JetcobotCameraUdpSender(Node):
 
             try:
                 self.sock.sendto(header + chunk, (self.dest_ip, self.dest_port))
+                if self.dest_port_2 > 0:
+                    self.sock.sendto(header + chunk, (self.dest_ip, self.dest_port_2))
             except Exception as e:
                 self.get_logger().warn(f"UDP send failed: {e}")
                 return

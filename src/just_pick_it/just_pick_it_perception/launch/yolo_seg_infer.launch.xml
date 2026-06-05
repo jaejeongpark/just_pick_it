@@ -1,0 +1,23 @@
+<?xml version='1.0' ?>
+<launch>
+    <arg name="model_path"
+         default="$(find-pkg-share just_pick_it_perception)/result/jetcobot_1/best.pt"/>
+    <arg name="confidence"         default="0.5"/>
+    <arg name="iou_threshold"      default="0.45"/>
+    <arg name="target_classes"     default="[]"/>
+    <arg name="consistency_frames" default="3"/>
+    <arg name="udp_port"           default="9871"/>
+    <arg name="frame_id"           default="camera_link"/>
+    <arg name="use_sim_time"       default="false"/>
+
+    <node pkg="just_pick_it_perception" exec="yolo_seg_infer"
+          name="yolo_seg_infer_node" output="screen">
+        <param name="use_sim_time"       value="$(var use_sim_time)"/>
+        <param name="model_path"         value="$(var model_path)"/>
+        <param name="confidence"         value="$(var confidence)"/>
+        <param name="iou_threshold"      value="$(var iou_threshold)"/>
+        <param name="consistency_frames" value="$(var consistency_frames)"/>
+        <param name="udp_port"           value="$(var udp_port)"/>
+        <param name="frame_id"           value="$(var frame_id)"/>
+    </node>
+</launch>

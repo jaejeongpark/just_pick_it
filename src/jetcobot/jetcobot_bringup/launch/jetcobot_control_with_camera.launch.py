@@ -12,6 +12,7 @@ def generate_launch_description():
     camera_device = LaunchConfiguration("camera_device")
     camera_dest_ip = LaunchConfiguration("camera_dest_ip")
     camera_dest_port = LaunchConfiguration("camera_dest_port")
+    camera_dest_port_2 = LaunchConfiguration("camera_dest_port_2")
     jpeg_quality = LaunchConfiguration("jpeg_quality")
     fps = LaunchConfiguration("fps")
     width = LaunchConfiguration("width")
@@ -47,6 +48,10 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "camera_dest_port",
                 default_value="5003",
+            ),
+            DeclareLaunchArgument(
+                "camera_dest_port_2",
+                default_value="0",
             ),
             DeclareLaunchArgument(
                 "jpeg_quality",
@@ -85,6 +90,7 @@ def generate_launch_description():
                     {"camera_device": camera_device},
                     {"dest_ip": camera_dest_ip},
                     {"dest_port": camera_dest_port},
+                    {"dest_port_2": camera_dest_port_2},
                     {"jpeg_quality": jpeg_quality},
                     {"fps": fps},
                     {"width": width},
