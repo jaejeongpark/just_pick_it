@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 
-from app.models import Product, StockingItem
+from just_pick_it_db.models import Product, StockingItem
 
 
 FINAL_STOCKING_ITEM_STATUSES = ("COMPLETED", "CANCELLED")

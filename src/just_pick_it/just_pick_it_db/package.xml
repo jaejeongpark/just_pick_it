@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>just_pick_it_db</name>
+  <version>0.0.0</version>
+  <description>just_pick_it 공용 DB 계층: ORM 모델, 세션 관리, 상태 전이 및 스냅샷 비즈니스 로직</description>
+  <maintainer email="suwoo3131@gmail.com">suwoo3131</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>python3-sqlalchemy</exec_depend>
+  <exec_depend>python3-psycopg2</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

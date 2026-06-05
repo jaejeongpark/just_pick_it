@@ -11,6 +11,22 @@ templates = Jinja2Templates(directory=BASE_DIR / "templates")
 router = APIRouter()
 
 
+# =====================================
+# Template helpers
+# =====================================
+
+def render_template(request: Request, template_name: str, context: dict | None = None):
+    """Starlette 0.27 호환 TemplateResponse helper."""
+    template_context = {"request": request}
+    if context:
+        template_context.update(context)
+    return templates.TemplateResponse(template_name, template_context)
+
+
+# =====================================
+# Customer pages
+# =====================================
+
 @router.get("/")
 def index():
     return RedirectResponse(url="/customer")
@@ -18,12 +34,16 @@ def index():
 
 @router.get("/customer")
 def customer_page(request: Request):
-    return templates.TemplateResponse(request, "customer.html")
+    return render_template(request, "customer.html")
 
+
+# =====================================
+# Admin pages
+# =====================================
 
 @router.get("/admin")
 def admin_page(request: Request):
-    return templates.TemplateResponse(
+    return render_template(
         request,
         "admin.html",
         {
@@ -36,7 +56,7 @@ def admin_page(request: Request):
 
 @router.get("/admin/map")
 def admin_map_page(request: Request):
-    return templates.TemplateResponse(
+    return render_template(
         request,
         "admin.html",
         {
@@ -49,7 +69,7 @@ def admin_map_page(request: Request):
 
 @router.get("/admin/robots")
 def admin_robots_page(request: Request):
-    return templates.TemplateResponse(
+    return render_template(
         request,
         "admin.html",
         {
@@ -62,7 +82,7 @@ def admin_robots_page(request: Request):
 
 @router.get("/admin/orders")
 def admin_orders_page(request: Request):
-    return templates.TemplateResponse(
+    return render_template(
         request,
         "admin.html",
         {
@@ -75,7 +95,7 @@ def admin_orders_page(request: Request):
 
 @router.get("/admin/exceptions")
 def admin_exceptions_page(request: Request):
-    return templates.TemplateResponse(
+    return render_template(
         request,
         "admin.html",
         {
@@ -88,7 +108,7 @@ def admin_exceptions_page(request: Request):
 
 @router.get("/admin/inventory")
 def admin_inventory_page(request: Request):
-    return templates.TemplateResponse(
+    return render_template(
         request,
         "admin.html",
         {

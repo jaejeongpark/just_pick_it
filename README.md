@@ -16,9 +16,12 @@ just_pick_it/
 ├── scripts/
 │   ├── mapping/            # 지도 생성 자동화 스크립트
 │   └── navigation/         # 자율 주행 자동화 스크립트
-├── web/                    # FastAPI Control Server 및 관제 UI (별도 README 참고)
+├── web/                    # FastAPI Web Gateway 및 관제 UI (별도 README 참고)
 ├── db/                     # PostgreSQL schema 및 seed 데이터 (별도 README 참고)
 ├── docs/                   # 요구사항·시스템 아키텍처·시나리오 등 설계 문서 PDF
+├── reset_ws.sh             # 워크스페이스 전체 재세팅
+├── reset_demo_data.sh      # 데모 DB 데이터만 seed 기준으로 초기화
+├── run_all.sh              # Fleet Manager + Web Gateway 통합 실행
 ├── build/                  # colcon 빌드 출력 (gitignore)
 ├── install/                # colcon 설치 공간 (gitignore)
 └── log/                    # 실행 로그 (gitignore)
@@ -101,7 +104,8 @@ myCobot 280 협동 로봇 암 전용 패키지 모음. [automaticaddison/mycobot
 - Gazebo Harmonic
 - MoveIt2 (`ros-jazzy-moveit`)
 - Terminator (스크립트 자동화)
-- Python 3.10+
+- Python 3.12
+- PostgreSQL
 
 ---
 
@@ -114,16 +118,35 @@ git clone https://github.com/jaejeongpark/just_pick_it.git
 cd just_pick_it
 ```
 
-### 의존성 설치
+### 권장 자동 세팅
+
+처음 세팅하거나 환경이 꼬였을 때는 루트 재세팅 스크립트를 사용합니다.
+
+```bash
+./reset_ws.sh
+```
+
+`reset_ws.sh`는 다음을 한 번에 수행합니다.
+
+```text
+1. Ubuntu 24.04 / ROS 2 Jazzy / Python 3.12 기준 확인
+2. web/.venv 세팅
+3. PostgreSQL role/database/schema/seed 세팅
+4. rosdep 의존성 설치
+5. build/install/log 삭제
+6. colcon build --symlink-install 전체 빌드
+```
+
+팀원 환경을 맞출 때는 부분 초기화 옵션 없이 `./reset_ws.sh`를 그대로 실행합니다.
+
+### 수동 의존성 설치 / 빌드
+
+자동 스크립트 대신 수동으로 진행할 경우:
 
 ```bash
 rosdep install --from-paths src --ignore-src -r -y
-```
-
-### 빌드
-
-```bash
 colcon build --symlink-install
+source /opt/ros/jazzy/setup.bash
 source install/setup.bash
 ```
 
@@ -136,6 +159,32 @@ colcon build --symlink-install --packages-up-to pinky_gz_sim
 # myCobot만
 colcon build --symlink-install --packages-up-to mycobot_moveit_config
 ```
+
+---
+
+## 루트 실행 스크립트
+
+| 스크립트 | 언제 사용 | 하는 일 |
+|---|---|---|
+| `./reset_ws.sh` | 최초 세팅, 환경 재설정, 의존성/빌드 상태를 깨끗하게 맞출 때 | `web/.venv`, PostgreSQL DB, rosdep, colcon 전체 symlink build를 순서대로 수행 |
+| `./run_all.sh` | 평소 로컬 통합 실행 | Fleet Manager/Fleet API `:8100`을 띄우고 Web Gateway `:8000`을 실행 |
+| `./reset_demo_data.sh` | 데모 중 주문/task/입고 데이터만 seed 기준으로 되돌릴 때 | DB schema는 유지하고 demo table을 비운 뒤 `db/seed.sql` 재적용 |
+
+권장 순서:
+
+```bash
+# 최초 1회 또는 환경 재세팅
+./reset_ws.sh
+
+# 평소 통합 실행
+./run_all.sh
+
+# 데모 데이터만 초기화
+./reset_demo_data.sh
+```
+
+`./run_all.sh`는 `./reset_ws.sh`가 끝난 워크스페이스를 기준으로 동작합니다.
+Web Gateway만 단독 실행할 때는 `web/scripts/run.sh`를 사용하지만, 실제 데이터 조회는 Fleet API가 떠 있어야 정상 동작합니다.
 
 ---
 
@@ -160,7 +209,7 @@ Terminator 레이아웃 기반 자동화 스크립트. 각 스크립트는 topic
 │       5. Map Saver          │
 └─────────────────────────────┘
 ```
-자동 순서: Gazebo 실행 → `/clock` 감지 시 SLAM 실행 → `/map` 감지 시 RViz 실행  
+자동 순서: Gazebo 실행 → `/clock` 감지 시 SLAM 실행 → `/map` 감지 시 RViz 실행
 수동 조작: Teleop으로 주행 후 Map Saver에서 이름 입력하여 저장
 
 **실제 로봇 맵핑 레이아웃:**

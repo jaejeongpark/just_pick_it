@@ -5,7 +5,9 @@ fleet_manager:
       - PICKY2
       - COBOT1
       - COBOT2
-    server_base_url: "http://192.168.4.1:8000"
+    api_enabled: true
+    api_host: "0.0.0.0"
+    api_port: 8100
+    api_push_interval_sec: 1.0
     waiting_work_poll_period_sec: 5.0
-    fleet_event_ws_enabled: true
-    fleet_event_reconnect_sec: 2.0
+    robot_state_flush_period_sec: 1.0

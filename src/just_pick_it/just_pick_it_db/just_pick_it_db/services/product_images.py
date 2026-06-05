@@ -1,11 +1,20 @@
+import os
 from pathlib import Path
 
-from app.models import Product
+from just_pick_it_db.models import Product
 
 
 STATIC_IMG_URL_PREFIX = "/static/img/"
 OLD_STATIC_IMG_URL_PREFIX = "/static/images/"
-STATIC_IMG_DIR = Path(__file__).resolve().parents[1] / "static" / "img"
+# 정적 이미지가 실제로 있는 디렉터리. 웹은 자신의 static/img 경로를
+# JUST_PICK_IT_STATIC_IMG_DIR 환경변수로 지정한다. Fleet Manager 처럼 정적 파일이
+# 없는 환경에서는 미설정 상태로 두며, 파일 존재 확인이 실패하면 기본 URL 후보를 그대로 반환한다.
+STATIC_IMG_DIR = Path(
+    os.getenv(
+        "JUST_PICK_IT_STATIC_IMG_DIR",
+        str(Path(__file__).resolve().parent / "static" / "img"),
+    )
+)
 PRODUCT_IMAGE_FILENAMES = {
     "우유": "milk.png",
     "시리얼": "cereal.png",

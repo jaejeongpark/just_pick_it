@@ -1,147 +1,64 @@
 # Fleet Manager 담당 분배
 
-`fleet_manager` 패키지 내부의 책임을 Traffic 담당과 Task 담당으로 명확히 나눠
-충돌과 의사결정 지연을 줄이기 위한 문서.
+`fleet_manager` 패키지 내부 책임과 수정 경계를 현재 Fleet API 통합 구조 기준으로 정리한다.
 
 ## 단일 ROS2 Node 원칙
 
-`fleet_manager_node.py` 의 `FleetManagerNode` 만이 `rclpy.Node` 를 상속한다.
-나머지 클래스(`TrafficManager`, `TaskManager`, `ControlServerClient`,
-`RobotCommandGateway`, `RobotStateMonitor`) 는 일반 Python 클래스이며,
-필요한 경우 생성자에서 `node` 를 받아 publisher / subscription / timer 를 만든다.
+`fleet_manager_node.py`의 `FleetManagerNode`만 `rclpy.Node`를 상속한다.
+나머지는 이 노드에 조립되는 일반 Python 클래스다.
 
 ```text
-FleetManagerNode  # 유일한 rclpy.Node
-  ├── ControlServerClient
+FleetManagerNode
+  ├── FleetRepository
+  ├── FleetApiServer
   ├── TrafficManager
   ├── TaskManager
   ├── RobotCommandGateway
   └── RobotStateMonitor
 ```
 
-## 모듈별 담당
+## 모듈별 책임
 
-| 모듈 | 파일 | 담당 | 비고 |
-|---|---|---|---|
-| `TrafficManager` | `fleet_manager/traffic_manager.py` | **박서우** | 외부 의존 0. 순수 path engine |
-| `RobotStateMonitor` | `fleet_manager/robot_state_monitor.py` | **박서우** | TrafficManager 입력 어댑터 |
-| `TaskManager` | `fleet_manager/task_manager.py`  | **이명제** | 주문/입고 → task 변환, 상태 전이 |
-| `RobotCommandGateway` | `fleet_manager/robot_command_gateway.py`  | **이명제** | task → 로봇 Action goal 전송 |
-| `ControlServerClient` | `fleet_manager/control_server_client.py` | **이명제** | 양쪽이 메서드 추가 |
-| `FleetManagerNode` | `fleet_manager/fleet_manager_node.py` | **회색지대** | 조립자. 모듈 추가 시 양쪽 수정 |
-
-## Traffic 담당이 결정·구현하는 것
-
-### `TrafficManager` 본체
-- zone graph 정의 (`ZONE_GRAPH`)
-- BFS 경로 탐색 로직
-- 충돌 회피 정책 (`MOVING_STATES`, `OCCUPYING_STATES`)
-- 도크 자원 선정 (`DOCK_PRIORITY`, `_robot_dock`)
-- 경로/예약 등록 상태 관리 (`_robot_paths`, `_robot_reservations`)
-- 외부 계약: `reserve_path` / `reserve_nearest_from` /
-  `reserve_return_home_path` / `update_path_progress` / `release_path` /
-  `notify_state` / `get_robot_state` / `get_all_states`
-- 도메인 제약 반영 (예: zone 단일 점유)
-
-자세한 계약은 `TRAFFIC_MANAGER_API.md` 참고.
-
-### `RobotStateMonitor`
-- `/picky{N}/picky_state` 토픽 구독
-- 받은 상태를 `TrafficManager.notify_state(robot_id, state)` 로 전달
-
-## Task 담당이 결정·구현하는 것
-
-### `TaskManager` 본체
-- ORDER_WAIT 주문 polling
-- robot_unit 선택, `orders.assigned_unit_id` 갱신
-- 주문 → task payload 변환, task sequence_no 부여
-- 주문 task: `MOVE_TO_PRODUCT`, `SORTING_AND_LOAD`, `MOVE_TO_PICKUP`, `INSPECTION`, `UNLOAD`
-- 입고 task: `MOVE_TO_STOCK`, `STOCKING_PICK`, `MOVE_TO_STORAGE`, `STOCKING_PLACE`
-- 기존 task 있는 주문 skip (재시작 시 중복 생성 방지)
-- 다음 실행 가능한 task 선정 및 상태 전이
-- 이동 task 실행 시 TrafficManager 호출 (reserve_path 등)
-- 상품 후보 선정: 남은 상품을 `{zone_name: 수량}` dict 으로 집계해서
-  `reserve_nearest_from` 에 전달 (TrafficManager 가 cost 최소 zone 을 선정)
-- 선택된 zone → 상품 역매핑 (TaskManager 가 자체 보유)
-- `release_path` 호출 시점 관리 (SUCCESS/FAILED/CANCELLED/timeout)
-- 대기 작업 polling 재진입 방지 (`threading.Lock` 또는 lock 플래그)
-
-### `RobotCommandGateway`
-- TaskManager 의 task 객체를 PICKY State Manager 의 Action goal 로 변환
-- ROS Action client 보유
-- 로봇 응답을 task 결과로 환산
-
-## 회색지대 — 양쪽이 함께 만지는 모듈
-
-### `ControlServerClient`
-- 두 담당자가 자기 영역에 필요한 메서드를 직접 추가
-- 공용 헬퍼 (`_get_json`, `_patch` 등) 가 필요해지면 PR 단위로 합의
-- 현재 구현: `fetch_zone_coords()` (Traffic 측 사용)
-- 추가 예정 (Task 측): `list_waiting_orders`, `list_order_tasks`,
-  `create_tasks_bulk`, `update_task_status`, `update_robot_state`,
-  `assign_order_unit`, `create_exception`
-
-### `FleetManagerNode`
-- 새 모듈 추가 시 import + 생성자 호출 한 줄만 추가
-- parameter 추가 / executor 설정 변경 시 짧은 PR 로 처리
-- 의존성 순서: `ControlServerClient` 먼저 → 이를 받는 `TrafficManager`,
-  `TaskManager` → 콜백 연결 (`RobotStateMonitor`, `RobotCommandGateway`)
-
-### 협업 규칙
-1. 회색지대 파일을 수정할 때는 PR 설명에 영향 범위 명시
-2. 같은 파일을 동시에 수정 중일 때는 Slack/메신저로 알림
-3. 큰 구조 변경 (메서드 시그니처, import 추가 등) 은 사전 협의
-
-## 외부 모듈 (이 패키지 밖)
-
-| 모듈 | 위치 | 담당 |
+| 모듈 | 파일 | 책임 |
 |---|---|---|
-| PICKY `state_manager.py` | `pinky_amr_1/` | **미정** |
-| PICKY `reverse_docking.py` | `pinky_amr_1/` | **박서우 담당** |
-| PICKY `move_to_goal.py` | `pinky_amr_1/` | **이명제 담당** |
-| Control Server (FastAPI) | `web/` | **이명제 담당** |
+| `FleetRepository` | `fleet_manager/fleet_repository.py` | `just_pick_it_db`를 통한 DB 접근, snapshot/query/write |
+| `FleetApiServer` | `fleet_manager/fleet_api_server.py` | Web Gateway가 호출하는 HTTP/WebSocket API |
+| `TaskManager` | `fleet_manager/task_manager.py` | 주문/입고 polling, task 생성, task 상태 전이 |
+| `RobotCommandGateway` | `fleet_manager/robot_command_gateway.py` | task를 PICKY/COBOT Action/Service 명령으로 변환 |
+| `TrafficManager` | `fleet_manager/traffic_manager.py` | PICKY 경로 탐색, 충돌 회피, path 예약/해제 |
+| `RobotStateMonitor` | `fleet_manager/robot_state_monitor.py` | PICKY 상태 토픽 구독 후 TrafficManager에 전달 |
+| `FleetManagerNode` | `fleet_manager/fleet_manager_node.py` | 위 컴포넌트를 생성하고 연결 |
 
-PICKY 측 `state_manager.py` 담당이 정해지면 다음 항목을 그 담당자와 합의한다.
+## 수정 경계
 
-- `picky_state` enum (`STANDBY`, `MOVING_TO_PRODUCT`, `WAITING_FOR_COBOT`, ...)
-  의 정확한 집합과 전이 규칙
-- `picky_state` 토픽 발행 주기
-- 로봇 상태 (battery, pose) 보고 경로 (Fleet Manager 경유 여부)
-- `MoveCommand.action` 인터페이스 형태
+- `TrafficManager`와 `RobotStateMonitor`는 다른 담당자 영역이므로 직접 수정하지 않는다.
+- 위 두 파일 변경이 필요하면 필요한 계약 변경과 이유를 문서/메시지로 먼저 공유한다.
+- `TaskManager`, `FleetRepository`, `FleetApiServer`, `RobotCommandGateway`, `FleetManagerNode`는 Fleet API 통합 작업 범위 안에서 수정 가능하다.
+- Web Gateway는 `web/` 폴더 안에서 화면 제공과 `/api/*` 프록시만 담당한다. DB 접근 코드는 두지 않는다.
 
-## 합의 필요 사항 (미해결)
+## 현재 API 경계
 
-| 항목 | 결정 주체 | 비고 |
-|---|---|---|
-| `task_id` 타입 / 발급 시점 | Task 담당 | DB auto-increment 가정. TrafficManager 는 `int` 로만 사용 | -> int로 합의 봄
-| `picky_state` enum 집합 | State Manager + Traffic | 정해지면 공용 상수 모듈 추가 검토 | -> DB의 robot_state 사용.
-| `MoveCommand.action` 인터페이스 | Task + State Manager | 현재 `task_type + waypoints` 구조 유지할지 확장할지 | -> 구조 유지
-| RETURN_HOME 의 도킹 포함 여부 | Task 담당 | RETURN_HOME task 가 standby_zone 도착까지인지 도킹까지인지 |
-      -> Task type에 "DOCK_IN" 추가, RETURN_HOME은 standby_zone 도착까지, DOCK_IN은 별도 `DockCommand.action`으로 ArUco/라인 기반 로컬 도킹 수행
-| 도크 leak 대응 (`release_dock` API) | Traffic 담당 | RETURN_HOME 실패 시 도크 점유 해제 정책 |
-      -> RETURN_HOME 중에는 주문을 배정받아 바로 다음 주문을 이행할 수 있기 때문에, 도크를 미리 점유했다가 실패시 해제하는게 효율적인지 의문이 남음. DOCK_IN task가 추가됐으므로, RETURN_HOME 종료시 또는 DOCK_IN 시작전에 점유하는게 더 효율적으로 보이는데 확인 후 결정
-| `cost` 단위 (hop 수 vs 유클리드 거리) | Traffic 담당 | 현재 hop 수. 필요 시 거리 합으로 교체 |
-      -> 유클리드 거리가 최단 거리를 보장하기는 하지만 최단 시간을 보장하지는 않음, 회전(코너링) 횟수가 이동 시간에 절대적 영향을 미치기 때문에 이를 고려한 경로 생성 로직이 추가 되는 것이 성능면에서 유리해보임
-| Polling 주기 | Task 담당 | 기본 5~10 초 권장 |->  push & polling 하이브리드로 결정
-| Fleet Manager 자체 HTTP/WebSocket 서버 | 양쪽 | v0 보류 | -> 필요하다면 구현
+```text
+Browser
+  -> Web Gateway (:8000)
+  -> Fleet API (:8100)
+  -> FleetRepository
+  -> just_pick_it_db
+  -> PostgreSQL
+```
 
-## 단계별 우선순위 (현재 v0 진입 전)
+- 브라우저는 계속 같은 origin인 `http://localhost:8000/api/*`를 호출한다.
+- Web Gateway는 해당 요청을 Fleet API로 전달한다.
+- DB 읽기/쓰기는 Fleet Manager 프로세스 내부의 `FleetRepository`만 수행한다.
+- Emergency/Resume은 Fleet API `POST /api/admin/emergency-stop`, `POST /api/admin/resume`으로 들어와 DB 전이와 로봇 전파를 함께 수행한다.
 
-**Phase 0** (완료): `robot_id` 통일 → PICKY1/PICKY2.
+## LLM 입고 명령 경계
 
-**Phase 1** (완료): TrafficManager 외부 의존 분리. `ControlServerClient`,
-`RobotStateMonitor` 신설. `PathResult` + 신 계약 도입.
-
-**Phase 2** (Task 담당 시작): `TaskManager.check_waiting_work()` 골격, ORDER_WAIT polling,
-주문 → task 변환, `POST /api/fleet/tasks/bulk` 호출. TrafficManager / Gateway
-연결은 보류.
-
-**Phase 3** (양쪽 협업): `RobotCommandGateway` 신설. `MOVE_TO_PRODUCT` 한 종류만
-reserve_path → action goal → 결과 수신 → release_path 까지 end-to-end 검증.
-
-**Phase 4+**: 나머지 task type 확장, COBOT 명령, WebSocket 이벤트,
-pose/battery 보고를 Fleet Manager 경유로 이동.
+- LLM 담당자는 `web/app/services/llm_client.py`에서 자연어 파싱만 구현한다.
+- 파싱 결과가 `action="STOCKING"`이면 `web/app/routers/llm_router.py`가 Fleet API `POST /api/admin/stocking-items`를 호출한다.
+- 입고 task 생성과 실행은 `TaskManager`가 `REQUESTED` stocking item을 polling해서 처리한다.
 
 ## 변경 이력
 
-- 2026-05-22: 초안. Phase 1 완료 시점 기준 담당 분배 정리.
+- 2026-05-22: 초안. Traffic/Task 분리 기준 정리.
+- 2026-05-27: 기존 HTTP client 구조를 Fleet API + FleetRepository 구조로 갱신.

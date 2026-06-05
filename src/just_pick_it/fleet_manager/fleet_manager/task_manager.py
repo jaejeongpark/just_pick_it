@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import threading
+from time import monotonic
 from typing import Any
 
 from rclpy.node import Node
 
-from fleet_manager.control_server_client import ControlServerClient
+from fleet_manager.fleet_repository import FleetRepository
 from fleet_manager.traffic_manager import TrafficManager
 
 
@@ -40,6 +41,9 @@ COBOT_TASK_TYPES = {
 
 FINAL_TASK_STATUSES = {"SUCCESS", "FAILED", "CANCELLED"}
 CHARGE_BATTERY_THRESHOLD = 40
+DEFAULT_ORDER_PRIORITY = 2
+DEFAULT_STOCKING_PRIORITY = 1
+COBOT_DISPATCH_WARN_INTERVAL_SEC = 10.0
 
 
 @dataclass(frozen=True)
@@ -56,23 +60,23 @@ class TaskManager:
     """Fleet Manager 내부 task 생성/상태 전이 담당 클래스.
 
     역할:
-    - Control Server를 polling해서 ORDER_WAIT 주문과 REQUESTED 입고 요청을 찾는다.
+    - DB를 polling해서 ORDER_WAIT 주문과 REQUESTED 입고 요청을 찾는다.
     - 사용 가능한 robot unit을 배정한다.
     - 주문/입고 데이터를 task payload로 변환한다.
     - TrafficManager와 협업해 PICKY 이동 경로를 예약한다.
-    - task 상태 변경과 실패를 Control Server에 보고한다.
+    - task 상태 변경과 실패를 DB에 보고한다.
 
     주의:
     - 이 클래스는 ROS2 Node가 아니다. FleetManagerNode를 주입받아 logger만 사용한다.
     - 경로 탐색 자체는 TrafficManager 책임이다.
-    - HTTP 호출 세부사항은 ControlServerClient 책임이다.
+    - DB 접근 세부사항은 FleetRepository 책임이다.
     - ROS2 Action 송신은 RobotCommandGateway 책임이다.
     """
 
     def __init__(
         self,
         node: Node,
-        control_server: ControlServerClient,
+        fleet_repo: FleetRepository,
         traffic_manager: TrafficManager,
         robot_gateway: Any | None = None,
     ) -> None:
@@ -80,22 +84,22 @@ class TaskManager:
 
         Args:
             node: 로그 출력을 위해 공유받는 FleetManagerNode.
-            control_server: Control Server API adapter.
+            fleet_repo: DB 접근 Repository.
             traffic_manager: 경로 탐색/예약 담당 객체.
             robot_gateway: ROS2 Action 송신 담당 객체. 초기 task 생성 단계에서는 None 가능.
         """
         self._node = node
-        self._control = control_server
+        self._repo = fleet_repo
         self._traffic = traffic_manager
         self._robot_gateway = robot_gateway
         self._scheduler_lock = threading.RLock()
         self._fleet_paused = False
 
         # task_id -> TrafficManager가 예약한 zone 목록.
-        # Move task는 MoveCommand waypoint로, DOCK_IN은 dock zone 선택/예약으로 사용한다.
+        # 상세 경로는 충돌 회피/예약용이며, MoveCommand에는 최종 목적지 zone만 보낸다.
         self._move_waypoints_by_task: dict[int, tuple[str, ...]] = {}
         self._completed_move_target_by_task: dict[int, str] = {}
-        self._unsupported_task_warned: set[int] = set()
+        self._cobot_dispatch_warned_at: dict[tuple[str, str], float] = {}
         self._housekeeping_stopped_flows: set[tuple[str, int]] = set()
 
         # cobot_task_id -> STOWING_ARM 중 미리 생성한 다음 task id 목록.
@@ -120,7 +124,7 @@ class TaskManager:
         if self._fleet_paused:
             return False
 
-        for robot in self._control.list_robots():
+        for robot in self._repo.list_robots():
             if robot.get("robot_type") != "PICKY":
                 continue
             if not self._picky_idle_for_waiting_work(robot):
@@ -138,12 +142,14 @@ class TaskManager:
 
         처리 순서:
         0. 충전 완료 조건을 만족한 CHARGE task 정리
-        1. ORDER_WAIT 주문 polling
-        2. 중복 task 없는 주문 처리
-        3. REQUESTED stocking_item polling
-        4. 입고 task 생성
-        5. 경로 차단 등으로 멈춰 있던 기존 주문/입고 flow 재시도
-        6. 새로 생성됐거나 이미 ASSIGNED 상태인 실행 가능 task를 dispatch
+        1. 이미 시작된 주문/입고 flow의 다음 task 생성 또는 막힌 flow 재시도
+        2. 새 작업을 받을 수 있는 unit이 있으면 ORDER_WAIT/REQUESTED를 priority queue로 처리
+        3. 새로 생성됐거나 이미 ASSIGNED 상태인 실행 가능 task를 dispatch
+
+        새 작업 priority:
+        - 숫자가 낮을수록 먼저 처리한다.
+        - 입고는 기본 priority=1, 주문은 기본 priority=2로 둔다.
+        - 이미 시작된 flow는 검수/하차 또는 입고 place까지 끊지 않고 이어간다.
 
         정상 task 연결은 handle_task_result()에서 즉시 처리한다. 이 함수는 기존 task를
         진행시키는 메인 루프가 아니라, 새 작업과 막혀 있던 작업을 다시 확인하는 polling 진입점이다.
@@ -158,9 +164,9 @@ class TaskManager:
 
         try:
             self._complete_ready_charge_tasks()
-            self._process_waiting_work_if_unit_available()
             self._advance_existing_orders()
             self._advance_existing_stocking_items()
+            self._process_waiting_work_if_unit_available()
             self._dispatch_ready_tasks()
         finally:
             self._scheduler_lock.release()
@@ -168,7 +174,7 @@ class TaskManager:
     def handle_emergency_stop(self) -> None:
         """Fleet emergency stop 수신 시 신규 dispatch를 막는다.
 
-        Control Server가 DB의 robot/task 상태 전이는 담당한다. TaskManager는
+        Fleet API가 DB의 robot/task 상태 전이는 담당한다. TaskManager는
         emergency 상태 동안 polling이나 task result 후속 처리에서 새 task를
         로봇으로 보내지 않도록 내부 gate만 닫는다.
         """
@@ -178,16 +184,16 @@ class TaskManager:
     def handle_resume(self) -> None:
         """Fleet resume 수신 시 실행 가능한 task 흐름을 즉시 재개한다.
 
-        Control Server가 PAUSED task를 ASSIGNED로 되돌리는 정책이면 여기서 바로
+        Fleet API가 PAUSED task를 ASSIGNED로 되돌리는 정책이면 여기서 바로
         dispatch된다. 이미 RUNNING으로 복구되는 정책이면 로봇 emergency service
         해제 후 기존 action이 이어지고, 이 함수는 대기 작업/누락 보정만 수행한다.
         """
         with self._scheduler_lock:
             self._fleet_paused = False
             self._complete_ready_charge_tasks()
-            self._process_waiting_work_if_unit_available()
             self._advance_existing_orders()
             self._advance_existing_stocking_items()
+            self._process_waiting_work_if_unit_available()
             self._dispatch_ready_tasks()
 
     # ==================================================================
@@ -262,11 +268,11 @@ class TaskManager:
             return False
 
         order_id = int(order_id)
-        tasks = self._control.list_order_tasks(order_id)
+        tasks = self._repo.list_order_tasks(order_id)
         if self._has_task_after_sequence(task, tasks):
             return self._pre_reserve_next_existing_move_task(task)
 
-        order_work = self._control.get_order_work(order_id)
+        order_work = self._repo.get_order_work(order_id)
         if order_work is None:
             return False
 
@@ -364,10 +370,10 @@ class TaskManager:
         stocking_item_id = task.get("stocking_item_id")
 
         if order_id is not None:
-            tasks = self._control.list_order_tasks(int(order_id))
+            tasks = self._repo.list_order_tasks(int(order_id))
         elif stocking_item_id is not None:
             tasks = [
-                item for item in self._control.list_tasks()
+                item for item in self._repo.list_tasks()
                 if item.get("stocking_item_id") == stocking_item_id
             ]
         else:
@@ -384,8 +390,8 @@ class TaskManager:
         return later_tasks[0]
 
     def _find_task_by_id(self, task_id: int) -> dict[str, Any] | None:
-        """Control Server task 목록에서 task_id 하나를 찾는다."""
-        for task in self._control.list_tasks():
+        """Fleet API task 목록에서 task_id 하나를 찾는다."""
+        for task in self._repo.list_tasks():
             if int(task.get("task_id") or 0) == task_id:
                 return task
         return None
@@ -400,7 +406,7 @@ class TaskManager:
 
         tasks_by_id = {
             int(task["task_id"]): task
-            for task in self._control.list_tasks()
+            for task in self._repo.list_tasks()
             if task.get("task_id") is not None
         }
 
@@ -417,7 +423,7 @@ class TaskManager:
                 continue
             if task.get("status") in FINAL_TASK_STATUSES:
                 continue
-            self._control.update_task_status(
+            self._repo.update_task_status(
                 created_task_id,
                 status="CANCELLED",
                 current_status=str(task.get("status") or "ASSIGNED"),
@@ -433,7 +439,7 @@ class TaskManager:
         """작업 가능한 unit이 있을 때만 신규 주문/입고 polling을 수행한다.
 
         scheduler cycle 자체는 주기적으로 호출될 수 있지만, 모든 PICKY/COBOT unit이 BUSY이거나
-        배터리/housekeeping 조건 때문에 새 작업을 받을 수 없으면 Control Server의
+        배터리/housekeeping 조건 때문에 새 작업을 받을 수 없으면 Fleet API의
         ORDER_WAIT/REQUESTED 목록을 조회하지 않는다.
 
         단, 기존 task advance/dispatch/charge fallback 정리는 cycle 뒤쪽에서 수행할 수 있으므로
@@ -480,7 +486,7 @@ class TaskManager:
         `_select_available_unit()`은 실제 배정 직전에 PARKING RETURN_HOME을 취소하는
         side effect가 있다. scheduler cycle 초반 guard에서는 순수 확인만 필요하므로 별도 helper로 둔다.
         """
-        robots = self._control.list_robots()
+        robots = self._repo.list_robots()
         units: dict[int, dict[str, Any]] = {}
 
         for robot in robots:
@@ -507,7 +513,7 @@ class TaskManager:
         return False
 
     def _process_waiting_work(self) -> None:
-        """ORDER_WAIT 주문과 REQUESTED 입고 요청을 하나의 priority queue로 처리한다."""
+        """ORDER_WAIT 주문과 REQUESTED 입고 요청을 priority queue 순서로 처리한다."""
         for request in self._collect_waiting_work():
             if request.kind == "ORDER":
                 self._process_new_order(request.payload)
@@ -515,15 +521,19 @@ class TaskManager:
                 self._process_new_stocking_item(request.payload)
 
     def _collect_waiting_work(self) -> list[WorkRequest]:
-        """아직 task가 없는 주문/입고 요청을 priority 기준 대기열로 모은다."""
+        """아직 task가 없는 주문/입고 요청을 priority 기준 대기열로 모은다.
+
+        현재 DB schema에서는 주문만 priority 컬럼을 가진다. 입고는 운영 정책상
+        주문보다 높은 우선순위로 보고 기본 priority=1로 둔다.
+        """
         requests: list[WorkRequest] = []
 
-        for order in self._control.list_waiting_orders():
+        for order in self._repo.list_waiting_orders():
             order_id = order.get("order_id")
             if order_id is None:
                 self._node.get_logger().warn(f"[TaskManager] order_id 없는 주문 skip: {order}")
                 continue
-            if self._control.list_order_tasks(int(order_id)):
+            if self._repo.list_order_tasks(int(order_id)):
                 self._node.get_logger().debug(
                     f"[TaskManager] order_id={order_id} 기존 task 존재, 생성 skip"
                 )
@@ -533,12 +543,12 @@ class TaskManager:
                 WorkRequest(
                     kind="ORDER",
                     work_id=int(order_id),
-                    priority=int(order.get("priority") or 2),
+                    priority=int(order.get("priority") or DEFAULT_ORDER_PRIORITY),
                     payload=order,
                 )
             )
 
-        for stocking_item in self._control.list_requested_stocking_items():
+        for stocking_item in self._repo.list_requested_stocking_items():
             stocking_item_id = stocking_item.get("stocking_item_id")
             if stocking_item_id is None:
                 continue
@@ -552,19 +562,13 @@ class TaskManager:
                 WorkRequest(
                     kind="STOCKING",
                     work_id=int(stocking_item_id),
-                    priority=int(stocking_item.get("priority") or 2),
+                    priority=int(stocking_item.get("priority") or DEFAULT_STOCKING_PRIORITY),
                     payload=stocking_item,
                 )
             )
 
         requests.sort(key=lambda item: (item.priority, item.work_id, item.kind))
         return requests
-
-    def _process_waiting_orders(self) -> None:
-        """호환용 wrapper. 신규 구현은 _process_waiting_work()를 사용한다."""
-        for request in self._collect_waiting_work():
-            if request.kind == "ORDER":
-                self._process_new_order(request.payload)
 
     def _process_new_order(self, order: dict[str, Any]) -> None:
         """주문 1건을 robot unit에 배정하고 첫 상품 task를 생성한다."""
@@ -577,7 +581,7 @@ class TaskManager:
             )
             return
 
-        assigned = self._control.update_order_status(
+        assigned = self._repo.update_order_status(
             order_id,
             assigned_unit_id=unit["unit_id"],
         )
@@ -587,7 +591,7 @@ class TaskManager:
             )
             return
 
-        order_work = self._control.get_order_work(order_id)
+        order_work = self._repo.get_order_work(order_id)
         if order_work is None:
             self._node.get_logger().warn(
                 f"[TaskManager] order_id={order_id} order_work 정규화 실패"
@@ -612,7 +616,7 @@ class TaskManager:
         - 둘 다 robot_status=IDLE이고 current_task_id가 없어야 배정 가능하다.
         - 후보가 여러 개면 PICKY battery_level이 높은 unit을 우선한다.
         """
-        robots = self._control.list_robots()
+        robots = self._repo.list_robots()
         units: dict[int, dict[str, Any]] = {}
 
         for robot in robots:
@@ -692,7 +696,7 @@ class TaskManager:
         같은 polling cycle에서 중복 배정하지 않는다.
         단, RETURN_HOME은 새 주문/입고가 들어오면 선점 취소 가능한 housekeeping task로 본다.
         """
-        tasks = self._control.list_tasks(robot_name=robot_name)
+        tasks = self._repo.list_tasks(robot_name=robot_name)
         return any(
             task.get("status") not in FINAL_TASK_STATUSES
             and not self._is_preemptible_return_home(task)
@@ -714,7 +718,7 @@ class TaskManager:
         겹칠 수 있다. task 묶음 생성 직전에 한 번 더 막는다.
         """
         for robot_name in (picky_name, cobot_name):
-            for task in self._control.list_tasks(robot_name=robot_name):
+            for task in self._repo.list_tasks(robot_name=robot_name):
                 if task.get("status") in FINAL_TASK_STATUSES:
                     continue
                 if self._is_preemptible_return_home(task):
@@ -736,7 +740,7 @@ class TaskManager:
         """
         tasks_by_flow: dict[tuple[str, int], list[dict[str, Any]]] = {}
 
-        for task in self._control.list_tasks(robot_name=robot_name):
+        for task in self._repo.list_tasks(robot_name=robot_name):
             if task.get("task_type") not in HOUSEKEEPING_TASK_TYPES:
                 continue
             if self._housekeeping_reason(task) != HOUSEKEEPING_REASON_LOW_BATTERY:
@@ -780,7 +784,7 @@ class TaskManager:
         PARKING 사유의 RETURN_HOME만 취소한다.
         LOW_BATTERY 사유의 RETURN_HOME은 충전을 우선해야 하므로 선점하지 않는다.
         """
-        for task in self._control.list_tasks(robot_name=robot_name):
+        for task in self._repo.list_tasks(robot_name=robot_name):
             if not self._is_preemptible_return_home(task):
                 continue
 
@@ -789,7 +793,7 @@ class TaskManager:
             if current_status == "RUNNING" and self._robot_gateway is not None:
                 self._robot_gateway.cancel_task(robot_name, task_id)
 
-            self._control.update_task_status(
+            self._repo.update_task_status(
                 task_id,
                 status="CANCELLED",
                 current_status=current_status,
@@ -806,7 +810,7 @@ class TaskManager:
     def _last_robot_target_zone(self, robot_name: str) -> str | None:
         """해당 PICKY가 마지막으로 성공한 이동 task의 target zone을 반환한다."""
         tasks = [
-            task for task in self._control.list_tasks(robot_name=robot_name)
+            task for task in self._repo.list_tasks(robot_name=robot_name)
             if task.get("task_type") in MOVE_TASK_TYPES
             and task.get("status") == "SUCCESS"
             and task.get("target_zone_name")
@@ -897,7 +901,7 @@ class TaskManager:
             target_zone_name=selected_zone,
             base_sequence_no=base_sequence_no,
         )
-        result_data = self._control.create_tasks_bulk(tasks)
+        result_data = self._repo.create_tasks_bulk(tasks)
         if result_data is None:
             self._traffic.release_path(picky_name, None)
             return []
@@ -993,25 +997,9 @@ class TaskManager:
     # 입고 task 생성
     # ==================================================================
 
-    def _process_requested_stocking_items(self) -> None:
-        """REQUESTED stocking_item을 조회하고 task가 없는 항목을 처리한다."""
-        stocking_items = self._control.list_requested_stocking_items()
-
-        for stocking_item in stocking_items:
-            stocking_item_id = stocking_item.get("stocking_item_id")
-            if stocking_item_id is None:
-                continue
-            if self._stocking_item_has_tasks(int(stocking_item_id)):
-                self._node.get_logger().debug(
-                    f"[TaskManager] stocking_item_id={stocking_item_id} 기존 task 존재, 생성 skip"
-                )
-                continue
-
-            self._process_new_stocking_item(stocking_item)
-
     def _stocking_item_has_tasks(self, stocking_item_id: int) -> bool:
         """stocking_item에 이미 task가 생성되어 있는지 확인한다."""
-        tasks = self._control.list_tasks()
+        tasks = self._repo.list_tasks()
         return any(task.get("stocking_item_id") == stocking_item_id for task in tasks)
 
     def _process_new_stocking_item(self, stocking_item: dict[str, Any]) -> list[int]:
@@ -1022,7 +1010,7 @@ class TaskManager:
             return []
 
         stocking_item_id = int(stocking_item["stocking_item_id"])
-        stocking_work = self._control.get_stocking_work(
+        stocking_work = self._repo.get_stocking_work(
             {
                 **stocking_item,
                 "assigned_unit_id": unit["unit_id"],
@@ -1039,7 +1027,7 @@ class TaskManager:
         if not task_ids:
             return []
 
-        updated = self._control.update_stocking_item(
+        updated = self._repo.update_stocking_item(
             stocking_item_id,
             status="ASSIGNED",
             assigned_unit_id=unit["unit_id"],
@@ -1095,7 +1083,7 @@ class TaskManager:
             ),
         ]
 
-        result_data = self._control.create_tasks_bulk(tasks)
+        result_data = self._repo.create_tasks_bulk(tasks)
         if result_data is None:
             return []
 
@@ -1124,8 +1112,8 @@ class TaskManager:
         status: str = "ASSIGNED",
         result_message: str | None = None,
     ) -> dict[str, Any]:
-        """Control Server의 `/api/fleet/tasks/bulk` payload 1개를 만든다."""
-        zone_map = self._control.get_zone_map()
+        """Fleet API의 `/api/fleet/tasks/bulk` payload 1개를 만든다."""
+        zone_map = self._repo.get_zone_map()
         source_zone = zone_map.get(source_zone_name or "")
         target_zone = zone_map.get(target_zone_name or "")
 
@@ -1143,6 +1131,25 @@ class TaskManager:
             "result_message": result_message,
         }
 
+    def _move_command_waypoints_for_task(self, task: dict[str, Any]) -> tuple[str, ...]:
+        """MoveCommand에는 실제 로봇이 가야 할 목적지 waypoint만 넘긴다.
+
+        TrafficManager의 상세 graph 경로는 충돌 회피/예약용 내부 데이터다.
+        로봇 State Machine은 목표 zone pose를 받아 로컬 navigation을 수행하고,
+        Fleet은 task 결과 시점에 TrafficManager 예약을 해제한다.
+        """
+        target_zone = task.get("target_zone_name")
+        if target_zone:
+            return (str(target_zone),)
+
+        task_id = int(task["task_id"])
+        reserved_waypoints = self._move_waypoints_by_task.get(task_id) or ()
+        if reserved_waypoints:
+            return (str(reserved_waypoints[-1]),)
+
+        source_zone = task.get("source_zone_name")
+        return (str(source_zone),) if source_zone else ()
+
     # ==================================================================
     # 기존 주문 진행 / 다음 task 생성
     # ==================================================================
@@ -1156,7 +1163,7 @@ class TaskManager:
         - WAITING item이 남아 있으면 다음 상품 1개 task를 만든다.
         - WAITING item이 없고 pickup task가 없으면 pickup task 3개를 만든다.
         """
-        for order in self._control.list_orders(include_completed=False):
+        for order in self._repo.list_orders(include_completed=False):
             order_id = order.get("order_id")
             if order_id is None:
                 continue
@@ -1164,7 +1171,7 @@ class TaskManager:
             if order.get("status") == "ORDER_WAIT":
                 continue
 
-            tasks = self._control.list_order_tasks(int(order_id))
+            tasks = self._repo.list_order_tasks(int(order_id))
             if not tasks:
                 continue
 
@@ -1172,7 +1179,7 @@ class TaskManager:
 
     def _advance_order_by_id_if_ready(self, order_id: int) -> None:
         """task result 직후 해당 주문만 다음 단계로 즉시 진행한다."""
-        tasks = self._control.list_order_tasks(order_id)
+        tasks = self._repo.list_order_tasks(order_id)
         if not tasks:
             return
 
@@ -1189,7 +1196,7 @@ class TaskManager:
         if not self._all_existing_tasks_success(tasks):
             return
 
-        order_work = self._control.get_order_work(order_id)
+        order_work = self._repo.get_order_work(order_id)
         if order_work is None:
             return
 
@@ -1294,7 +1301,7 @@ class TaskManager:
 
         self._cancel_preemptible_return_home(picky_name)
 
-        empty_slots = self._control.list_pickup_slots(status="EMPTY")
+        empty_slots = self._repo.list_pickup_slots(status="EMPTY")
         slot_by_zone = self._pickup_slots_by_zone(empty_slots)
 
         if not slot_by_zone:
@@ -1326,7 +1333,7 @@ class TaskManager:
             return []
 
         slot_id = int(selected_slot["slot_id"])
-        assigned = self._control.update_order_status(order_id, pickup_slot_id=slot_id)
+        assigned = self._repo.update_order_status(order_id, pickup_slot_id=slot_id)
         if assigned is None:
             self._traffic.release_path(picky_name, None)
             return []
@@ -1365,7 +1372,7 @@ class TaskManager:
             ),
         ]
 
-        result_data = self._control.create_tasks_bulk(tasks)
+        result_data = self._repo.create_tasks_bulk(tasks)
         if result_data is None:
             self._traffic.release_path(picky_name, None)
             return []
@@ -1422,7 +1429,7 @@ class TaskManager:
         """입고 흐름이 끝난 뒤 필요한 housekeeping task를 이어서 만든다."""
         tasks_by_item: dict[int, list[dict[str, Any]]] = {}
 
-        for task in self._control.list_tasks():
+        for task in self._repo.list_tasks():
             stocking_item_id = task.get("stocking_item_id")
             if stocking_item_id is None:
                 continue
@@ -1434,7 +1441,7 @@ class TaskManager:
     def _advance_stocking_item_by_id_if_ready(self, stocking_item_id: int) -> None:
         """task result 직후 해당 입고 흐름만 다음 단계로 즉시 진행한다."""
         tasks = [
-            task for task in self._control.list_tasks()
+            task for task in self._repo.list_tasks()
             if task.get("stocking_item_id") is not None
             and int(task["stocking_item_id"]) == stocking_item_id
         ]
@@ -1601,7 +1608,7 @@ class TaskManager:
             priority=priority,
             result_message=f"HOUSEKEEPING_REASON={reason}",
         )
-        result_data = self._control.create_tasks_bulk([payload])
+        result_data = self._repo.create_tasks_bulk([payload])
         if result_data is None:
             return []
 
@@ -1613,7 +1620,7 @@ class TaskManager:
 
     def _complete_ready_charge_tasks(self) -> None:
         """배터리가 기준치를 넘은 CHARGE task를 SUCCESS로 정리한다."""
-        for task in self._control.list_tasks(status="RUNNING", task_type="CHARGE"):
+        for task in self._repo.list_tasks(status="RUNNING", task_type="CHARGE"):
             robot_name = task.get("assigned_robot_name")
             if not robot_name:
                 continue
@@ -1632,7 +1639,7 @@ class TaskManager:
         battery_level이 기준치를 넘으면 해당 PICKY의 RUNNING CHARGE task를 즉시
         SUCCESS 처리하고, 새 작업이 대기 중이면 다음 polling 주기를 기다리지 않고 바로 배정/dispatch한다.
 
-        RobotStateMonitor는 별도로 Control Server에 battery_level을 보고하고,
+        RobotStateMonitor는 별도로 Fleet API에 battery_level을 보고하고,
         이 함수에는 같은 값만 전달하면 된다.
         """
         with self._scheduler_lock:
@@ -1649,7 +1656,7 @@ class TaskManager:
             return False
 
         completed = False
-        for task in self._control.list_tasks(status="RUNNING", task_type="CHARGE"):
+        for task in self._repo.list_tasks(status="RUNNING", task_type="CHARGE"):
             if task.get("assigned_robot_name") != robot_name:
                 continue
             completed = self._complete_charge_task(task, int(battery_level)) or completed
@@ -1662,7 +1669,7 @@ class TaskManager:
         if not robot_name:
             return False
 
-        updated = self._control.update_task_status(
+        updated = self._repo.update_task_status(
             int(task["task_id"]),
             status="SUCCESS",
             current_status="RUNNING",
@@ -1685,7 +1692,7 @@ class TaskManager:
             return False
 
         task_id = int(task["task_id"])
-        updated = self._control.update_task_status(
+        updated = self._repo.update_task_status(
             task_id,
             status="RUNNING",
             current_status="ASSIGNED",
@@ -1720,12 +1727,12 @@ class TaskManager:
 
     def _has_assignable_waiting_work(self) -> bool:
         """아직 task가 없는 ORDER_WAIT 주문이나 REQUESTED 입고 요청이 있는지 확인한다."""
-        for order in self._control.list_waiting_orders():
+        for order in self._repo.list_waiting_orders():
             order_id = order.get("order_id")
-            if order_id is not None and not self._control.list_order_tasks(int(order_id)):
+            if order_id is not None and not self._repo.list_order_tasks(int(order_id)):
                 return True
 
-        for item in self._control.list_requested_stocking_items():
+        for item in self._repo.list_requested_stocking_items():
             stocking_item_id = item.get("stocking_item_id")
             if stocking_item_id is not None and not self._stocking_item_has_tasks(int(stocking_item_id)):
                 return True
@@ -1737,12 +1744,12 @@ class TaskManager:
         return any(
             task.get("status") not in FINAL_TASK_STATUSES
             and task.get("task_type") not in HOUSEKEEPING_TASK_TYPES
-            for task in self._control.list_tasks(robot_name=robot_name)
+            for task in self._repo.list_tasks(robot_name=robot_name)
         )
 
     def _robot_by_name(self, robot_name: str) -> dict[str, Any] | None:
         """snapshot robot 목록에서 robot_name 하나를 찾는다."""
-        for robot in self._control.list_robots():
+        for robot in self._repo.list_robots():
             if robot.get("robot_name") == robot_name:
                 return robot
         return None
@@ -1794,11 +1801,11 @@ class TaskManager:
             )
             return
 
-        assigned_tasks = self._control.list_tasks(status="ASSIGNED")
+        assigned_tasks = self._repo.list_tasks(status="ASSIGNED")
         if not assigned_tasks:
             return
 
-        all_tasks = self._control.list_tasks()
+        all_tasks = self._repo.list_tasks()
 
         for task in assigned_tasks:
             if not self._task_ready_by_sequence(task, all_tasks):
@@ -1824,7 +1831,7 @@ class TaskManager:
         stocking_item_id = task.get("stocking_item_id")
 
         if order_id is not None:
-            related_tasks = self._control.list_order_tasks(int(order_id))
+            related_tasks = self._repo.list_order_tasks(int(order_id))
         elif stocking_item_id is not None:
             related_tasks = [
                 item for item in all_tasks
@@ -1843,7 +1850,7 @@ class TaskManager:
 
     def _robot_has_running_task(self, robot_name: str) -> bool:
         """해당 로봇에 이미 RUNNING task가 있는지 확인한다."""
-        running = self._control.list_tasks(status="RUNNING", robot_name=robot_name)
+        running = self._repo.list_tasks(status="RUNNING", robot_name=robot_name)
         return bool(running)
 
     def _dispatch_task(self, task: dict[str, Any]) -> bool:
@@ -1880,7 +1887,7 @@ class TaskManager:
         if not self._reserve_move_path_for_task(task):
             return False
 
-        updated = self._control.update_task_status(
+        updated = self._repo.update_task_status(
             task_id,
             status="RUNNING",
             current_status="ASSIGNED",
@@ -1896,8 +1903,8 @@ class TaskManager:
             robot_name=robot_name,
             task_id=task_id,
             task_type=task_type,
-            waypoints=self._move_waypoints_by_task[task_id],
-            zone_map=self._control.get_zone_map(),
+            waypoints=self._move_command_waypoints_for_task(task),
+            zone_map=self._repo.get_zone_map(),
             feedback_callback=self.handle_move_feedback,
             result_callback=self.handle_task_result,
         )
@@ -1970,7 +1977,7 @@ class TaskManager:
             return False
         dock_name, start_zone_name = dock_target
 
-        updated = self._control.update_task_status(
+        updated = self._repo.update_task_status(
             task_id,
             status="RUNNING",
             current_status="ASSIGNED",
@@ -2054,30 +2061,27 @@ class TaskManager:
         """COBOT task를 RobotCommandGateway로 보낸다.
 
         현재 저장소에는 ExecuteTask.action이 없으므로 Gateway가 False를 반환한다.
-        이 경우 task 상태는 ASSIGNED로 유지해서 인터페이스 확정 후 재시도 가능하게 둔다.
+        이 경우 task 상태는 ASSIGNED로 유지하고 다음 dispatch cycle에서 다시 시도한다.
         """
         if self._robot_gateway is None:
             return False
 
         task_id = int(task["task_id"])
         robot_name = str(task.get("assigned_robot_name") or "")
-        if task_id in self._unsupported_task_warned:
-            return False
+        task_type = str(task.get("task_type") or "")
 
         sent = self._robot_gateway.send_cobot_task(
             robot_name=robot_name,
             task=task,
             result_callback=self.handle_task_result,
         )
-        if not sent and task_id not in self._unsupported_task_warned:
-            self._unsupported_task_warned.add(task_id)
-            self._node.get_logger().warn(
-                f"[TaskManager] task_id={task_id} COBOT 실행 인터페이스 대기 중, 상태는 ASSIGNED 유지"
-            )
+        if not sent:
+            self._warn_cobot_dispatch_waiting(robot_name, task_type, task_id)
             return False
 
         if sent:
-            self._control.update_task_status(
+            self._cobot_dispatch_warned_at.pop((robot_name, task_type), None)
+            self._repo.update_task_status(
                 task_id,
                 status="RUNNING",
                 current_status="ASSIGNED",
@@ -2091,6 +2095,29 @@ class TaskManager:
 
         return False
 
+    def _warn_cobot_dispatch_waiting(
+        self,
+        robot_name: str,
+        task_type: str,
+        task_id: int,
+    ) -> None:
+        """COBOT action server 대기 로그만 제한하고 dispatch 재시도는 막지 않는다."""
+        key = (robot_name, task_type)
+        now = monotonic()
+        last_warned_at = self._cobot_dispatch_warned_at.get(key)
+
+        if (
+            last_warned_at is not None
+            and now - last_warned_at < COBOT_DISPATCH_WARN_INTERVAL_SEC
+        ):
+            return
+
+        self._cobot_dispatch_warned_at[key] = now
+        self._node.get_logger().warn(
+            f"[TaskManager] task_id={task_id} {robot_name} {task_type} "
+            "COBOT 실행 인터페이스 대기 중, 상태는 ASSIGNED 유지 후 재시도"
+        )
+
     def _mark_task_failed_before_dispatch(
         self,
         task: dict[str, Any],
@@ -2102,7 +2129,7 @@ class TaskManager:
         robot_name = task.get("assigned_robot_name")
         task_type = task.get("task_type")
 
-        self._control.update_task_status(
+        self._repo.update_task_status(
             task_id,
             status="FAILED",
             current_status="RUNNING",
@@ -2114,7 +2141,7 @@ class TaskManager:
             self._traffic.release_path(str(robot_name), task_id)
             self._move_waypoints_by_task.pop(task_id, None)
 
-        self._control.create_exception(
+        self._repo.create_exception(
             exception_type="NAVIGATION_FAILED" if task_type in PATH_RESERVED_TASK_TYPES else "SYSTEM_ERROR",
             robot_name=str(robot_name) if robot_name else None,
             task_id=task_id,
@@ -2164,7 +2191,7 @@ class TaskManager:
             return
 
         next_status = "SUCCESS" if success else "FAILED"
-        self._control.update_task_status(
+        self._repo.update_task_status(
             task_id,
             status=next_status,
             current_status="RUNNING",
@@ -2187,19 +2214,22 @@ class TaskManager:
                 self._cancel_preplanned_after_cobot_failure(task_id)
 
         if not success:
-            self._control.create_exception(
+            self._repo.create_exception(
                 exception_type="NAVIGATION_FAILED" if task_type in PATH_RESERVED_TASK_TYPES else "SYSTEM_ERROR",
                 robot_name=robot_name,
                 task_id=task_id,
                 detail=message,
             )
+            self._cleanup_finished_flow_memory(task)
             return
 
         if self._fleet_paused:
+            self._cleanup_finished_flow_memory(task)
             return
 
         self._advance_flow_after_task_success(task)
         self._dispatch_ready_tasks()
+        self._cleanup_finished_flow_memory(task)
 
     def _advance_flow_after_task_success(self, task: dict[str, Any]) -> None:
         """성공한 task가 속한 주문/입고 흐름만 즉시 다음 단계로 넘긴다."""
@@ -2211,3 +2241,54 @@ class TaskManager:
         stocking_item_id = task.get("stocking_item_id")
         if stocking_item_id is not None:
             self._advance_stocking_item_by_id_if_ready(int(stocking_item_id))
+
+    def _cleanup_finished_flow_memory(self, task: dict[str, Any]) -> None:
+        """완료된 주문/입고 흐름의 TaskManager 임시 메모리를 정리한다."""
+        flow_key = self._flow_key_for_task(task)
+        if flow_key is None:
+            return
+
+        flow_tasks = self._tasks_for_flow_key(flow_key)
+        if not flow_tasks:
+            return
+        if any(item.get("status") not in FINAL_TASK_STATUSES for item in flow_tasks):
+            return
+
+        flow_task_ids = {
+            int(item["task_id"])
+            for item in flow_tasks
+            if item.get("task_id") is not None
+        }
+
+        for flow_task_id in flow_task_ids:
+            self._move_waypoints_by_task.pop(flow_task_id, None)
+            self._completed_move_target_by_task.pop(flow_task_id, None)
+
+        self._housekeeping_stopped_flows.discard(flow_key)
+        self._cleanup_preplanned_memory(flow_task_ids)
+
+    def _tasks_for_flow_key(self, flow_key: tuple[str, int]) -> list[dict[str, Any]]:
+        """주문/입고 flow key에 연결된 task 목록을 반환한다."""
+        flow_kind, flow_id = flow_key
+        if flow_kind == "order":
+            return self._repo.list_order_tasks(flow_id)
+
+        return [
+            task for task in self._repo.list_tasks()
+            if task.get("stocking_item_id") is not None
+            and int(task["stocking_item_id"]) == flow_id
+        ]
+
+    def _cleanup_preplanned_memory(self, flow_task_ids: set[int]) -> None:
+        """완료된 flow에 묶인 COBOT preplan 임시 메모리를 제거한다."""
+        for trigger_task_id, created_task_ids in list(
+            self._preplanned_created_tasks_by_trigger.items()
+        ):
+            if trigger_task_id in flow_task_ids or created_task_ids & flow_task_ids:
+                self._preplanned_created_tasks_by_trigger.pop(trigger_task_id, None)
+
+        for trigger_task_id, move_task_ids in list(
+            self._preplanned_move_tasks_by_trigger.items()
+        ):
+            if trigger_task_id in flow_task_ids or move_task_ids & flow_task_ids:
+                self._preplanned_move_tasks_by_trigger.pop(trigger_task_id, None)

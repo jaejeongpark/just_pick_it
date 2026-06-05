@@ -1,8 +1,8 @@
 from sqlalchemy.orm import Session
 
-from app.models import Order, OrderItem, PickupSlot, Product, Robot, StockingItem, Task
-from app.services.robot_runtime_policy import FINAL_TASK_STATUSES, UNAVAILABLE_ROBOT_STATUSES
-from app.services.stocking_service import FINAL_STOCKING_ITEM_STATUSES, resolve_stock_delta
+from just_pick_it_db.models import Order, OrderItem, PickupSlot, Product, Robot, StockingItem, Task
+from just_pick_it_db.services.robot_runtime_policy import FINAL_TASK_STATUSES, UNAVAILABLE_ROBOT_STATUSES
+from just_pick_it_db.services.stocking_service import FINAL_STOCKING_ITEM_STATUSES, resolve_stock_delta
 
 
 ORDER_PRIORITY = 2
@@ -39,9 +39,8 @@ COBOT_TASKS_REQUIRING_PICKY_WAIT = frozenset(COBOT_STATE_BY_TASK)
 def create_order_workflow(_db: Session, order: Order) -> None:
     """Move a newly created order into the Fleet Manager waiting queue.
 
-    Task creation and robot assignment are owned by Fleet Manager. The Control
-    Server only stores the order and order_item rows, then exposes them through
-    snapshot/event APIs.
+    Task creation and robot assignment are owned by Fleet Manager. This service
+    only moves the order into the DB waiting state that TaskManager polls.
     """
 
     order.status = "ORDER_WAIT"

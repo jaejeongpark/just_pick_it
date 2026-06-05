@@ -200,11 +200,11 @@ class TestReserveReturnHomePath:
         assert traffic._robot_dock['PICKY1'] is None
 
     def test_avoids_occupied_standby_zone(self, traffic):
-        # PICKY2 가 STANDBY_ZONE_2 를 점유 중이면 PICKY1 은 STANDBY_ZONE_1 로 간다.
-        _set_waiting(traffic, 'PICKY2', 'STANDBY_ZONE_2')
+        # PICKY2 가 안쪽 STANDBY_ZONE_1 을 점유 중이면 PICKY1 은 바깥 STANDBY_ZONE_2 로 간다.
+        _set_waiting(traffic, 'PICKY2', 'STANDBY_ZONE_1')
         r = traffic.reserve_return_home_path('PICKY1', 1, 'TRAFFIC_T1')
         assert r.ok
-        assert r.waypoints[-1] == 'STANDBY_ZONE_1'
+        assert r.waypoints[-1] == 'STANDBY_ZONE_2'
 
     def test_all_standby_zones_blocked_returns_failure(self, traffic):
         # 두 standby zone 을 각각 다른 로봇이 점유

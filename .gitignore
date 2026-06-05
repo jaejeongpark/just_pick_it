@@ -3,6 +3,7 @@ install/
 log/
 __pycache__/
 *.py[cod]
+*.egg-info/
 .venv/
 web/.venv/
 web/.env
@@ -22,3 +23,8 @@ src/just_pick_it/just_pick_it_perception/result/jetcobot_1/
 
 # YOLO 추론 결과
 runs/
+
+.envrc
+
+# Local study/review notes
+reviews/

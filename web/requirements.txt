@@ -1,15 +1,12 @@
-fastapi
-uvicorn
-jinja2
-sqlalchemy
-psycopg2-binary
-python-dotenv
-pydantic
-websockets
-requests
-httpx
+fastapi==0.101.0
+pydantic==1.10.14
+uvicorn==0.27.1
+jinja2==3.1.6
+python-dotenv==1.2.2
+websockets==10.4
+httpx==0.28.1
 
 # ROS Python 패키지가 같은 venv에서 import될 때 필요한 기본 의존성입니다.
-setuptools
-pyyaml
-typeguard
+setuptools==82.0.1
+pyyaml==6.0.3
+typeguard==4.5.2
