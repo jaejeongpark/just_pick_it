@@ -16,6 +16,7 @@ def generate_launch_description():
     fps = LaunchConfiguration("fps")
     width = LaunchConfiguration("width")
     height = LaunchConfiguration("height")
+    robot_name = LaunchConfiguration("robot_name")
 
     return LaunchDescription(
         [
@@ -30,6 +31,10 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "default_speed",
                 default_value="20",
+            ),
+            DeclareLaunchArgument(
+                "robot_name",
+                default_value="jetcobot",
             ),
             DeclareLaunchArgument(
                 "camera_device",
@@ -68,6 +73,7 @@ def generate_launch_description():
                     {"port": port},
                     {"baudrate": baudrate},
                     {"default_speed": default_speed},
+                    {"robot_name": robot_name},
                 ],
             ),
             Node(
