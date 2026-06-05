@@ -27,6 +27,8 @@ TASK_PHASE_STATES = {
     'UNLOAD':           ['UNLOADING'],
     'DISPLAY_SCAN':     ['SCANNING'],
     'DISPLAY_PLACE':    ['PLACING'],
+    # 임시 테스트용
+    'SORTING_ONLY':     ['SORTING'], #나중에 삭제
 }
 
 

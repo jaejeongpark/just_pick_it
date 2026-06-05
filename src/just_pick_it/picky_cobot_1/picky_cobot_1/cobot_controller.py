@@ -7,10 +7,29 @@ from pymycobot.mycobot280 import MyCobot280
 GRIPPER_OPEN   = 100
 GRIPPER_CLOSED = 0
 GRIPPER_SPEED  = 100
+GRIPPER_WAIT_SEC = 2.0  # 그리퍼 동작 완료 대기 시간
 
 DEFAULT_SPEED        = 20   # 관절 이동 속도 (1~100)
 MOTION_TIMEOUT_SEC   = 15.0
 POLL_INTERVAL_SEC    = 0.05
+
+# ── 임시 테스트용 고정 자세 (vision 서버 연동 후 실제 좌표로 교체 필요) ─────────
+# 단위: degree,  순서: [J1, J2, J3, J4, J5, J6]
+_HOME          = [  0.0,   0.0,   0.0,   0.0,   0.0,   0.0]
+
+# SORTING: Cartesian coords [x, y, z, rx, ry, rz] (mm / deg)
+_SORT_PICK_COORDS  = [-51.8, -46.8, 410.9,  83.87, -47.83,  21.17]
+_SORT_PLACE_COORDS = [-50.6, -87.4, 319.6,  87.04, -50.07,  20.56]
+
+_LOAD_PICK     = [  0.0, -20.0,  90.0, -70.0,   0.0,   0.0]
+_LOAD_PLACE    = [-90.0, -20.0,  90.0, -70.0,   0.0,   0.0]
+
+_INSPECT       = [  0.0,  30.0,  60.0, -90.0,   0.0,   0.0]
+
+_UNLOAD_PICK   = [-90.0, -20.0,  90.0, -70.0,   0.0,   0.0]
+_UNLOAD_PLACE  = [  0.0, -20.0,  90.0, -70.0,   0.0,   0.0]
+
+_PLACE_TEMP    = [ 45.0, -20.0,  90.0, -70.0,   0.0,   0.0]
 
 
 class CobotController:
@@ -32,46 +51,63 @@ class CobotController:
     # ── 공개 phase 메서드 ────────────────────────────────────────────────
 
     def run_sorting(self, request) -> tuple[bool, int]:
-        # [구현 필요] 분류 동작 수행
-        # 예시 흐름:
-        #   1. 분류 위치로 이동
-        #   2. 그리퍼로 물체 집기
-        #   3. 대상 위치로 이동 후 내려놓기
-        #   4. 처리 수량 반환
-        return True, 0
+        self._log('SORTING 시작')
+        if not self.move_to_coords(_SORT_PICK_COORDS):
+            return False, 0
+        if not self.close_gripper():
+            return False, 0
+        if not self.move_to_coords(_SORT_PLACE_COORDS):
+            return False, 0
+        if not self.open_gripper():
+            return False, 0
+        return True, 1
 
     def run_loading(self, request) -> tuple[bool, int]:
-        # [구현 필요] 적재 동작 수행
-        return True, 0
+        self._log('LOADING 시작')
+        self.open_gripper()
+        ok = self._pick_and_place(_LOAD_PICK, _LOAD_PLACE)
+        return ok, (1 if ok else 0)
 
     def run_inspecting(self, request) -> tuple[bool, int]:
-        # [구현 필요] 검수 동작 수행
+        self._log('INSPECTING 시작')
+        ok = self.move_to_angles(_INSPECT)
+        if not ok:
+            return False, 0
+        time.sleep(1.0)
         return True, 0
 
     def run_unloading(self, request) -> tuple[bool, int]:
-        # [구현 필요] 하역 동작 수행
-        return True, 0
+        self._log('UNLOADING 시작')
+        self.open_gripper()
+        ok = self._pick_and_place(_UNLOAD_PICK, _UNLOAD_PLACE)
+        return ok, (1 if ok else 0)
 
     def run_placing(self, scan_result, request) -> tuple[bool, int]:
-        # [구현 필요] scan_result 좌표로 진열 동작 수행
-        # scan_result 는 vision_client 가 반환한 빈 슬롯 좌표
+        """scan_result 가 None 이면 임시 고정 좌표(_PLACE_TEMP)로 진열한다."""
         if scan_result is None:
-            self._log_err('PLACING 실패 — scan_result 없음')
-            return False, 0
-        return True, 0
+            self._log('PLACING: scan_result 없음 — 임시 고정 좌표 사용')
+            place_angles = _PLACE_TEMP
+        else:
+            # [구현 필요] scan_result 에서 실제 각도/좌표 추출
+            place_angles = _PLACE_TEMP
+
+        self._log('PLACING 시작')
+        self.open_gripper()
+        ok = self._pick_and_place(_LOAD_PICK, place_angles)
+        return ok, (1 if ok else 0)
 
     def stow_arm(self) -> bool:
         """팔을 안전 복귀 자세(home)로 이동한다."""
-        # [구현 필요] 실제 home 각도로 교체
-        home_angles = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        return self.move_to_angles(home_angles, speed=DEFAULT_SPEED)
+        ok = self.move_to_angles(_HOME, speed=DEFAULT_SPEED)
+        self.open_gripper()
+        return ok
 
     # ── 저수준 이동 메서드 ───────────────────────────────────────────────
 
     def move_to_angles(self, angles: list[float], speed: int = DEFAULT_SPEED) -> bool:
         """관절 각도(degree)로 이동하고 완료될 때까지 블로킹."""
         try:
-            self._mc.send_angles(angles, speed, _async=True)
+            self._mc.send_angles(angles, speed)
         except Exception as e:
             self._log_err(f'send_angles 실패: {e}')
             return False
@@ -81,11 +117,11 @@ class CobotController:
         self,
         coords: list[float],
         speed: int = DEFAULT_SPEED,
-        mode: int = 1,
+        mode: int = 0,
     ) -> bool:
         """Cartesian 좌표 [x, y, z, rx, ry, rz](mm/deg)로 이동하고 블로킹."""
         try:
-            self._mc.send_coords(coords, speed, mode=mode, _async=True)
+            self._mc.send_coords(coords, speed, mode=mode)
         except Exception as e:
             self._log_err(f'send_coords 실패: {e}')
             return False
@@ -100,16 +136,13 @@ class CobotController:
         return self._set_gripper(GRIPPER_CLOSED)
 
     def _set_gripper(self, value: int) -> bool:
-        for attempt in range(5):
-            try:
-                self._mc.set_gripper_value(value, GRIPPER_SPEED)
-                result = self._mc.get_gripper_value()
-                if result != -1:
-                    return True
-            except Exception as e:
-                self._log_err(f'그리퍼 제어 실패 (시도 {attempt + 1}/5): {e}')
-        self._log_err('그리퍼 제어 5회 재시도 후 실패')
-        return False
+        try:
+            self._mc.set_gripper_value(value, GRIPPER_SPEED)
+            time.sleep(GRIPPER_WAIT_SEC)
+            return True
+        except Exception as e:
+            self._log_err(f'그리퍼 제어 실패: {e}')
+            return False
 
     # ── 비상 정지 ────────────────────────────────────────────────────────
 
@@ -121,23 +154,45 @@ class CobotController:
 
     # ── 내부 유틸 ────────────────────────────────────────────────────────
 
+    def _pick_and_place(
+        self,
+        pick_angles: list[float],
+        place_angles: list[float],
+        speed: int = DEFAULT_SPEED,
+    ) -> bool:
+        """pick 위치로 이동 후 파지하고, place 위치로 이동 후 내려놓는다."""
+        if not self.move_to_angles(pick_angles, speed):
+            self._log_err('pick 이동 실패')
+            return False
+        if not self.close_gripper():
+            self._log_err('그리퍼 닫기 실패')
+            return False
+        if not self.move_to_angles(place_angles, speed):
+            self._log_err('place 이동 실패')
+            return False
+        if not self.open_gripper():
+            self._log_err('그리퍼 열기 실패')
+            return False
+        return True
+
     def _wait_for_stop(self, timeout: float = MOTION_TIMEOUT_SEC) -> bool:
-        """로봇이 정지할 때까지 블로킹. 타임아웃 시 False 반환."""
+        # send_coords는 non-blocking이라 이동 시작 전 is_moving()==0 타이밍이 존재.
+        # 충분히 대기 후 이동 시작을 확인한 뒤 정지를 기다린다.
+        time.sleep(0.5)
+
+        # 이동 시작 확인 (최대 2초)
+        start_wait = time.time()
+        while time.time() - start_wait < 2.0:
+            if self._mc.is_moving() == 1:
+                break
+            time.sleep(0.05)
+
+        # 정지 확인
         deadline = time.time() + timeout
         while time.time() < deadline:
-            try:
-                moving = self._mc.is_moving()
-            except Exception as e:
-                self._log_err(f'is_moving 실패: {e}')
-                return False
-
-            if moving == -1:
-                self._log_err('로봇 이동 상태 오류 (is_moving == -1)')
-                return False
-            if moving == 0:
+            if self._mc.is_moving() == 0:
                 return True
-
-            time.sleep(POLL_INTERVAL_SEC)
+            time.sleep(0.1)
 
         self._log_err(f'동작 타임아웃 ({timeout}s)')
         return False
