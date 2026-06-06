@@ -134,6 +134,55 @@ class TaskManager:
         # 기존에 이미 DB에 있던 MOVE task를 pre-reserve한 경우도 포함한다.
         self._preplanned_move_tasks_by_trigger: dict[int, set[int]] = {}
 
+    def enrich_admin_snapshot_with_runtime_paths(
+        self,
+        snapshot: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """관리자 snapshot에 TrafficManager가 생성한 전체 waypoint 경로를 붙인다."""
+        if not snapshot:
+            return snapshot
+
+        waypoints_by_task = self._planned_waypoints_by_task_snapshot()
+        if not waypoints_by_task:
+            return snapshot
+
+        for task in snapshot.get("tasks") or []:
+            self._attach_planned_waypoints(task, waypoints_by_task)
+
+        for robot in snapshot.get("robots") or []:
+            current_task = robot.get("current_task")
+            if current_task:
+                self._attach_planned_waypoints(current_task, waypoints_by_task)
+
+            current_task_id = robot.get("current_task_id")
+            if current_task_id is None:
+                continue
+            route = waypoints_by_task.get(int(current_task_id))
+            if route and len(route) >= 2:
+                robot["planned_waypoints"] = [str(zone_name) for zone_name in route]
+
+        return snapshot
+
+    @staticmethod
+    def _attach_planned_waypoints(
+        task: dict[str, Any],
+        waypoints_by_task: dict[int, tuple[str, ...]],
+    ) -> None:
+        task_id = task.get("task_id")
+        if task_id is None:
+            return
+        route = waypoints_by_task.get(int(task_id))
+        if route and len(route) >= 2:
+            task["planned_waypoints"] = [str(zone_name) for zone_name in route]
+
+    def _planned_waypoints_by_task_snapshot(self) -> dict[int, tuple[str, ...]]:
+        """TrafficManager가 처음 생성한 전체 예약 경로를 task_id 기준으로 반환한다."""
+        with self._scheduler_lock:
+            return {
+                int(task_id): tuple(str(zone_name) for zone_name in waypoints)
+                for task_id, waypoints in self._move_waypoints_by_task.items()
+            }
+
     # ==================================================================
     # 신규 주문/진열 확인 진입점
     # ==================================================================

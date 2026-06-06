@@ -144,9 +144,15 @@ class FleetManagerNode(Node):
             host=config["api_host"],
             port=config["api_port"],
             push_interval_sec=config["api_push_interval_sec"],
+            admin_snapshot_provider=self._build_admin_snapshot,
         )
         api_server.start()
         return api_server
+
+    def _build_admin_snapshot(self) -> dict | None:
+        """DB snapshot에 TaskManager runtime route 정보를 붙여 관리자 UI로 보낸다."""
+        snapshot = self.fleet_repo.get_snapshot()
+        return self.task_manager.enrich_admin_snapshot_with_runtime_paths(snapshot)
 
     # =====================================
     # Waiting work polling

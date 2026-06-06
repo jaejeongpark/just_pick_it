@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -84,12 +85,14 @@ class FleetApiServer:
         host: str = "0.0.0.0",
         port: int = 8100,
         push_interval_sec: float = 1.0,
+        admin_snapshot_provider: Callable[[], dict | None] | None = None,
     ) -> None:
         self._node = node
         self._repo = fleet_repo
         self._host = host
         self._port = port
         self._push_interval = push_interval_sec
+        self._admin_snapshot_provider = admin_snapshot_provider or self._repo.get_snapshot
         self._admin_ws = _WsManager()
         self._customer_ws = _WsManager()
         self._app = self._build_app()
@@ -148,7 +151,7 @@ class FleetApiServer:
 
         @app.get("/api/admin/status")
         def admin_status():
-            return repo.get_snapshot()
+            return self._admin_snapshot()
 
         @app.get("/api/customer/status")
         def customer_status():
@@ -171,7 +174,7 @@ class FleetApiServer:
 
         @app.get("/api/fleet/snapshot")
         def fleet_snapshot():
-            return repo.get_snapshot()
+            return self._admin_snapshot()
 
         @app.get("/api/fleet/zones")
         def list_fleet_zones(zone_type: str = "ALL"):
@@ -302,7 +305,7 @@ class FleetApiServer:
     def _register_websocket_routes(self, app: FastAPI) -> None:
         @app.websocket("/api/admin/ws/status")
         async def admin_ws(websocket: WebSocket):
-            await self._serve_status_ws(websocket, self._admin_ws, self._repo.get_snapshot)
+            await self._serve_status_ws(websocket, self._admin_ws, self._admin_snapshot)
 
         @app.websocket("/api/customer/ws/status")
         async def customer_ws(websocket: WebSocket):
@@ -394,6 +397,10 @@ class FleetApiServer:
             raise HTTPException(status_code=400, detail=detail)
         return result
 
+    def _admin_snapshot(self) -> dict | None:
+        """관리자용 snapshot provider를 단일 경로로 호출한다."""
+        return self._admin_snapshot_provider()
+
     # =====================================
     # WebSocket helpers
     # =====================================
@@ -419,7 +426,7 @@ class FleetApiServer:
             await asyncio.sleep(self._push_interval)
             try:
                 if self._admin_ws.count():
-                    snapshot = await loop.run_in_executor(None, self._repo.get_snapshot)
+                    snapshot = await loop.run_in_executor(None, self._admin_snapshot)
                     await self._admin_ws.broadcast(snapshot)
                 if self._customer_ws.count():
                     snapshot = await loop.run_in_executor(None, self._repo.get_customer_snapshot)

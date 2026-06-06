@@ -34,12 +34,12 @@ git에는 `full_flow_demo.env.example`만 공유한다.
 cp scripts/demo/full_flow_demo.env.example scripts/demo/full_flow_demo.env
 ```
 
-그 다음 `scripts/demo/full_flow_demo.env`에서 `DEMO_ROS_DOMAIN_ID`만 자기 환경에 맞게 채운다.
+그 다음 `scripts/demo/full_flow_demo.env`에서 `DEMO_ROS_DOMAIN_ID`만 자기 환경에 맞게 채운다. (기본 설정값 : 25)
 
 예:
 
 ```bash
-export DEMO_ROS_DOMAIN_ID=66
+export DEMO_ROS_DOMAIN_ID=25
 ```
 
 `scripts/demo/full_flow_demo.env`는 개인 로컬 파일이라 git에 올리지 않는다.

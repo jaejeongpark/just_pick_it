@@ -1215,6 +1215,56 @@ body {
   gap: 10px;
 }
 
+.completed-work-history-grid {
+  height: min(520px, calc(100vh - 190px));
+  min-height: 260px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.completed-work-history-column {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  align-content: start;
+  gap: 10px;
+}
+
+.completed-work-history-heading {
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.completed-work-history-heading h3 {
+  margin: 0;
+  color: var(--navy);
+  font-size: 15px;
+  font-weight: 900;
+}
+
+.completed-work-history-heading span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.completed-work-history-list {
+  align-content: start;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+  overscroll-behavior: contain;
+}
+
+.compact-empty-state {
+  min-height: 96px;
+}
+
 .history-search {
   margin-bottom: 12px;
 }
@@ -2032,8 +2082,13 @@ body {
 
 .admin-console .modal-header h2,
 .admin-console .llm-header strong,
-.admin-console .modal-subsection h3 {
+.admin-console .modal-subsection h3,
+.admin-console .completed-work-history-heading h3 {
   color: #f8fafc;
+}
+
+.admin-console .completed-work-history-heading span {
+  color: #9fb1c8;
 }
 
 .admin-console .modal-panel .modal-summary div,
@@ -3418,6 +3473,7 @@ body {
 .robot-map-marker {
   --marker-dot-size: 28px;
   position: absolute;
+  z-index: 4;
   left: var(--marker-x);
   top: var(--marker-y);
   display: grid;
@@ -3427,6 +3483,54 @@ body {
   background: transparent;
   transform: translate(-50%, calc(var(--marker-dot-size) / -2));
   filter: drop-shadow(0 8px 14px rgba(0, 0, 0, 0.5));
+}
+
+.map-route-overlay {
+  --route-color: #94a3b8;
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  background: transparent;
+  pointer-events: none;
+}
+
+.map-route-overlay.robot-dot-amr1,
+.map-route-overlay.robot-dot-cobot1 {
+  --route-color: #38bdf8;
+}
+
+.map-route-overlay.robot-dot-amr2,
+.map-route-overlay.robot-dot-cobot2 {
+  --route-color: #f59e0b;
+}
+
+.map-route-line {
+  fill: none;
+  stroke: var(--route-color);
+  stroke-width: 0.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 3 3;
+  opacity: 0.86;
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--route-color) 60%, transparent));
+  vector-effect: non-scaling-stroke;
+}
+
+.map-route-waypoint,
+.map-route-target {
+  fill: #111827;
+  stroke: var(--route-color);
+  stroke-width: 0.65;
+  opacity: 0.95;
+  vector-effect: non-scaling-stroke;
+}
+
+.map-route-target {
+  fill: var(--route-color);
+  opacity: 1;
 }
 
 .robot-map-marker.robot-dot-amr1,
@@ -3458,29 +3562,47 @@ body {
 }
 
 .robot-map-marker.is-moving .marker-heading {
-  animation: map-marker-moving-pulse 2.2s ease-in-out infinite;
+  box-shadow:
+    0 0 0 4px rgba(15, 23, 42, 0.72),
+    0 0 0 5px currentColor,
+    0 0 18px color-mix(in srgb, currentColor 65%, transparent);
 }
 
 .robot-map-marker.is-moving span {
-  opacity: 0.9;
+  opacity: 0.72;
 }
 
-@keyframes map-marker-moving-pulse {
-  0%,
-  100% {
+.robot-map-marker.is-arrived .marker-heading {
+  animation: map-marker-arrival-pulse 0.8s ease-out 1;
+}
+
+@keyframes map-marker-arrival-pulse {
+  0% {
     opacity: 1;
+    transform: scale(1);
     box-shadow:
       0 0 0 4px rgba(15, 23, 42, 0.72),
       0 0 0 5px currentColor,
-      0 0 0 0 rgba(148, 163, 184, 0);
+      0 0 0 0 rgba(255, 255, 255, 0);
   }
 
-  50% {
-    opacity: 0.82;
+  45% {
+    opacity: 0.58;
+    transform: scale(1.28);
+    box-shadow:
+      0 0 0 4px rgba(15, 23, 42, 0.8),
+      0 0 0 5px currentColor,
+      0 0 0 13px rgba(255, 255, 255, 0.2),
+      0 0 30px currentColor;
+  }
+
+  100% {
+    opacity: 1;
+    transform: scale(1);
     box-shadow:
       0 0 0 4px rgba(15, 23, 42, 0.72),
       0 0 0 5px currentColor,
-      0 0 0 9px rgba(148, 163, 184, 0.16);
+      0 0 0 0 rgba(255, 255, 255, 0);
   }
 }
 
@@ -5976,6 +6098,16 @@ body {
 
   .summary-strip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .completed-work-history-grid {
+    height: auto;
+    min-height: 0;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .completed-work-history-list {
+    max-height: 280px;
   }
 
   .dashboard-grid {

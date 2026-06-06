@@ -66,6 +66,10 @@ let selectedOrderId = null;
 let selectedDisplayItemId = null;
 let selectedTaskId = null;
 let zoneOptionsCache = null;
+let mapZonesLoading = false;
+let modalReturnStack = [];
+const mapRobotMovingState = new Map();
+const mapRobotArrivalFlashUntil = new Map();
 
 // =====================================
 // Domain constants
@@ -346,6 +350,24 @@ function isRobotMovingOnMap(robot) {
     currentTaskStatus === "RUNNING" &&
     MAP_MOVING_TASK_TYPES.has(currentTaskType)
   );
+}
+
+function mapRobotKey(robot) {
+  return normalizeId(robot?.robot_name || robot?.robot_id || "UNKNOWN");
+}
+
+function shouldFlashMapArrival(robot, moving, now) {
+  const key = mapRobotKey(robot);
+  const wasMoving = mapRobotMovingState.get(key) === true;
+
+  if (moving) {
+    mapRobotArrivalFlashUntil.delete(key);
+  } else if (wasMoving) {
+    mapRobotArrivalFlashUntil.set(key, now + 2400);
+  }
+
+  mapRobotMovingState.set(key, moving);
+  return !moving && (mapRobotArrivalFlashUntil.get(key) || 0) > now;
 }
 
 function robotStateLabel(robot) {
@@ -629,6 +651,11 @@ function escapeHtml(value) {
 }
 
 function openModal(title, body, options = {}) {
+  if (!options.keepReturnState) {
+    modalReturnStack = [];
+  }
+
+  resetModalHeaderActions();
   modalTitle.textContent = title;
   modalBody.innerHTML = body;
   modalPanel?.classList.toggle("modal-compact", options.size === "compact");
@@ -636,9 +663,49 @@ function openModal(title, body, options = {}) {
 }
 
 function closeModal() {
+  const returnState = modalReturnStack.pop();
+
+  if (returnState) {
+    restoreModal(returnState);
+    return;
+  }
+
   modalBackdrop.hidden = true;
   modalPanel?.classList.remove("modal-compact");
   resetModalHeaderActions();
+}
+
+function captureModalState() {
+  if (!modalBackdrop || modalBackdrop.hidden) {
+    return null;
+  }
+
+  return {
+    title: modalTitle.textContent,
+    body: modalBody.innerHTML,
+    compact: modalPanel?.classList.contains("modal-compact") || false,
+    bodyScrollTop: modalBody.scrollTop,
+    historyScrollTop: [...modalBody.querySelectorAll(".completed-work-history-list")].map(
+      (list) => list.scrollTop,
+    ),
+  };
+}
+
+function restoreModal(state) {
+  modalTitle.textContent = state.title;
+  modalBody.innerHTML = state.body;
+  modalPanel?.classList.toggle("modal-compact", state.compact);
+  modalBackdrop.hidden = false;
+  resetModalHeaderActions();
+
+  requestAnimationFrame(() => {
+    modalBody.scrollTop = state.bodyScrollTop || 0;
+    modalBody
+      .querySelectorAll(".completed-work-history-list")
+      .forEach((list, index) => {
+        list.scrollTop = state.historyScrollTop?.[index] || 0;
+      });
+  });
 }
 
 function resetModalHeaderActions() {
@@ -871,6 +938,17 @@ function historyWorkItems(data = latestAdminStatus) {
   return [...displayWorks, ...orderWorks].sort(sortWorkItems);
 }
 
+function historyWorkGroups(data = latestAdminStatus) {
+  return {
+    orders: (data?.order_history || [])
+      .map(orderWorkItem)
+      .sort(sortWorkItemsNewestFirst),
+    displays: (data?.display_item_history || [])
+      .map(displayWorkItem)
+      .sort(sortWorkItemsNewestFirst),
+  };
+}
+
 function sortWorkItems(a, b) {
   const aIsDisplay = isDisplayWork(a);
   const bIsDisplay = isDisplayWork(b);
@@ -892,6 +970,18 @@ function sortWorkItems(a, b) {
   }
 
   return 0;
+}
+
+function sortWorkItemsNewestFirst(a, b) {
+  const idDiff = Number(workId(b)) - Number(workId(a));
+  if (idDiff !== 0) {
+    return idDiff;
+  }
+
+  const aTaskId = latestTaskIdForWork(a);
+  const bTaskId = latestTaskIdForWork(b);
+
+  return bTaskId - aTaskId;
 }
 
 function latestTaskIdForWork(work) {
@@ -1488,6 +1578,123 @@ function updateDashboardMapViewport() {
   dashboardMap.style.setProperty("--map-visual-height", `${height}px`);
 }
 
+function mapPosePosition(pose) {
+  if (
+    !pose ||
+    pose.x === null ||
+    pose.x === undefined ||
+    pose.y === null ||
+    pose.y === undefined
+  ) {
+    return null;
+  }
+
+  const x = (Number(pose.x) / MAP_WIDTH_METERS) * 100;
+  const y = 100 - (Number(pose.y) / MAP_HEIGHT_METERS) * 100;
+
+  return {
+    x: clampNumber(x, 0, 100),
+    y: clampNumber(y, 0, 100),
+  };
+}
+
+function zoneMapByName() {
+  if (!zoneOptionsCache) {
+    return null;
+  }
+
+  return new Map(
+    zoneOptionsCache.map((zone) => [zone.zone_name, zone]),
+  );
+}
+
+function ensureMapZonesLoaded() {
+  if (zoneOptionsCache || mapZonesLoading) {
+    return;
+  }
+
+  mapZonesLoading = true;
+  loadZoneOptions()
+    .then(() => {
+      mapZonesLoading = false;
+      renderMapRobots(latestAdminStatus?.robots || []);
+    })
+    .catch(() => {
+      mapZonesLoading = false;
+    });
+}
+
+function currentMoveTask(robot) {
+  const task = robot?.current_task;
+  const taskType = robot?.current_task_type || task?.task_type;
+  const taskStatus = robot?.current_task_status || task?.status;
+
+  if (taskStatus !== "RUNNING" || !MAP_MOVING_TASK_TYPES.has(taskType)) {
+    return null;
+  }
+
+  return task || {
+    task_type: taskType,
+    source_zone_name: null,
+    target_zone_name: null,
+  };
+}
+
+function plannedWaypointNamesForRobot(robot) {
+  const waypoints =
+    robot?.planned_waypoints || robot?.current_task?.planned_waypoints;
+  if (!Array.isArray(waypoints)) {
+    return [];
+  }
+
+  return waypoints.filter(Boolean).map(String);
+}
+
+function mapRouteForRobot(robot, zonesByName) {
+  const task = currentMoveTask(robot);
+  if (!task || !zonesByName) {
+    return null;
+  }
+
+  const route = plannedWaypointNamesForRobot(robot);
+  if (route.length < 2) {
+    return null;
+  }
+
+  const points = route
+    .map((zoneName) => mapPosePosition(zonesByName.get(zoneName)?.pose))
+    .filter(Boolean);
+
+  return points.length >= 2 ? points : null;
+}
+
+function renderMapRoute(robot, zonesByName) {
+  const points = mapRouteForRobot(robot, zonesByName);
+  if (!points) {
+    return "";
+  }
+
+  const pointText = points
+    .map((point) => `${point.x.toFixed(2)},${point.y.toFixed(2)}`)
+    .join(" ");
+  const waypointDots = points
+    .slice(1, -1)
+    .map(
+      (point) => `
+        <circle class="map-route-waypoint" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="1.1"></circle>
+      `,
+    )
+    .join("");
+
+  return `
+    <svg class="map-route-overlay ${robotColorClass(robot.robot_id)}" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+      <polyline class="map-route-line" points="${pointText}"></polyline>
+      ${waypointDots}
+      <circle class="map-route-target" cx="${points[points.length - 1].x.toFixed(2)}" cy="${points[points.length - 1].y.toFixed(2)}" r="1.5"></circle>
+    </svg>
+  `;
+}
+
 function mapRobotPosition(robot) {
   if (robot.pos_x !== null && robot.pos_y !== null) {
     const x = (Number(robot.pos_x) / MAP_WIDTH_METERS) * 100;
@@ -1524,6 +1731,7 @@ function renderMapRobots(robots) {
   }
 
   updateDashboardMapViewport();
+  ensureMapZonesLoaded();
 
   const pickyRobots = robots.filter(
     (robot) =>
@@ -1531,16 +1739,23 @@ function renderMapRobots(robots) {
       !normalizeId(robot.robot_name).startsWith("UI_"),
   );
 
-  mapRobotLayer.innerHTML = pickyRobots
+  const now = Date.now();
+  const zonesByName = zoneMapByName();
+  const routesHtml = pickyRobots
+    .map((robot) => renderMapRoute(robot, zonesByName))
+    .join("");
+  const markersHtml = pickyRobots
     .map((robot) => {
       const position = mapRobotPosition(robot);
       const markerClass = "map-marker-amr";
-      const movingClass = isRobotMovingOnMap(robot) ? "is-moving" : "";
+      const moving = isRobotMovingOnMap(robot);
+      const movingClass = moving ? "is-moving" : "";
+      const arrivedClass = shouldFlashMapArrival(robot, moving, now) ? "is-arrived" : "";
       const displayName = robotDisplayName(robot);
       const status = robotStatusValue(robot);
 
       return `
-        <div class="robot-map-marker ${markerClass} ${robotColorClass(robot.robot_id)} ${movingClass}"
+        <div class="robot-map-marker ${markerClass} ${robotColorClass(robot.robot_id)} ${movingClass} ${arrivedClass}"
           style="--marker-x: ${position.x}%; --marker-y: ${position.y}%; --heading: ${robotHeadingDeg(robot)}deg"
           title="${displayName} · ${label(status)}">
           <i class="marker-heading"></i>
@@ -1549,6 +1764,8 @@ function renderMapRobots(robots) {
       `;
     })
     .join("");
+
+  mapRobotLayer.innerHTML = `${routesHtml}${markersHtml}`;
 }
 
 function taskProgress(status) {
@@ -3004,7 +3221,10 @@ async function openTaskCreate() {
   syncTaskCreatePriorityDefault({ force: true });
 }
 
-function openTaskDetail(taskId) {
+function openTaskDetail(
+  taskId,
+  { returnToCurrentModal = false, keepReturnStack = false } = {},
+) {
   if (!latestAdminStatus) {
     return;
   }
@@ -3017,8 +3237,16 @@ function openTaskDetail(taskId) {
     return;
   }
 
-  openModal(`작업 #${task.task_id}`, renderTaskDetail(task));
+  const returnState = returnToCurrentModal ? captureModalState() : null;
+
+  openModal(`작업 #${task.task_id}`, renderTaskDetail(task), {
+    keepReturnState: returnToCurrentModal || keepReturnStack,
+  });
   setModalHeaderActions(taskDeleteButtonMarkup(task));
+
+  if (returnState) {
+    modalReturnStack.push(returnState);
+  }
 }
 
 function renderAdminStatus(data) {
@@ -3199,7 +3427,10 @@ function openPickupSlotDetail(slotId) {
   );
 }
 
-function openOrderDetail(orderId) {
+function openOrderDetail(
+  orderId,
+  { returnToCurrentModal = false, keepReturnStack = false } = {},
+) {
   if (!latestAdminStatus) {
     return;
   }
@@ -3216,7 +3447,15 @@ function openOrderDetail(orderId) {
     return;
   }
 
-  openModal(workDisplayTitle(order), renderOrderDetail(order));
+  const returnState = returnToCurrentModal ? captureModalState() : null;
+
+  openModal(workDisplayTitle(order), renderOrderDetail(order), {
+    keepReturnState: returnToCurrentModal || keepReturnStack,
+  });
+
+  if (returnState) {
+    modalReturnStack.push(returnState);
+  }
 }
 
 function openOrderHistory() {
@@ -3224,30 +3463,56 @@ function openOrderHistory() {
     return;
   }
 
-  const works = historyWorkItems(latestAdminStatus);
+  const historyGroups = historyWorkGroups(latestAdminStatus);
+  const hasHistory = historyGroups.orders.length > 0 || historyGroups.displays.length > 0;
 
   const body =
-    works.length === 0
+    !hasHistory
       ? '<div class="empty-state">완료된 주문/진열 작업이 없습니다</div>'
-      : `
-      <div class="history-list">
-        ${works
-          .map(
-            (work) => `
-            <button class="history-row" type="button" data-work-history-detail="${work.work_key}">
-              <div>
-                <strong>${workDisplayTitle(work)}</strong>
-                <span>${workKindLabel(work)} · ${orderProductSummary(work)}</span>
-              </div>
-              <div class="history-status-large">${label(work.status)}</div>
-            </button>
-          `,
-          )
-          .join("")}
-      </div>
-    `;
+      : renderCompletedWorkHistory(historyGroups);
 
   openModal("완료 작업 이력", body);
+}
+
+function renderCompletedWorkHistory({ orders, displays }) {
+  return `
+    <div class="completed-work-history-grid">
+      ${renderCompletedWorkHistoryColumn("주문 완료 이력", orders, "완료된 주문이 없습니다")}
+      ${renderCompletedWorkHistoryColumn("진열 완료 이력", displays, "완료된 진열이 없습니다")}
+    </div>
+  `;
+}
+
+function renderCompletedWorkHistoryColumn(title, works, emptyText) {
+  return `
+    <section class="completed-work-history-column">
+      <div class="completed-work-history-heading">
+        <h3>${title}</h3>
+        <span>${works.length}건</span>
+      </div>
+      ${
+        works.length === 0
+          ? `<div class="empty-state compact-empty-state">${emptyText}</div>`
+          : `
+            <div class="history-list completed-work-history-list">
+              ${works.map(renderCompletedWorkHistoryRow).join("")}
+            </div>
+          `
+      }
+    </section>
+  `;
+}
+
+function renderCompletedWorkHistoryRow(work) {
+  return `
+    <button class="history-row" type="button" data-work-history-detail="${work.work_key}">
+      <div>
+        <strong>${workDisplayTitle(work)}</strong>
+        <span>${workKindLabel(work)} · ${orderProductSummary(work)}</span>
+      </div>
+      <div class="history-status-large">${label(work.status)}</div>
+    </button>
+  `;
 }
 
 function openExceptionHistory() {
@@ -3556,7 +3821,7 @@ async function updateOrderState(orderId) {
   }
 
   await patchJson(`/api/fleet/orders/${orderId}`, payload);
-  openOrderDetail(orderId);
+  openOrderDetail(orderId, { keepReturnStack: true });
 }
 
 async function updateTaskState(taskId) {
@@ -3567,7 +3832,7 @@ async function updateTaskState(taskId) {
     status: modalBody.querySelector("#task-status-select")?.value,
     assigned_robot_id: assignedRobotId ? Number(assignedRobotId) : null,
   });
-  openTaskDetail(taskId);
+  openTaskDetail(taskId, { keepReturnStack: true });
 }
 
 function robotStateUpdatePayload(robotId, statusSelector, stateSelector) {
@@ -4419,16 +4684,19 @@ modalBody?.addEventListener("click", (event) => {
   const workButton = event.target.closest("button[data-work-history-detail]");
 
   if (workButton) {
-    openOrderDetail(workButton.dataset.workHistoryDetail);
+    openOrderDetail(workButton.dataset.workHistoryDetail, {
+      returnToCurrentModal: true,
+    });
     return;
   }
 
-  const taskButton = event.target.closest(
-    "[data-task-history-row][data-task-detail]",
-  );
+  const taskButton = event.target.closest("[data-task-detail]");
 
   if (taskButton) {
-    openTaskDetail(Number(taskButton.dataset.taskDetail));
+    openTaskDetail(Number(taskButton.dataset.taskDetail), {
+      returnToCurrentModal: true,
+    });
+    return;
   }
 });
 
