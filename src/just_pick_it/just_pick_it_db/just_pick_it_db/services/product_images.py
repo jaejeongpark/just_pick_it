@@ -3,7 +3,6 @@ from pathlib import Path
 
 from just_pick_it_db.models import Product
 
-
 STATIC_IMG_URL_PREFIX = "/static/img/"
 OLD_STATIC_IMG_URL_PREFIX = "/static/images/"
 # 정적 이미지가 실제로 있는 디렉터리. 웹은 자신의 static/img 경로를
@@ -16,12 +15,12 @@ STATIC_IMG_DIR = Path(
     )
 )
 PRODUCT_IMAGE_FILENAMES = {
-    "우유": "milk.png",
-    "시리얼": "cereal.png",
-    "바나나 우유": "banana_milk.png",
-    "식빵": "bread.png",
-    "투게더": "together.png",
-    "바나나": "banana.png",
+    "수박": "watermelon.png",
+    "식빵": "sliced_bread.png",
+    "환타": "fanta.png",
+    "크림빵": "cream_filled_bread.png",
+    "초코파이": "choco_pie.png",
+    "생수": "bottled_water.png",
 }
 STATIC_IMAGE_FILENAME_ALIASES = {
     alias_filename: filename
@@ -36,11 +35,7 @@ def resolve_product_image_url(product: Product) -> str | None:
 
     if image_url.startswith(OLD_STATIC_IMG_URL_PREFIX):
         candidates.append(
-            normalize_static_image_url(
-                image_url.replace(
-                    OLD_STATIC_IMG_URL_PREFIX, STATIC_IMG_URL_PREFIX, 1
-                )
-            )
+            normalize_static_image_url(image_url.replace(OLD_STATIC_IMG_URL_PREFIX, STATIC_IMG_URL_PREFIX, 1))
         )
     elif image_url.startswith(STATIC_IMG_URL_PREFIX):
         candidates.append(normalize_static_image_url(image_url))

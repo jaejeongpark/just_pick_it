@@ -40,6 +40,7 @@ COBOT_TASK_TYPES = {
 }
 
 FINAL_TASK_STATUSES = {"SUCCESS", "FAILED", "CANCELLED"}
+UNAVAILABLE_ROBOT_STATUSES = {"EMERGENCY_STOP", "ERROR", "OFFLINE"}
 CHARGE_BATTERY_THRESHOLD = 30
 DEFAULT_ORDER_PRIORITY = 2
 DEFAULT_DISPLAY_PRIORITY = 1
@@ -132,6 +133,55 @@ class TaskManager:
         # cobot_task_id -> STOWING_ARM 중 미리 예약한 다음 MOVE task id 목록.
         # 기존에 이미 DB에 있던 MOVE task를 pre-reserve한 경우도 포함한다.
         self._preplanned_move_tasks_by_trigger: dict[int, set[int]] = {}
+
+    def enrich_admin_snapshot_with_runtime_paths(
+        self,
+        snapshot: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """관리자 snapshot에 TrafficManager가 생성한 전체 waypoint 경로를 붙인다."""
+        if not snapshot:
+            return snapshot
+
+        waypoints_by_task = self._planned_waypoints_by_task_snapshot()
+        if not waypoints_by_task:
+            return snapshot
+
+        for task in snapshot.get("tasks") or []:
+            self._attach_planned_waypoints(task, waypoints_by_task)
+
+        for robot in snapshot.get("robots") or []:
+            current_task = robot.get("current_task")
+            if current_task:
+                self._attach_planned_waypoints(current_task, waypoints_by_task)
+
+            current_task_id = robot.get("current_task_id")
+            if current_task_id is None:
+                continue
+            route = waypoints_by_task.get(int(current_task_id))
+            if route and len(route) >= 2:
+                robot["planned_waypoints"] = [str(zone_name) for zone_name in route]
+
+        return snapshot
+
+    @staticmethod
+    def _attach_planned_waypoints(
+        task: dict[str, Any],
+        waypoints_by_task: dict[int, tuple[str, ...]],
+    ) -> None:
+        task_id = task.get("task_id")
+        if task_id is None:
+            return
+        route = waypoints_by_task.get(int(task_id))
+        if route and len(route) >= 2:
+            task["planned_waypoints"] = [str(zone_name) for zone_name in route]
+
+    def _planned_waypoints_by_task_snapshot(self) -> dict[int, tuple[str, ...]]:
+        """TrafficManager가 처음 생성한 전체 예약 경로를 task_id 기준으로 반환한다."""
+        with self._scheduler_lock:
+            return {
+                int(task_id): tuple(str(zone_name) for zone_name in waypoints)
+                for task_id, waypoints in self._move_waypoints_by_task.items()
+            }
 
     # ==================================================================
     # 신규 주문/진열 확인 진입점
@@ -669,6 +719,86 @@ class TaskManager:
         for task in self._repo.list_tasks():
             if int(task.get("task_id") or 0) == task_id:
                 return task
+        return None
+
+    def inject_running_robot_task_success(
+        self,
+        robot_name: str,
+        *,
+        message: str | None = None,
+        processed_quantity: int | None = None,
+        stock_delta: int | None = None,
+    ) -> dict[str, Any] | None:
+        """테스트용: 로봇의 RUNNING task에 SUCCESS result를 주입한다.
+
+        일반 DB 상태 변경이 아니라 RobotCommandGateway result callback과 같은
+        경로를 태우기 위한 debug API 전용 진입점이다.
+        """
+        normalized_robot_name = str(robot_name or "").strip().upper()
+        if not normalized_robot_name:
+            return None
+
+        self._scheduler_lock.acquire()
+        try:
+            all_tasks = self._repo.list_tasks()
+            task = self._debug_result_target_task(normalized_robot_name, all_tasks)
+            if task is None:
+                self._node.get_logger().warn(
+                    f"[TaskManager] debug SUCCESS 주입 실패: {normalized_robot_name} RUNNING task 없음"
+                )
+                return None
+
+            task_id = int(task["task_id"])
+            task_type = str(task.get("task_type") or "")
+            result_message = message or f"manual debug SUCCESS for {task_type}"
+
+            result: dict[str, Any] = {
+                "task_id": task_id,
+                "robot_name": normalized_robot_name,
+                "task_type": task_type,
+                "success": True,
+                "status": "SUCCESS",
+                "message": result_message,
+            }
+            if processed_quantity is not None:
+                result["processed_quantity"] = processed_quantity
+            if stock_delta is not None:
+                result["stock_delta"] = stock_delta
+
+            self._handle_task_result_locked(result)
+            self._node.get_logger().info(
+                f"[TaskManager] debug SUCCESS 주입 완료: robot={normalized_robot_name}, "
+                f"task_id={task_id}, task_type={task_type}"
+            )
+            return {
+                "status": "ok",
+                "robot_name": normalized_robot_name,
+                "task_id": task_id,
+                "task_type": task_type,
+                "result_status": "SUCCESS",
+                "message": result_message,
+            }
+        finally:
+            self._scheduler_lock.release()
+
+    def _debug_result_target_task(
+        self,
+        robot_name: str,
+        all_tasks: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """debug result 주입 대상 RUNNING task를 고른다."""
+        robot_tasks = [
+            task for task in all_tasks
+            if str(task.get("assigned_robot_name") or "").upper() == robot_name
+        ]
+
+        running_tasks = [
+            task for task in robot_tasks
+            if task.get("status") == "RUNNING"
+        ]
+        if running_tasks:
+            running_tasks.sort(key=lambda task: int(task.get("task_id") or 0), reverse=True)
+            return running_tasks[0]
         return None
 
     def _cancel_preplanned_after_cobot_failure(self, cobot_task_id: int) -> None:
@@ -1823,6 +1953,7 @@ class TaskManager:
             decision = self._evaluate_housekeeping_decision(picky_name)
             if reason == HOUSEKEEPING_REASON_PARKING and not decision["should_return_home"]:
                 self._housekeeping_stopped_flows.add(flow_key)
+                self._release_picky_after_housekeeping_stop(last_housekeeping)
                 return []
 
             return self._create_housekeeping_task(
@@ -2074,6 +2205,23 @@ class TaskManager:
         flow_key = self._flow_key_for_task(task)
         if flow_key is not None:
             self._housekeeping_stopped_flows.add(flow_key)
+
+    def _release_picky_after_housekeeping_stop(self, task: dict[str, Any]) -> None:
+        """PARKING RETURN_HOME에서 추가 도킹을 멈출 때 PICKY를 신규 작업 가능 상태로 푼다."""
+        robot_name = str(task.get("assigned_robot_name") or "")
+        if not robot_name:
+            return
+
+        robot = self._robot_by_name(robot_name)
+        if robot and robot.get("robot_status") in UNAVAILABLE_ROBOT_STATUSES:
+            return
+
+        self._repo.update_robot_state(
+            robot_name,
+            robot_status="IDLE",
+            picky_state="STANDBY",
+            current_task_id=None,
+        )
 
     def _flow_key_for_task(self, task: dict[str, Any]) -> tuple[str, int] | None:
         """task가 속한 주문/진열 흐름 key를 반환한다."""

@@ -144,18 +144,27 @@ class FleetManagerNode(Node):
             host=config["api_host"],
             port=config["api_port"],
             push_interval_sec=config["api_push_interval_sec"],
+            admin_snapshot_provider=self._build_admin_snapshot,
+            debug_task_success_injector=self.task_manager.inject_running_robot_task_success,
         )
         api_server.start()
         return api_server
+
+    def _build_admin_snapshot(self) -> dict | None:
+        """DB snapshot에 TaskManager runtime route 정보를 붙여 관리자 UI로 보낸다."""
+        snapshot = self.fleet_repo.get_snapshot()
+        return self.task_manager.enrich_admin_snapshot_with_runtime_paths(snapshot)
 
     # =====================================
     # Waiting work polling
     # =====================================
 
     def _poll_waiting_work_if_picky_idle(self) -> None:
-        """PICKY가 IDLE/STANDBY일 때만 대기 주문/진열 polling을 수행한다."""
-        if not self.task_manager.has_idle_picky_for_waiting_work():
-            return
+        """TaskManager scheduler를 주기 실행한다.
+
+        신규 주문/진열 polling은 TaskManager 내부에서 가용 unit이 있을 때만 수행하고,
+        기존 flow advance / CHARGE 정리 / ASSIGNED dispatch는 항상 재시도한다.
+        """
         self.task_manager.check_waiting_work()
 
     def _run_startup_reconcile_once(self) -> None:

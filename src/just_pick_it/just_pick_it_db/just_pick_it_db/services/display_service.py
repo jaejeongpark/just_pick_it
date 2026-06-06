@@ -1,6 +1,7 @@
 from sqlalchemy.orm import Session
 
 from just_pick_it_db.models import Product, DisplayItem
+from just_pick_it_db.services.product_images import resolve_product_image_url
 
 
 FINAL_DISPLAY_ITEM_STATUSES = ("COMPLETED", "FAILED", "CANCELLED")
@@ -13,6 +14,7 @@ def build_display_item_summary(db: Session, display_item: DisplayItem) -> dict:
         "display_item_id": display_item.display_item_id,
         "product_id": display_item.product_id,
         "product_name": product.name if product else None,
+        "image_url": resolve_product_image_url(product) if product else None,
         "requested_quantity": display_item.requested_quantity,
         "processed_quantity": display_item.processed_quantity,
         "stock_delta": display_item.stock_delta,

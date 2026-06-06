@@ -40,12 +40,12 @@ INSERT INTO zone (zone_name, zone_type, pos_x, pos_y, pos_z, pos_theta) VALUES
     ('TRAFFIC_B3', 'TRAFFIC', 1.40, 0.15, 0.00, 0.00);
 
 INSERT INTO product (name, image_url, stock_qty, storage_zone_id) VALUES
-    ('우유', '/static/img/milk.png', 3, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_1')),
-    ('시리얼', '/static/img/cereal.png', 3, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_2')),
-    ('바나나 우유', '/static/img/banana_milk.png', 3, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_3')),
-    ('식빵', '/static/img/bread.png', 3, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_4')),
-    ('투게더', '/static/img/together.png', 3, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_5')),
-    ('바나나', '/static/img/banana.png', 3, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_6'));
+    ('수박', '/static/img/watermelon.png', 3, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_1')),
+    ('식빵', '/static/img/sliced_bread.png', 3, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_2')),
+    ('환타', '/static/img/fanta.png', 3, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_3')),
+    ('크림빵', '/static/img/cream_filled_bread.png', 3, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_4')),
+    ('초코파이', '/static/img/choco_pie.png', 3, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_5')),
+    ('생수', '/static/img/bottled_water.png', 3, (SELECT zone_id FROM zone WHERE zone_name = 'PRODUCT_SLOT_6'));
 
 INSERT INTO pickup_slot (slot_name, status) VALUES
     ('PICKUP_SLOT_1', 'EMPTY'),
@@ -68,7 +68,7 @@ INSERT INTO robot (
     pos_y,
     pos_theta
 ) VALUES
-    ('PICKY1', 1, 'PICKY', 'IDLE', 'STANDBY', NULL, '/picky1', 100, 0.14, 0.40, 0.00),
+    ('PICKY1', 1, 'PICKY', 'IDLE', 'STANDBY', NULL, '/picky1', 100, 0.11, 0.07, 0.00),
     ('COBOT1', 1, 'COBOT', 'IDLE', NULL, 'STANDBY', '/cobot1', NULL, NULL, NULL, NULL),
-    ('PICKY2', 2, 'PICKY', 'IDLE', 'STANDBY', NULL, '/picky2', 100, 0.31, 0.40, 0.00),
+    ('PICKY2', 2, 'PICKY', 'IDLE', 'STANDBY', NULL, '/picky2', 100, 0.28, 0.07, 0.00),
     ('COBOT2', 2, 'COBOT', 'IDLE', NULL, 'STANDBY', '/cobot2', NULL, NULL, NULL, NULL);
