@@ -6,11 +6,11 @@ import time
 import rclpy
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
 from rclpy.node import Node
 
-from geometry_msgs.msg import Twist
-from std_msgs.msg import String
+from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
+from std_msgs.msg import Float32, String
 
 from just_pick_it_interfaces.action import DockCommand, MoveCommand
 
@@ -37,11 +37,23 @@ ARRIVAL_STATE = {
     'RETURN_HOME':     'STANDBY',
 }
 
+# 충전 중 배터리가 이 값(%)을 넘으면 picky_state 를 CHARGING -> STANDBY 로 바꾼다.
+# 상태만 바꾸고 물리 이동(도크 이탈)은 하지 않는다. Fleet 의 작업 배정 게이트가
+# picky_state STANDBY 를 요구하므로, 이 전환이 있어야 충전 후 새 주문을 받는다.
+BATTERY_STANDBY_THRESHOLD = 30.0
+
 
 def quat_to_yaw(q) -> float:
     siny = 2.0 * (q.w * q.z + q.x * q.y)
     cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
     return math.atan2(siny, cosy)
+
+
+def normalize_angle(a: float) -> float:
+    """각도를 (-pi, pi] 로 정규화한다."""
+    return math.atan2(math.sin(a), math.cos(a))
+
+
 
 
 class StateManager(Node):
@@ -64,7 +76,7 @@ class StateManager(Node):
 
         self.declare_parameter('robot_id', 'PICKY1')
         self.declare_parameter('state_publish_interval_sec', 1.0)
-        self.declare_parameter('dock_departure_distance', 0.08)
+        self.declare_parameter('dock_departure_distance', 0.20)
 
         # 충전 도크별 ArUco 마커 ID와 도크의 절대 좌표(map frame).
         # DockCommand goal 의 dock_name 으로 lookup 한다.
@@ -101,6 +113,10 @@ class StateManager(Node):
 
         self._lock = threading.Lock()
         self._picky_state = 'CHARGING'
+        # 물리적으로 충전 도크에 있는지. picky_state 와 분리한다. 배터리 임계 초과 시
+        # 상태는 STANDBY 로 바뀌어도 도크에는 그대로 있으므로, move 수신 시 실제
+        # 도크 이탈(undock) 여부 판정에 쓴다. 부팅 시 도크에서 시작한다고 가정.
+        self._at_dock = True
 
         # Action과 타이머를 동시에 처리하기 위해 ReentrantCallbackGroup 사용
         cb_group = ReentrantCallbackGroup()
@@ -110,6 +126,18 @@ class StateManager(Node):
         self._state_pub = self.create_publisher(String, 'picky_state', 10)
         # 도크 이탈 시 직접 구동용
         self._cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
+
+        # 배터리 구독: 충전 중 배터리가 임계 초과면 CHARGING -> STANDBY 전환(상태만).
+        self._battery_sub = self.create_subscription(
+            Float32, 'battery/percent', self._on_battery, 10, callback_group=cb_group
+        )
+
+        # amcl pose 구독: 목적지 도착 후 정지 회전(사방향 스냅)에 현재 yaw 사용.
+        self._cur_yaw = 0.0
+        self._pose_sub = self.create_subscription(
+            PoseWithCovarianceStamped, 'amcl_pose', self._on_pose, 10,
+            callback_group=cb_group,
+        )
 
         # Task Manager 이동 명령 수신 Action Server
         self._move_action_server = ActionServer(
@@ -180,13 +208,22 @@ class StateManager(Node):
         self.get_logger().info(
             f'[StateManager] MOVE 실행: {task_type}, waypoints={len(waypoints)}개'
         )
+        self.get_logger().info(
+            '[PATHTRACE][StateMachine] 수신 waypoints=' + str(
+                [(round(w.pose.position.x, 3), round(w.pose.position.y, 3)) for w in waypoints]
+            )
+        )
 
-        # 충전 도크에 있을 경우 이탈 동작 우선 수행
-        # 이탈 직후 picky_state 변경 → Traffic Manager가 도크 점유 자동 해제
+        # 도크 이탈은 'STANDBY 상태이면서 물리적으로 도크에 있을 때'만 수행한다.
+        # 배터리 임계 초과로 CHARGING -> STANDBY 만 된 상태에서는 이동하지 않고,
+        # 실제 move task 가 와야 여기서 이탈한다(STANDBY 상태에서만 undock).
         with self._lock:
+            at_dock = self._at_dock
             current_state = self._picky_state
-        if current_state == 'CHARGING':
+        if at_dock and current_state == 'STANDBY':
             self._depart_from_dock()
+            with self._lock:
+                self._at_dock = False
 
         self._set_state(TASK_TO_MOVING_STATE[task_type])
 
@@ -204,21 +241,35 @@ class StateManager(Node):
 
             x = wp.pose.position.x
             y = wp.pose.position.y
-            theta = quat_to_yaw(wp.pose.orientation)
+            # zone 의 theta 는 쓰지 않는다. 중간 경유지는 통과만 하고, 마지막
+            # 목적지에서만 도착 heading 기준 가장 가까운 90° 로 정지 자세를 잡는다.
+            is_final = (i == len(waypoints) - 1)
 
-            if not self._move.move_to_goal(x, y, theta):
+            self.get_logger().info(
+                f'[PATHTRACE][StateMachine->MoveToGoal] idx={i} 좌표=({x:.3f}, {y:.3f}) final={is_final}'
+            )
+
+            if not self._move.move_to_goal(x, y, final=is_final):
                 self._set_state('ERROR_RECOVERY')
                 goal_handle.abort()
                 return MoveCommand.Result(
                     success=False, message=f'navigation failed at waypoint {i}'
                 )
 
-        # 전체 이동 완료 후 상태 전환.
+        # 전체 이동 완료. 정지 자세 회전(사방향 90° 스냅)은 move_to_goal 의 최종 목적지
+        # (final=True) 처리로 옮겼다. 여기서는 추가 회전하지 않는다(중간 경유지도 회전 없음).
+
         # RETURN_HOME 도 여기서 STANDBY 로 종료한다. 도킹은 별도 DOCK_IN task 가 수행.
         self._set_state(ARRIVAL_STATE[task_type])
 
         goal_handle.succeed()
         return MoveCommand.Result(success=True, message='ok')
+
+    # ── 정지 자세(사방향 스냅) 회전 ────────────────────────────────────
+
+    def _on_pose(self, msg: PoseWithCovarianceStamped) -> None:
+        with self._lock:
+            self._cur_yaw = quat_to_yaw(msg.pose.pose.orientation)
 
     # ── 도크 이탈 ──────────────────────────────────────────────────────
 
@@ -284,9 +335,30 @@ class StateManager(Node):
                 success=False, message=f'reverse docking failed at {dock_name}'
             )
 
+        with self._lock:
+            self._at_dock = True
         self._set_state('CHARGING')
         goal_handle.succeed()
         return DockCommand.Result(success=True, message=f'docked at {dock_name}')
+
+    # ── 배터리 기반 충전 완료 전환 ──────────────────────────────────────
+
+    def _on_battery(self, msg: Float32) -> None:
+        """충전 중 배터리가 임계를 넘으면 picky_state 를 STANDBY 로 바꾼다.
+
+        상태만 바꾸고 도크 이탈(undock)은 하지 않는다. _at_dock 은 True 로 유지되어
+        실제 move task 수신 시 _execute_move 에서 STANDBY 상태로 이탈한다.
+        """
+        if msg.data <= BATTERY_STANDBY_THRESHOLD:
+            return
+        with self._lock:
+            is_charging = self._picky_state == 'CHARGING'
+        if is_charging:
+            self.get_logger().info(
+                f'[StateManager] 배터리 {msg.data:.0f}% > '
+                f'{BATTERY_STANDBY_THRESHOLD:.0f}% -> CHARGING 에서 STANDBY 로 전환(도크 유지)'
+            )
+            self._set_state('STANDBY')
 
     # ── 주기 상태 publish ──────────────────────────────────────────────
 
@@ -303,15 +375,37 @@ def main(args=None) -> None:
     reverse_docking_node = ReverseDocking()
     state_mgr = StateManager(move_node, reverse_docking_node)
 
-    executor = MultiThreadedExecutor(num_threads=4)
-    executor.add_node(move_node)
-    executor.add_node(reverse_docking_node)
-    executor.add_node(state_mgr)
+    # 노드별로 executor 를 분리한다. 셋을 하나의 MultiThreadedExecutor 에 모으면
+    # rclpy(7.1.x)가 wait 마다 "세 노드 전체"의 wait set 을 재구성하는데, move_to_goal 의
+    # /tf 구독이 ~58Hz 라 이 큰 재구성이 초당 58회 돌아 한 코어를 태운다(Dynamixel 시리얼까지
+    # 굶겼던 원인). executor 를 쪼개면 /tf 가 깨우는 건 move_to_goal 의 작은 wait set 뿐이고,
+    # state_manager 의 ActionServer 들은 저빈도 wait set 으로 빠져 비용이 크게 준다.
+    #
+    # move_to_goal / reverse_docking 의 blocking 메서드(move_to_goal(), reverse_dock())는
+    # state_manager 의 executor 스레드(action 콜백)에서 호출되고, 두 노드는 각자 executor 에서
+    # 계속 스핀하므로 _cur 위치 갱신·nav 액션 피드백이 막히지 않는다. 두 노드는 실행 중
+    # cancel 동시처리가 필요 없어 SingleThreaded 로 충분하다. state_manager 는 ActionServer 가
+    # 실행 중 cancel 을 받아야 하므로 MultiThreaded(Reentrant)를 유지한다.
+    move_exec = SingleThreadedExecutor()
+    move_exec.add_node(move_node)
+    dock_exec = SingleThreadedExecutor()
+    dock_exec.add_node(reverse_docking_node)
+    state_exec = MultiThreadedExecutor(num_threads=2)
+    state_exec.add_node(state_mgr)
+
+    spin_threads = [
+        threading.Thread(target=move_exec.spin, daemon=True),
+        threading.Thread(target=dock_exec.spin, daemon=True),
+    ]
+    for t in spin_threads:
+        t.start()
 
     try:
-        executor.spin()
+        state_exec.spin()
     finally:
-        executor.shutdown()
+        state_exec.shutdown()
+        move_exec.shutdown()
+        dock_exec.shutdown()
         rclpy.shutdown()
 
 

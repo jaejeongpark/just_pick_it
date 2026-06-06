@@ -1,0 +1,23 @@
+# Task Manager가 Cobot State Manager에게 작업 명령을 전달하는 Action
+
+# Goal
+int32 task_id              # Fleet task ID
+string task_type           # SORTING_AND_LOAD / INSPECTION / UNLOAD / DISPLAY_SCAN / DISPLAY_PLACE
+string product_name        # 상품명
+int32 quantity             # 이번 작업에서 처리할 요청 수량
+int32 order_id             # 주문 작업이면 주문 ID, 아니면 0
+int32 display_item_id      # 진열 작업이면 진열 요청 ID, 아니면 0
+string target_zone_name    # 하차/진열 위치 이름, 없으면 빈 문자열
+---
+# Result
+bool success               # 작업 성공 여부
+string status              # SUCCESS / FAILED / CANCELLED
+string message             # 관리자 UI 표시용 최종 결과 문장
+int32 processed_quantity   # Cobot이 실제 처리 완료한 수량
+int32 stock_delta          # 진열 성공으로 재고에 반영할 수량
+---
+# Feedback
+string state               # 현재 작업 상태, STOWING_ARM은 필수
+string message             # 간단한 진행 메시지
+float32 progress           # 진행률, 0.0 ~ 1.0
+int32 processed_quantity   # 현재까지 처리 완료한 수량

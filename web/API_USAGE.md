@@ -88,7 +88,7 @@ POST /api/admin/llm/messages
 
 ```json
 {
-  "message": "우유 3개 진열"
+  "message": "생수 3개 진열"
 }
 ```
 

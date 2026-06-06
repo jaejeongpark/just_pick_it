@@ -2,9 +2,11 @@ fleet_manager:
   ros__parameters:
     robot_ids:
       - PICKY1
-      - PICKY2
       - COBOT1
-      - COBOT2
+      # 단일 로봇(PICKY1) 테스트 중 PICKY2/COBOT2 비활성화.
+      # 멀티로봇 운용 시 아래 두 줄의 주석을 해제한다.
+      # - PICKY2
+      # - COBOT2
     api_enabled: true
     api_host: "0.0.0.0"
     api_port: 8100

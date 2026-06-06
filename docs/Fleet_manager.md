@@ -40,15 +40,20 @@ FleetManagerNode
 
 | 모듈 | 파일 | 책임 | 담당 |
 |---|---|---|---|
+| `Web Service` | `web/` | 화면 렌더링 + `/api/*` 프록시 (DB 코드 없음) | 이명제 |
+
+|---|---|---|---|
+| `FleetManagerNode` | `fleet_manager_node.py` | 컴포넌트 생성·배선·타이머·명령 전파 | 공동 |
 | `FleetRepository` | `fleet_repository.py` | `just_pick_it_db` 통한 DB 조회/쓰기, snapshot, 상태 전이 | 박서우 |
 | `TrafficManager` | `traffic_manager.py` | zone 그래프 BFS, 점유 예약/해제, 도크 선정 | 박서우 |
 | `RobotStateMonitor` | `robot_state_monitor.py` | picky_state/battery/pose 구독 -> DB 반영 + Traffic 전달 | 박서우 |
-| `State Manager` | `pinky_amr_1/.../state_manager.py` | 실제 로봇 주행/도킹/상태 발행 | 박서우 |
+| `FleetApiServer` | `fleet_api_server.py` | REST/WebSocket endpoint 제공 | 이명제 |
 | `TaskManager` | `task_manager.py` | 대기 작업 polling, task 생성/전이/dispatch, 재시작 복구 | 이명제 |
 | `RobotCommandGateway` | `robot_command_gateway.py` | task -> PICKY/COBOT Action/Service 변환, 콜백 연결 | 이명제 |
-| `Web Service` | `web/` | 화면 렌더링 + `/api/*` 프록시 (DB 코드 없음) | 이명제 |
-| `FleetApiServer` | `fleet_api_server.py` | REST/WebSocket endpoint 제공 | 이명제 |
-| `FleetManagerNode` | `fleet_manager_node.py` | 컴포넌트 생성·배선·타이머·명령 전파 | 공동 |
+
+|---|---|---|---|
+| `State Manager` | `pinky_amr_1/.../state_manager.py` | 실제 로봇 주행/도킹/상태 발행 | 박서우 |
+|---|---|---|---|
 
 **수정 경계**: 위 표의 담당 외 파일은 직접 고치지 않고, 계약 변경이 필요하면 사유를 먼저 공유한다. 상태 전이 규칙(`just_pick_it_db/services/*`)은 양측 합의 영역.
 
@@ -144,7 +149,7 @@ PICKY State Manager
   -> /pickyX/battery/percent (Float32)   -> RobotStateMonitor (캐시)
   -> /pickyX/amcl_pose (PoseWithCov)     -> RobotStateMonitor (캐시)
   -> 1Hz coalesce -> FleetRepository.update_robot_state(picky_state, battery_level, pos_*)
-  -> battery 40% 초과 진입 시 1회 -> TaskManager.handle_battery_update()
+  -> battery 30% 초과 진입 시 1회 -> TaskManager.handle_battery_update()
 ```
 
 **`robot_status`는 task 전이(`workflow_service`)만 기록**한다(결정 D2). 텔레메트리는 `picky_state`/battery/pose만 갱신한다. 자세한 토픽 계약은 `Fleet_manager_interface.md` 참고.

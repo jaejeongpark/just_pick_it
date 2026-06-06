@@ -2,6 +2,10 @@ from sqlalchemy import case
 from sqlalchemy.orm import Session
 
 from just_pick_it_db.models import ExceptionLog, Order, OrderItem, PickupSlot, Product, Robot, DisplayItem, Task, Zone
+from just_pick_it_db.services.display_service import (
+    FINAL_DISPLAY_ITEM_STATUSES,
+    build_display_item_summary,
+)
 from just_pick_it_db.services.inventory_status import is_low_stock, stock_level
 from just_pick_it_db.services.product_images import resolve_product_image_url
 
@@ -80,12 +84,15 @@ def build_task_summary(db: Session, task: Task):
 
     if order_item:
         product = db.get(Product, order_item.product_id)
+        processed_quantity = None
         product_quantity = order_item.quantity
     elif display_item:
         product = db.get(Product, display_item.product_id)
-        product_quantity = display_item.requested_quantity or display_item.detected_quantity
+        processed_quantity = display_item.processed_quantity
+        product_quantity = display_item.requested_quantity or processed_quantity
     else:
         product = None
+        processed_quantity = None
         product_quantity = None
 
     source_zone = db.get(Zone, task.source_zone_id) if task.source_zone_id else None
@@ -102,7 +109,7 @@ def build_task_summary(db: Session, task: Task):
         "product_name": product.name if product else None,
         "product_quantity": product_quantity,
         "requested_quantity": display_item.requested_quantity if display_item else None,
-        "detected_quantity": display_item.detected_quantity if display_item else None,
+        "processed_quantity": processed_quantity,
         "stock_delta": display_item.stock_delta if display_item else None,
         "display_policy": display_item.display_policy if display_item else None,
         "display_status": display_item.status if display_item else None,
@@ -193,6 +200,20 @@ def build_admin_status(db: Session):
         .limit(50)
         .all()
     )
+    display_items = (
+        db.query(DisplayItem)
+        .filter(DisplayItem.status.notin_(FINAL_DISPLAY_ITEM_STATUSES))
+        .order_by(DisplayItem.display_item_id.desc())
+        .limit(20)
+        .all()
+    )
+    display_item_history = (
+        db.query(DisplayItem)
+        .filter(DisplayItem.status.in_(FINAL_DISPLAY_ITEM_STATUSES))
+        .order_by(DisplayItem.display_item_id.desc())
+        .limit(50)
+        .all()
+    )
     robots = (
         db.query(Robot)
         .order_by(robot_unit_order, robot_type_order, Robot.robot_name, Robot.robot_id)
@@ -246,6 +267,14 @@ def build_admin_status(db: Session):
         "order_history": [
             build_order_summary(db, order)
             for order in order_history
+        ],
+        "display_items": [
+            build_display_item_summary(db, display_item)
+            for display_item in display_items
+        ],
+        "display_item_history": [
+            build_display_item_summary(db, display_item)
+            for display_item in display_item_history
         ],
         "robots": [
             build_robot_summary(db, robot)

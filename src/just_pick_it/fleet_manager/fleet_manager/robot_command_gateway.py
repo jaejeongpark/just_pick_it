@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 from geometry_msgs.msg import PoseStamped
 from rclpy.action import ActionClient
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
 
 from just_pick_it_interfaces.action import DockCommand, MoveCommand
@@ -41,7 +42,10 @@ class RobotCommandGateway:
         self,
         node: Node,
         *,
-        action_wait_timeout_sec: float = 2.0,
+        # 크로스머신(PC<->보드) 첫 주문 시 action 서버 DDS discovery 가 2초보다
+        # 오래 걸려 MoveCommand 가 실패하던 문제로 여유를 둔다. 첫 명령만 대기하고
+        # 이후엔 이미 discovery 된 상태라 즉시 반환된다.
+        action_wait_timeout_sec: float = 8.0,
         service_wait_timeout_sec: float = 1.0,
         map_frame: str = "map",
     ) -> None:
@@ -50,6 +54,11 @@ class RobotCommandGateway:
         self._action_wait_timeout_sec = action_wait_timeout_sec
         self._service_wait_timeout_sec = service_wait_timeout_sec
         self._map_frame = map_frame
+        # action 클라이언트 전용 ReentrantCallbackGroup. wait_for_server 를 task
+        # dispatch 콜백 안에서 호출하는데, 클라이언트가 노드 기본(mutually-exclusive)
+        # 그룹을 쓰면 그 콜백이 블록된 동안 같은 그룹의 discovery 콜백이 못 돌아
+        # 서버 매칭이 영영 안 된다(콜백그룹 데드락). 별도 reentrant 그룹으로 푼다.
+        self._cb_group = ReentrantCallbackGroup()
         self._move_clients: dict[str, ActionClient] = {}
         self._dock_clients: dict[str, ActionClient] = {}
         self._cobot_clients: dict[str, ActionClient] = {}
@@ -57,6 +66,22 @@ class RobotCommandGateway:
         self._active_move_goals: dict[int, Any] = {}
         self._active_dock_goals: dict[int, Any] = {}
         self._active_cobot_goals: dict[int, Any] = {}
+
+    def prewarm(self, robot_names: list[str]) -> None:
+        """PICKY action 클라이언트를 미리 생성해 discovery 를 startup 에 끝낸다.
+
+        wait_for_server 를 task dispatch 콜백 안에서 동기 호출하면, 첫 주문 때
+        해당 콜백이 블록되는 동안 클라이언트 discovery 가 제때 완료되지 못해
+        timeout(첫 MoveCommand 실패) 나는 문제가 있었다. node spin 전에 클라이언트를
+        만들어 두면, executor 가 자유롭게 도는 기동 구간에 discovery 가 완료되어
+        첫 주문 시 wait_for_server 가 즉시 반환한다.
+        """
+        for name in robot_names:
+            self._get_move_client(name)
+            self._get_dock_client(name)
+        self._node.get_logger().info(
+            f"[RobotCommandGateway] action 클라이언트 prewarm: {list(robot_names)}"
+        )
 
     # ==================================================================
     # PICKY MoveCommand
@@ -99,6 +124,12 @@ class RobotCommandGateway:
         self._node.get_logger().info(
             f"[RobotCommandGateway] {robot_name} task_id={task_id} {task_type} 전송, "
             f"waypoints={len(poses)}"
+        )
+        self._node.get_logger().info(
+            f"[PATHTRACE][Gateway->StateMachine] task_id={task_id} zone={list(waypoints)} "
+            "poses=[" + ", ".join(
+                f"({p.pose.position.x:.3f},{p.pose.position.y:.3f})" for p in poses
+            ) + "]"
         )
 
         send_future = client.send_goal_async(
@@ -148,7 +179,9 @@ class RobotCommandGateway:
 
         namespace = self._robot_name_to_namespace(robot_name)
         action_name = f"/{namespace}/move_command"
-        client = ActionClient(self._node, MoveCommand, action_name)
+        client = ActionClient(
+            self._node, MoveCommand, action_name, callback_group=self._cb_group
+        )
         self._move_clients[robot_name] = client
         return client
 
@@ -298,7 +331,9 @@ class RobotCommandGateway:
 
         namespace = self._robot_name_to_namespace(robot_name)
         action_name = f"/{namespace}/dock_command"
-        client = ActionClient(self._node, DockCommand, action_name)
+        client = ActionClient(
+            self._node, DockCommand, action_name, callback_group=self._cb_group
+        )
         self._dock_clients[robot_name] = client
         return client
 
@@ -438,7 +473,9 @@ class RobotCommandGateway:
 
         namespace = self._robot_name_to_namespace(robot_name)
         action_name = f"/{namespace}/execute_task"
-        client = ActionClient(self._node, ExecuteTask, action_name)
+        client = ActionClient(
+            self._node, ExecuteTask, action_name, callback_group=self._cb_group
+        )
         self._cobot_clients[robot_name] = client
         return client
 
@@ -450,25 +487,16 @@ class RobotCommandGateway:
             task.get("product_quantity")
             or task.get("quantity")
             or task.get("requested_quantity")
-            or task.get("detected_quantity")
+            or task.get("processed_quantity")
         )
 
         self._set_goal_field(goal, "task_id", self._int_or_zero(task.get("task_id")))
-        self._set_goal_field(goal, "robot_name", str(task.get("assigned_robot_name") or ""))
         self._set_goal_field(goal, "task_type", str(task.get("task_type") or ""))
         self._set_goal_field(goal, "order_id", self._int_or_zero(task.get("order_id")))
-        self._set_goal_field(goal, "order_item_id", self._int_or_zero(task.get("order_item_id")))
         self._set_goal_field(goal, "display_item_id", self._int_or_zero(task.get("display_item_id")))
-        self._set_goal_field(goal, "product_id", self._int_or_zero(task.get("product_id")))
         self._set_goal_field(goal, "product_name", str(task.get("product_name") or ""))
         self._set_goal_field(goal, "quantity", quantity)
-        self._set_goal_field(goal, "requested_quantity", self._int_or_zero(task.get("requested_quantity")))
-        self._set_goal_field(goal, "detected_quantity", self._int_or_zero(task.get("detected_quantity")))
-        self._set_goal_field(goal, "source_zone_id", self._int_or_zero(task.get("source_zone_id")))
-        self._set_goal_field(goal, "target_zone_id", self._int_or_zero(task.get("target_zone_id")))
-        self._set_goal_field(goal, "source_zone_name", str(task.get("source_zone_name") or ""))
         self._set_goal_field(goal, "target_zone_name", str(task.get("target_zone_name") or ""))
-        self._set_goal_field(goal, "pickup_slot_id", self._int_or_zero(task.get("pickup_slot_id")))
         return goal
 
     def _on_cobot_goal_response(
@@ -532,9 +560,7 @@ class RobotCommandGateway:
             "state": str(status),
             "message": str(self._get_message_field(feedback, "message") or ""),
             "progress": float(self._get_message_field(feedback, "progress") or 0.0),
-            "detected_quantity": self._int_or_zero(
-                self._get_message_field(feedback, "detected_quantity")
-            ),
+            "processed_quantity": self._quantity_from_message(feedback),
         }
 
         if feedback_callback is not None:
@@ -566,9 +592,7 @@ class RobotCommandGateway:
             "success": bool(self._get_message_field(result, "success")),
             "status": status,
             "message": str(message),
-            "detected_quantity": self._int_or_zero(
-                self._get_message_field(result, "detected_quantity")
-            ),
+            "processed_quantity": self._quantity_from_message(result),
             "stock_delta": self._int_or_zero(self._get_message_field(result, "stock_delta")),
         }
 
@@ -766,3 +790,7 @@ class RobotCommandGateway:
         if hasattr(message, field_name):
             return getattr(message, field_name)
         return None
+
+    def _quantity_from_message(self, message: Any) -> int:
+        """ROS message/action object에서 처리 수량을 읽는다."""
+        return self._int_or_zero(self._get_message_field(message, "processed_quantity"))

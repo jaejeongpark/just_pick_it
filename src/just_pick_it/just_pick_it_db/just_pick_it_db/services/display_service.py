@@ -1,6 +1,7 @@
 from sqlalchemy.orm import Session
 
 from just_pick_it_db.models import Product, DisplayItem
+from just_pick_it_db.services.product_images import resolve_product_image_url
 
 
 FINAL_DISPLAY_ITEM_STATUSES = ("COMPLETED", "FAILED", "CANCELLED")
@@ -13,8 +14,9 @@ def build_display_item_summary(db: Session, display_item: DisplayItem) -> dict:
         "display_item_id": display_item.display_item_id,
         "product_id": display_item.product_id,
         "product_name": product.name if product else None,
+        "image_url": resolve_product_image_url(product) if product else None,
         "requested_quantity": display_item.requested_quantity,
-        "detected_quantity": display_item.detected_quantity,
+        "processed_quantity": display_item.processed_quantity,
         "stock_delta": display_item.stock_delta,
         "display_policy": display_item.display_policy,
         "status": display_item.status,
@@ -27,7 +29,7 @@ def create_display_item_record(
     *,
     product_id: int,
     requested_quantity: int | None = None,
-    detected_quantity: int | None = None,
+    processed_quantity: int | None = None,
     stock_delta: int | None = None,
     display_policy: str | None = None,
     status: str = "REQUESTED",
@@ -36,7 +38,7 @@ def create_display_item_record(
     item = DisplayItem(
         product_id=product_id,
         requested_quantity=requested_quantity,
-        detected_quantity=detected_quantity,
+        processed_quantity=processed_quantity,
         stock_delta=stock_delta,
         display_policy=resolve_display_policy(requested_quantity, display_policy),
         status=status,
@@ -51,14 +53,14 @@ def resolve_display_policy(
     display_policy: str | None,
 ) -> str:
     policy = display_policy or (
-        "REQUESTED_QUANTITY" if requested_quantity is not None else "ALL_DETECTED"
+        "REQUESTED_QUANTITY" if requested_quantity is not None else "ALL_PROCESSED"
     )
 
     if policy == "REQUESTED_QUANTITY" and requested_quantity is None:
         raise ValueError("requested_quantity is required for REQUESTED_QUANTITY policy")
 
-    if policy == "ALL_DETECTED" and requested_quantity is not None:
-        raise ValueError("requested_quantity must be null for ALL_DETECTED policy")
+    if policy == "ALL_PROCESSED" and requested_quantity is not None:
+        raise ValueError("requested_quantity must be null for ALL_PROCESSED policy")
 
     return policy
 
@@ -70,7 +72,7 @@ def resolve_stock_delta(display_item: DisplayItem) -> int | None:
     if display_item.requested_quantity is not None:
         return int(display_item.requested_quantity)
 
-    if display_item.detected_quantity is not None:
-        return int(display_item.detected_quantity)
+    if display_item.processed_quantity is not None:
+        return int(display_item.processed_quantity)
 
     return None

@@ -37,6 +37,12 @@ def normalize_angle(a: float) -> float:
     return a
 
 
+# 최종 목적지 정지 자세(사방향 90° 스냅) 회전 파라미터
+STOP_ROTATE_SPEED = 0.8        # [rad/s]
+STOP_ROTATE_TOL = 0.05         # [rad] 약 3도
+STOP_ROTATE_TIMEOUT = 8.0      # [s]
+
+
 class MoveToGoal(Node):
     def __init__(self):
         super().__init__("move_to_goal")
@@ -44,7 +50,7 @@ class MoveToGoal(Node):
         self.declare_parameter("precision_approach_distance", 0.3)
         self.declare_parameter("xy_goal_tolerance", 0.05)
         self.declare_parameter("yaw_goal_tolerance", 0.05)
-        self.declare_parameter("nav_timeout_sec", 60.0)
+        self.declare_parameter("nav_timeout_sec", 120.0)
 
         self._prec_dist = self.get_parameter("precision_approach_distance").value
         self._xy_tol = self.get_parameter("xy_goal_tolerance").value
@@ -69,23 +75,38 @@ class MoveToGoal(Node):
     # 외부 인터페이스 (blocking, executor 스레드에서 호출)
     # ------------------------------------------------------------------ #
 
-    def move_to_goal(self, x: float, y: float, yaw: float) -> bool:
-        """
-        목표(x, y, yaw)까지 이동. 성공 시 True, 실패/타임아웃 시 False.
+    def move_to_goal(self, x: float, y: float, final: bool = True) -> bool:
+        """목표 (x, y) '위치'까지 이동(도착)만 한다. 정지 자세(회전)는 State Machine 담당.
+
+        zone 의 theta 는 사용하지 않는다.
+        - 중간 경유지(final=False): nav2 로 근처까지 통과만 한다(정밀접근 생략).
+        - 목적지(final=True): 정밀접근으로 위치 오차 이내까지 도달한다(회전 없음).
         task_manager의 daemon 스레드에서 호출.
         """
-        self.get_logger().info(f"move_to_goal: target=({x:.3f},{y:.3f},{yaw:.3f})")
+        self.get_logger().info(f"move_to_goal: target=({x:.3f},{y:.3f}) final={final}")
 
-        if not self._nav2_navigate(x, y, yaw):
+        # Nav2 목표 헤딩을 "현재→목표 진행 방향" bearing 으로 준다. yaw=0(동쪽) 하드코딩 시
+        # use_rotate_to_heading 컨트롤러가 매 목표마다 로봇을 동쪽으로 돌려(불필요한 90°)
+        # 축이 틀어졌다. 최종 정지 자세는 도착 후 _rotate_to_nearest_90 이 따로 잡는다.
+        with self._lock:
+            cur_x, cur_y = self._cur_x, self._cur_y
+        bearing = math.atan2(y - cur_y, x - cur_x)
+
+        if not self._nav2_navigate(x, y, bearing):
             return False
+
+        if not final:
+            self.get_logger().info("move_to_goal: 경유지 통과")
+            return True
 
         if not self._precision_approach(x, y):
             return False
 
-        if not self._yaw_correction(yaw):
-            return False
+        # 최종 목적지(goal zone)에서만 가장 가까운 90°(축 정렬)로 정지 자세 회전.
+        # 중간 경유지(final=False)는 회전하지 않는다. zone theta 는 쓰지 않는다.
+        self._rotate_to_nearest_90()
 
-        self.get_logger().info("move_to_goal: SUCCESS")
+        self.get_logger().info("move_to_goal: 위치 도착")
         return True
 
     def cancel_navigation(self):
@@ -206,6 +227,28 @@ class MoveToGoal(Node):
         return False
 
     def _stop_robot(self):
+        self._cmd_pub.publish(Twist())
+
+    def _rotate_to_nearest_90(self) -> None:
+        """현재 heading 에서 가장 가까운 90°(0/90/180/270)로 제자리 회전한다.
+
+        최종 목적지에서만 호출한다(중간 경유지 제외). zone theta 대신 도착 heading 에서
+        회전이 최소가 되는 축 정렬 방향을 정지 자세로 삼는다. cmd_vel 로 직접 회전한다.
+        """
+        with self._lock:
+            cur = self._cur_yaw
+        target = normalize_angle(round(cur / (math.pi / 2.0)) * (math.pi / 2.0))
+        self.get_logger().info(f"move_to_goal: 정지 자세 회전 {cur:.2f} -> {target:.2f} rad")
+        deadline = time.time() + STOP_ROTATE_TIMEOUT
+        while time.time() < deadline:
+            with self._lock:
+                err = normalize_angle(target - self._cur_yaw)
+            if abs(err) < STOP_ROTATE_TOL:
+                break
+            twist = Twist()
+            twist.angular.z = STOP_ROTATE_SPEED if err > 0 else -STOP_ROTATE_SPEED
+            self._cmd_pub.publish(twist)
+            time.sleep(0.05)
         self._cmd_pub.publish(Twist())
 
     # ------------------------------------------------------------------ #

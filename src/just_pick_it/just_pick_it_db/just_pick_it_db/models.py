@@ -130,7 +130,7 @@ exception_type_enum = ENUM(
 
 display_policy_enum = ENUM(
     "REQUESTED_QUANTITY",
-    "ALL_DETECTED",
+    "ALL_PROCESSED",
     name="display_policy",
     create_type=False,
 )
@@ -211,7 +211,7 @@ class DisplayItem(Base):
     __table_args__ = (
         CheckConstraint(
             "(display_policy = 'REQUESTED_QUANTITY' AND requested_quantity IS NOT NULL) "
-            "OR (display_policy = 'ALL_DETECTED' AND requested_quantity IS NULL)",
+            "OR (display_policy = 'ALL_PROCESSED' AND requested_quantity IS NULL)",
             name="ck_display_item_policy_quantity",
         ),
     )
@@ -219,7 +219,7 @@ class DisplayItem(Base):
     display_item_id = Column(Integer, primary_key=True)
     product_id = Column(Integer, ForeignKey("product.product_id"), nullable=False)
     requested_quantity = Column(Integer)
-    detected_quantity = Column(Integer)
+    processed_quantity = Column(Integer)
     stock_delta = Column(Integer)
     display_policy = Column(display_policy_enum, nullable=False)
     status = Column(display_item_status_enum, nullable=False, default="REQUESTED")

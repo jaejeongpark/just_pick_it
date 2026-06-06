@@ -10,7 +10,7 @@ from launch import LaunchDescription
 from launch.actions import GroupAction, IncludeLaunchDescription
 from launch.launch_description_sources import AnyLaunchDescriptionSource
 from launch.substitutions import PathJoinSubstitution
-from launch_ros.actions import SetRemap
+from launch_ros.actions import SetRemap, Node
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -28,14 +28,24 @@ def generate_launch_description():
             SetRemap(src="/joint_states", dst="/picky2/joint_states"),
             SetRemap(src="/battery/percent", dst="/picky2/battery/percent"),
             SetRemap(src="/battery/voltage", dst="/picky2/battery/voltage"),
-            # TF도 로봇별로 분리한다. 이렇게 안 하면 두 로봇이 같은 /tf에
-            # odom과 base_footprint를 동시에 올려 TF 트리가 충돌한다.
-            # bringup, robot_state_publisher, lidar 가 모두 이 group 안에서
-            # /picky2/tf 로 publish 하게 되고, picky2 namespace 로 띄운 주행/AMCL
-            # 노드들도 상대 토픽 tf 를 /picky2/tf 로 구독하므로 트리가 맞물린다.
             SetRemap(src="/tf", dst="/picky2/tf"),
             SetRemap(src="/tf_static", dst="/picky2/tf_static"),
+            SetRemap(src="/camera/image_raw", dst="/picky2/camera/image_raw"),
             IncludeLaunchDescription(AnyLaunchDescriptionSource(pinky_bringup_launch)),
+            Node(
+                package="just_pick_it_perception",
+                executable="udp_image_sender",
+                name="pi_camera_udp_publisher",
+                output="screen",
+                parameters=[
+                    {"dest_port": 5002},
+                    {"dest_ip": "192.168.1.73"},
+                    {"width": 1280},
+                    {"height": 720},
+                    {"fps": 30},
+                    {"jpeg_quality": 80},
+                ]
+            ),
         ]
     )
 
