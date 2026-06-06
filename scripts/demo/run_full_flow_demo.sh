@@ -57,6 +57,7 @@ validate_demo_config() {
   require_config_value DEMO_COBOT_SCANNING_SECONDS
   require_config_value DEMO_COBOT_PLACING_SECONDS
   require_config_value DEMO_COBOT_STOWING_ARM_SECONDS
+  require_config_value DEMO_COBOT_AUTO_COMPLETE
 }
 
 source_if_exists() {
@@ -339,6 +340,7 @@ start_fake_robot_servers() {
   export DEMO_COBOT_SCANNING_SECONDS
   export DEMO_COBOT_PLACING_SECONDS
   export DEMO_COBOT_STOWING_ARM_SECONDS
+  export DEMO_COBOT_AUTO_COMPLETE
   log "starting fake robot servers (ROS_DOMAIN_ID=$ROS_DOMAIN_ID)"
   python3 "$ROOT_DIR/scripts/demo/fake_robot_servers.py" &
   FAKE_ROBOT_PID="$!"

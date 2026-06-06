@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from rclpy.node import Node
 
 from fleet_manager.fleet_api_schemas import (
+    DebugTaskSuccessIn,
     FleetOrderStateUpdateIn,
     FleetRobotStateUpdateIn,
     FleetTaskBulkCreateIn,
@@ -86,6 +87,7 @@ class FleetApiServer:
         port: int = 8100,
         push_interval_sec: float = 1.0,
         admin_snapshot_provider: Callable[[], dict | None] | None = None,
+        debug_task_success_injector: Callable[..., dict | None] | None = None,
     ) -> None:
         self._node = node
         self._repo = fleet_repo
@@ -93,6 +95,7 @@ class FleetApiServer:
         self._port = port
         self._push_interval = push_interval_sec
         self._admin_snapshot_provider = admin_snapshot_provider or self._repo.get_snapshot
+        self._debug_task_success_injector = debug_task_success_injector
         self._admin_ws = _WsManager()
         self._customer_ws = _WsManager()
         self._app = self._build_app()
@@ -270,6 +273,20 @@ class FleetApiServer:
         @app.delete("/api/fleet/tasks/{task_id}")
         def delete_fleet_task(task_id: int, force: bool = False):
             return self._guard(lambda: repo.delete_task(task_id, force=force))
+
+        @app.post("/api/admin/debug/robots/{robot_identifier}/running-task/success")
+        def debug_complete_running_robot_task(
+            robot_identifier: str,
+            body: DebugTaskSuccessIn | None = None,
+        ):
+            if self._debug_task_success_injector is None:
+                raise HTTPException(status_code=404, detail="debug task injection unavailable")
+
+            payload = self._model_dump(body) if body is not None else {}
+            return self._require(
+                self._debug_task_success_injector(robot_identifier, **payload),
+                "debug task success injection failed",
+            )
 
         @app.patch("/api/fleet/orders/{order_id}")
         def update_fleet_order(order_id: int, body: FleetOrderStateUpdateIn):

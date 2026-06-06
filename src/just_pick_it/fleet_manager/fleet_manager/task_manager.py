@@ -721,6 +721,86 @@ class TaskManager:
                 return task
         return None
 
+    def inject_running_robot_task_success(
+        self,
+        robot_name: str,
+        *,
+        message: str | None = None,
+        processed_quantity: int | None = None,
+        stock_delta: int | None = None,
+    ) -> dict[str, Any] | None:
+        """테스트용: 로봇의 RUNNING task에 SUCCESS result를 주입한다.
+
+        일반 DB 상태 변경이 아니라 RobotCommandGateway result callback과 같은
+        경로를 태우기 위한 debug API 전용 진입점이다.
+        """
+        normalized_robot_name = str(robot_name or "").strip().upper()
+        if not normalized_robot_name:
+            return None
+
+        self._scheduler_lock.acquire()
+        try:
+            all_tasks = self._repo.list_tasks()
+            task = self._debug_result_target_task(normalized_robot_name, all_tasks)
+            if task is None:
+                self._node.get_logger().warn(
+                    f"[TaskManager] debug SUCCESS 주입 실패: {normalized_robot_name} RUNNING task 없음"
+                )
+                return None
+
+            task_id = int(task["task_id"])
+            task_type = str(task.get("task_type") or "")
+            result_message = message or f"manual debug SUCCESS for {task_type}"
+
+            result: dict[str, Any] = {
+                "task_id": task_id,
+                "robot_name": normalized_robot_name,
+                "task_type": task_type,
+                "success": True,
+                "status": "SUCCESS",
+                "message": result_message,
+            }
+            if processed_quantity is not None:
+                result["processed_quantity"] = processed_quantity
+            if stock_delta is not None:
+                result["stock_delta"] = stock_delta
+
+            self._handle_task_result_locked(result)
+            self._node.get_logger().info(
+                f"[TaskManager] debug SUCCESS 주입 완료: robot={normalized_robot_name}, "
+                f"task_id={task_id}, task_type={task_type}"
+            )
+            return {
+                "status": "ok",
+                "robot_name": normalized_robot_name,
+                "task_id": task_id,
+                "task_type": task_type,
+                "result_status": "SUCCESS",
+                "message": result_message,
+            }
+        finally:
+            self._scheduler_lock.release()
+
+    def _debug_result_target_task(
+        self,
+        robot_name: str,
+        all_tasks: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """debug result 주입 대상 RUNNING task를 고른다."""
+        robot_tasks = [
+            task for task in all_tasks
+            if str(task.get("assigned_robot_name") or "").upper() == robot_name
+        ]
+
+        running_tasks = [
+            task for task in robot_tasks
+            if task.get("status") == "RUNNING"
+        ]
+        if running_tasks:
+            running_tasks.sort(key=lambda task: int(task.get("task_id") or 0), reverse=True)
+            return running_tasks[0]
+        return None
+
     def _cancel_preplanned_after_cobot_failure(self, cobot_task_id: int) -> None:
         """COBOT task 실패 시 STOWING_ARM 중 선계획한 task와 경로 예약을 정리한다."""
         move_task_ids = self._preplanned_move_tasks_by_trigger.pop(cobot_task_id, set())

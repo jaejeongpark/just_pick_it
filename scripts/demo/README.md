@@ -46,6 +46,11 @@ export DEMO_ROS_DOMAIN_ID=25
 나머지 값은 데모 기본값이므로 평소에는 수정하지 않는다.
 fake PICKY 속도나 COBOT 작업 시간을 조절하고 싶을 때만 같은 `.env` 안의 값을 수정해서 쓴다.
 
+COBOT 자동 완료 모드:
+
+- `DEMO_COBOT_AUTO_COMPLETE=true`: fake COBOT이 action goal을 받은 뒤 feedback/result를 자동 반환한다.
+- `DEMO_COBOT_AUTO_COMPLETE=false`: fake COBOT이 goal만 받아 task를 `RUNNING` 상태로 두고, 아래 debug curl로 사람이 완료 처리한다.
+
 기본 배터리 동작:
 
 - 주문은 `UNLOAD`, 진열은 `DISPLAY_PLACE`가 끝날 때 해당 unit의 PICKY 배터리를 30% 차감한다.
@@ -103,6 +108,45 @@ curl -s -X POST http://localhost:8100/api/admin/display-items \
     "display_policy": "ALL_PROCESSED"
   }' | python3 -m json.tool
 ```
+
+## COBOT 수동 완료 curl
+
+`DEMO_COBOT_AUTO_COMPLETE=false`일 때 사용한다.
+fake COBOT은 goal을 accept한 뒤 result를 반환하지 않으므로, Admin UI에서 해당 COBOT task가 `RUNNING`인지 확인하고 아래 curl로 성공 처리한다.
+
+COBOT1의 `RUNNING` task 성공 처리:
+
+```bash
+curl -s -X POST http://localhost:8100/api/admin/debug/robots/COBOT1/running-task/success \
+  -H "Content-Type: application/json" \
+  -d '{"message":"manual cobot success"}' | python3 -m json.tool
+```
+
+COBOT2의 `RUNNING` task 성공 처리:
+
+```bash
+curl -s -X POST http://localhost:8100/api/admin/debug/robots/COBOT2/running-task/success \
+  -H "Content-Type: application/json" \
+  -d '{"message":"manual cobot success"}' | python3 -m json.tool
+```
+
+진열 수량 결과를 함께 넣고 싶을 때:
+
+```bash
+curl -s -X POST http://localhost:8100/api/admin/debug/robots/COBOT1/running-task/success \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "manual display place success",
+    "processed_quantity": 2,
+    "stock_delta": 2
+  }' | python3 -m json.tool
+```
+
+주의:
+
+- 이 debug API는 해당 로봇의 `RUNNING` task만 성공 처리한다.
+- 아직 실행 전인 `ASSIGNED` task는 완료 처리하지 않는다.
+- 성공 처리는 단순 DB 상태 변경이 아니라 TaskManager의 result 처리 경로를 타므로 다음 task dispatch까지 이어진다.
 
 ## 종료
 

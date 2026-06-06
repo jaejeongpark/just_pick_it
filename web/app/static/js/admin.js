@@ -2927,16 +2927,12 @@ function renderTaskDetail(task) {
     </div>
     <div class="state-editor-form">
       <div>
-        <label for="task-status-select">작업 상태</label>
-        <select id="task-status-select">${renderOptions(TASK_STATUSES, task.status)}</select>
-      </div>
-      <div>
         <label for="task-robot-select">할당 로봇</label>
         <select id="task-robot-select">${renderRobotOptions(task.assigned_robot_id)}</select>
       </div>
-      <button class="small-action-button" type="button" data-save-task-state="${task.task_id}">상태 저장</button>
+      <button class="small-action-button" type="button" data-save-task-state="${task.task_id}">할당 저장</button>
     </div>
-    ${deleteBlocked ? '<p class="muted">RUNNING/PAUSED 작업은 먼저 상태를 바꾼 뒤 삭제합니다.</p>' : ""}
+    ${deleteBlocked ? '<p class="muted">RUNNING/PAUSED 작업은 실행 중이므로 삭제할 수 없습니다.</p>' : ""}
   `;
 }
 
@@ -3060,15 +3056,7 @@ function renderTaskManager(tasks) {
 }
 
 function renderTaskHistoryStatusControl(task) {
-  if (task.status === "SUCCESS") {
-    return `<div class="state-badge ${statusClass(task.status)}">${label(task.status)}</div>`;
-  }
-
-  return `
-    <select class="task-status-inline-select ${statusClass(task.status)}" data-task-status-select="${task.task_id}" data-current-status="${task.status}">
-      ${renderOptions(TASK_STATUSES, task.status)}
-    </select>
-  `;
+  return `<div class="state-badge ${statusClass(task.status)}">${label(task.status)}</div>`;
 }
 
 function taskSearchText(task) {
@@ -3126,61 +3114,6 @@ function applyTaskHistoryFilter() {
 
   if (emptyState) {
     emptyState.hidden = rows.length === 0 || visibleCount > 0;
-  }
-}
-
-async function patchTaskStatusOnly(taskId, status) {
-  const response = await fetch(`/api/fleet/tasks/${taskId}`, {
-    method: "PATCH",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ status }),
-  });
-
-  if (!response.ok) {
-    throw await errorFromResponse(response, "task status update failed");
-  }
-
-  return response.json();
-}
-
-async function updateTaskStatusFromHistory(taskId, status, select) {
-  const previousStatus = select.dataset.currentStatus;
-  select.disabled = true;
-
-  try {
-    await patchTaskStatusOnly(taskId, status);
-    const task = findTask(taskId);
-
-    if (task) {
-      task.status = status;
-    }
-
-    const row = select.closest("[data-task-history-row]");
-
-    if (row) {
-      row.dataset.taskStatus = status;
-
-      if (task) {
-        row.dataset.taskSearch = taskSearchText(task);
-      }
-    }
-
-    if (status === "SUCCESS") {
-      select.outerHTML = `<div class="state-badge ${statusClass(status)}">${label(status)}</div>`;
-    } else {
-      select.dataset.currentStatus = status;
-      select.className = `task-status-inline-select ${statusClass(status)}`;
-      select.disabled = false;
-    }
-
-    renderTaskSnapshot(latestAdminStatus?.tasks || []);
-    applyTaskHistoryFilter();
-  } catch (error) {
-    select.value = previousStatus;
-    select.disabled = false;
-    throw error;
   }
 }
 
@@ -3829,7 +3762,6 @@ async function updateTaskState(taskId) {
     modalBody.querySelector("#task-robot-select")?.value || null;
 
   await patchJson(`/api/fleet/tasks/${taskId}`, {
-    status: modalBody.querySelector("#task-status-select")?.value,
     assigned_robot_id: assignedRobotId ? Number(assignedRobotId) : null,
   });
   openTaskDetail(taskId, { keepReturnStack: true });
@@ -4394,24 +4326,7 @@ modalBody?.addEventListener("change", (event) => {
   if (statusFilter) {
     event.stopPropagation();
     applyTaskHistoryFilter();
-    return;
   }
-
-  const statusSelect = event.target.closest("[data-task-status-select]");
-
-  if (!statusSelect) {
-    return;
-  }
-
-  event.stopPropagation();
-
-  updateTaskStatusFromHistory(
-    Number(statusSelect.dataset.taskStatusSelect),
-    statusSelect.value,
-    statusSelect,
-  ).catch((error) => {
-    alert(error.message);
-  });
 });
 llmOpenButton?.addEventListener("click", () => {
   if (llmPanel) {
@@ -4668,7 +4583,7 @@ modalBody?.addEventListener("click", (event) => {
 
   if (
     event.target.closest(
-      "[data-task-status-select], [data-task-history-status-filter]",
+      "[data-task-history-status-filter]",
     )
   ) {
     return;

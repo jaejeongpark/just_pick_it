@@ -145,6 +145,7 @@ class FleetManagerNode(Node):
             port=config["api_port"],
             push_interval_sec=config["api_push_interval_sec"],
             admin_snapshot_provider=self._build_admin_snapshot,
+            debug_task_success_injector=self.task_manager.inject_running_robot_task_success,
         )
         api_server.start()
         return api_server

@@ -92,6 +92,13 @@ def env_float(name: str, default: float) -> float:
         return default
 
 
+def env_bool(name: str, default: bool) -> bool:
+    raw_value = os.environ.get(name)
+    if raw_value is None or raw_value.strip() == "":
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def yaw_to_quaternion_z_w(yaw: float) -> tuple[float, float]:
     return math.sin(yaw / 2.0), math.cos(yaw / 2.0)
 
@@ -108,6 +115,7 @@ class FakeRobotServers(Node):
         self._battery_standby_threshold = env_float("DEMO_PICKY_BATTERY_STANDBY_THRESHOLD", 30.0)
         self._battery_drain_per_flow = env_float("DEMO_PICKY_BATTERY_DRAIN_PER_FLOW", 30.0)
         self._charge_complete_seconds = env_float("DEMO_PICKY_CHARGE_COMPLETE_SECONDS", 5.0)
+        self._cobot_auto_complete = env_bool("DEMO_COBOT_AUTO_COMPLETE", True)
         self._state_publish_interval_sec = env_float(
             "DEMO_STATE_PUBLISH_INTERVAL_SECONDS",
             1.0,
@@ -228,7 +236,7 @@ class FakeRobotServers(Node):
         self.get_logger().info(
             "fake robot servers ready: "
             "/picky{1,2}/move_command, /picky{1,2}/dock_command, "
-            "/cobot{1,2}/execute_task"
+            f"/cobot{{1,2}}/execute_task, cobot_auto_complete={self._cobot_auto_complete}"
         )
 
     def request_shutdown(self) -> None:
@@ -603,6 +611,13 @@ class FakeRobotServers(Node):
             processed_quantity=0,
         )
 
+        if not self._cobot_auto_complete:
+            return self._hold_cobot_task_for_manual_success(
+                runtime,
+                goal_handle,
+                phase=phases[0],
+            )
+
         for phase in phases:
             self._set_cobot_state(runtime, phase)
             duration = self._cobot_phase_duration(phase)
@@ -637,6 +652,35 @@ class FakeRobotServers(Node):
             processed_quantity=processed_quantity,
             stock_delta=stock_delta,
         )
+
+    def _hold_cobot_task_for_manual_success(
+        self,
+        runtime: CobotRuntime,
+        goal_handle,
+        *,
+        phase: str,
+    ) -> ExecuteTask.Result:
+        """COBOT task를 RUNNING 상태로 유지해 Fleet debug curl로 완료하게 한다."""
+        self._set_cobot_state(runtime, phase)
+        self._publish_cobot_feedback(
+            goal_handle,
+            state=phase,
+            message="manual debug success required",
+            progress=0.0,
+            processed_quantity=0,
+        )
+        self.get_logger().info(
+            f"{runtime.name} fake cobot task held for manual success: "
+            f"task_id={goal_handle.request.task_id}, task_type={goal_handle.request.task_type}"
+        )
+
+        while True:
+            if self._is_shutdown_requested() or goal_handle.is_cancel_requested:
+                return self._finish_interrupted_cobot(runtime, goal_handle)
+            with runtime.lock:
+                if runtime.emergency_stop:
+                    return self._finish_interrupted_cobot(runtime, goal_handle)
+            time.sleep(0.2)
 
     def _run_cobot_phase(
         self,

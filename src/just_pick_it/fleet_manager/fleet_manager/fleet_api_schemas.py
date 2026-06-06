@@ -92,6 +92,12 @@ class FleetTaskStateUpdateIn(BaseModel):
     result_message: str | None = None
 
 
+class DebugTaskSuccessIn(BaseModel):
+    message: str | None = None
+    processed_quantity: int | None = Field(default=None, ge=0)
+    stock_delta: int | None = Field(default=None, ge=0)
+
+
 class FleetRobotStateUpdateIn(BaseModel):
     status: str | None = None
     robot_status: str | None = None
