@@ -12,11 +12,23 @@
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>std_msgs</depend>
+  <depend>nav2_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>cv_bridge</depend>
   <depend>just_pick_it_interfaces</depend>
 
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>pinky_bringup</exec_depend>
+  <exec_depend>pinky_description</exec_depend>
+  <exec_depend>sllidar_ros2</exec_depend>
+  <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_common</exec_depend>
+  <exec_depend>pinky_navigation</exec_depend>
+  <exec_depend>slam_toolbox</exec_depend>
+  <exec_depend>just_pick_it_perception</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>joint_state_publisher</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
