@@ -42,10 +42,21 @@ STOP_ROTATE_SPEED = 0.8        # [rad/s]
 STOP_ROTATE_TOL = 0.05         # [rad] 약 3도
 STOP_ROTATE_TIMEOUT = 8.0      # [s]
 
+# _nav2_navigate 가 비상 정지로 중단됐음을 알리는 sentinel.
+# True(성공) / False(실패) 와 구분하기 위해 별도 객체를 쓴다.
+NAV_PAUSED = object()
+
 
 class MoveToGoal(Node):
-    def __init__(self):
+    def __init__(self, emergency_latch=None):
         super().__init__("move_to_goal")
+
+        # 비상 정지 래치. state_manager 가 공유 인스턴스를 주입한다.
+        # 단독 실행(__main__)이면 자체 생성해 항상 정상 동작하게 한다.
+        if emergency_latch is None:
+            from pinky_amr_1.emergency_latch import EmergencyLatch
+            emergency_latch = EmergencyLatch()
+        self._emergency = emergency_latch
 
         self.declare_parameter("precision_approach_distance", 0.3)
         self.declare_parameter("xy_goal_tolerance", 0.05)
@@ -85,15 +96,23 @@ class MoveToGoal(Node):
         """
         self.get_logger().info(f"move_to_goal: target=({x:.3f},{y:.3f}) final={final}")
 
-        # Nav2 목표 헤딩을 "현재→목표 진행 방향" bearing 으로 준다. yaw=0(동쪽) 하드코딩 시
-        # use_rotate_to_heading 컨트롤러가 매 목표마다 로봇을 동쪽으로 돌려(불필요한 90°)
-        # 축이 틀어졌다. 최종 정지 자세는 도착 후 _rotate_to_nearest_90 이 따로 잡는다.
-        with self._lock:
-            cur_x, cur_y = self._cur_x, self._cur_y
-        bearing = math.atan2(y - cur_y, x - cur_x)
+        # Nav2 phase: 비상 정지로 중단되면(NAV_PAUSED) 재개될 때까지 대기한 뒤,
+        # 현재 위치 기준으로 bearing 을 다시 계산해 같은 목표로 재시도한다(pause-continue).
+        while True:
+            # Nav2 목표 헤딩을 "현재→목표 진행 방향" bearing 으로 준다. yaw=0(동쪽) 하드코딩 시
+            # use_rotate_to_heading 컨트롤러가 매 목표마다 로봇을 동쪽으로 돌려(불필요한 90°)
+            # 축이 틀어졌다. 최종 정지 자세는 도착 후 _rotate_to_nearest_90 이 따로 잡는다.
+            with self._lock:
+                cur_x, cur_y = self._cur_x, self._cur_y
+            bearing = math.atan2(y - cur_y, x - cur_x)
 
-        if not self._nav2_navigate(x, y, bearing):
-            return False
+            nav_result = self._nav2_navigate(x, y, bearing)
+            if nav_result is NAV_PAUSED:
+                self._wait_if_paused()
+                continue
+            if not nav_result:
+                return False
+            break
 
         if not final:
             self.get_logger().info("move_to_goal: 경유지 통과")
@@ -112,6 +131,31 @@ class MoveToGoal(Node):
     def cancel_navigation(self):
         """로봇을 즉시 정지. Nav2 액션 목표는 별도 취소 필요."""
         self._stop_robot()
+
+    # ------------------------------------------------------------------ #
+    # 비상 정지(pause-continue)
+    # ------------------------------------------------------------------ #
+
+    def _wait_if_paused(self) -> float:
+        """비상 정지 중이면 재개될 때까지 제자리에서 대기한다.
+
+        대기 동안 0 속도 명령을 주기적으로 재발행해 로봇을 확실히 멈춰둔다.
+        반환값은 대기한 시간(초)으로, 호출부가 자신의 timeout deadline 을
+        그만큼 미뤄 비상 정지 시간이 주행 timeout 을 잡아먹지 않게 한다.
+        """
+        if not self._emergency.is_stopped():
+            return 0.0
+
+        start = time.time()
+        self.get_logger().warn(
+            f"[비상정지] move 일시정지 — reason={self._emergency.reason}"
+        )
+        while self._emergency.is_stopped() and rclpy.ok():
+            self._stop_robot()
+            time.sleep(0.1)
+        waited = time.time() - start
+        self.get_logger().info(f"[비상정지] move 재개 ({waited:.1f}s 정지)")
+        return waited
 
     # ------------------------------------------------------------------ #
     # 내부 단계
@@ -148,6 +192,14 @@ class MoveToGoal(Node):
 
         deadline = time.time() + self._nav_timeout
         while time.time() < deadline:
+            # 비상 정지: Nav2 목표를 취소하고 로봇을 멈춘 뒤 NAV_PAUSED 로 빠져나간다.
+            # 재개 후 move_to_goal 이 같은 목표로 다시 _nav2_navigate 를 호출한다.
+            if self._emergency.is_stopped():
+                goal_handle.cancel_goal_async()
+                self._stop_robot()
+                self.get_logger().warn("[비상정지] Nav2 주행 중단 — 목표 취소")
+                return NAV_PAUSED
+
             with self._lock:
                 dx = x - self._cur_x
                 dy = y - self._cur_y
@@ -180,6 +232,11 @@ class MoveToGoal(Node):
         KP = 0.5
 
         while time.time() < deadline:
+            if self._emergency.is_stopped():
+                self._stop_robot()
+                deadline += self._wait_if_paused()
+                continue
+
             with self._lock:
                 dx = tx - self._cur_x
                 dy = ty - self._cur_y
@@ -241,6 +298,11 @@ class MoveToGoal(Node):
         self.get_logger().info(f"move_to_goal: 정지 자세 회전 {cur:.2f} -> {target:.2f} rad")
         deadline = time.time() + STOP_ROTATE_TIMEOUT
         while time.time() < deadline:
+            if self._emergency.is_stopped():
+                self._cmd_pub.publish(Twist())
+                deadline += self._wait_if_paused()
+                continue
+
             with self._lock:
                 err = normalize_angle(target - self._cur_yaw)
             if abs(err) < STOP_ROTATE_TOL:

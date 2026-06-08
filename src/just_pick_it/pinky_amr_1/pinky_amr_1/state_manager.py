@@ -13,7 +13,9 @@ from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from std_msgs.msg import Float32, String
 
 from just_pick_it_interfaces.action import DockCommand, MoveCommand
+from just_pick_it_interfaces.srv import EmergencyControl
 
+from pinky_amr_1.emergency_latch import EmergencyLatch
 from pinky_amr_1.move_to_goal import MoveToGoal
 from pinky_amr_1.reverse_docking import ReverseDocking
 
@@ -71,7 +73,12 @@ class StateManager(Node):
     자세한 모듈 설계는 docs/state_manager.md 참고.
     """
 
-    def __init__(self, move_node: MoveToGoal, reverse_docking_node: ReverseDocking) -> None:
+    def __init__(
+        self,
+        move_node: MoveToGoal,
+        reverse_docking_node: ReverseDocking,
+        emergency_latch: EmergencyLatch,
+    ) -> None:
         super().__init__('state_manager')
 
         self.declare_parameter('robot_id', 'PICKY1')
@@ -110,6 +117,8 @@ class StateManager(Node):
 
         self._move = move_node
         self._reverse_docking = reverse_docking_node
+        # 비상 정지 래치. move_node / reverse_docking_node 와 같은 인스턴스를 공유한다.
+        self._emergency = emergency_latch
 
         self._lock = threading.Lock()
         self._picky_state = 'CHARGING'
@@ -161,6 +170,15 @@ class StateManager(Node):
             callback_group=cb_group,
         )
 
+        # Fleet Manager 비상 정지/재개 수신 Service
+        # 노드 namespace 가 'picky1' 이면 자동으로 /picky1/emergency_control 이 된다.
+        self._emergency_service = self.create_service(
+            EmergencyControl,
+            'emergency_control',
+            self._handle_emergency_control,
+            callback_group=cb_group,
+        )
+
         # 주기 상태 publish 타이머 (late subscriber 를 위한 picky_state heartbeat)
         interval = self.get_parameter('state_publish_interval_sec').value
         self.create_timer(interval, self._periodic_publish, callback_group=cb_group)
@@ -190,6 +208,11 @@ class StateManager(Node):
     # ── MoveCommand Action 콜백 ────────────────────────────────────────
 
     def _on_move_goal(self, goal_request) -> GoalResponse:
+        if self._emergency.should_reject_goal():
+            self.get_logger().warn(
+                f'[StateManager] MOVE 거절: 비상 정지 중 reason={self._emergency.reason}'
+            )
+            return GoalResponse.REJECT
         task_type = goal_request.task_type
         if task_type not in TASK_TO_MOVING_STATE:
             self.get_logger().warn(f'[StateManager] 알 수 없는 task_type: {task_type}')
@@ -290,6 +313,11 @@ class StateManager(Node):
     # ── DockCommand Action 콜백 ────────────────────────────────────────
 
     def _on_dock_goal(self, goal_request) -> GoalResponse:
+        if self._emergency.should_reject_goal():
+            self.get_logger().warn(
+                f'[StateManager] DOCK 거절: 비상 정지 중 reason={self._emergency.reason}'
+            )
+            return GoalResponse.REJECT
         dock_name = goal_request.dock_name
         if dock_name not in self._dock_pose_by_name:
             self.get_logger().warn(
@@ -367,13 +395,57 @@ class StateManager(Node):
             state = self._picky_state
         self._publish_state(state)
 
+    # ── 비상 정지 / 재개 Service ───────────────────────────────────────
+
+    def _handle_emergency_control(
+        self,
+        request: EmergencyControl.Request,
+        response: EmergencyControl.Response,
+    ) -> EmergencyControl.Response:
+        """Fleet Manager 의 EmergencyControl 요청을 처리한다.
+
+        emergency_stop=True: 래치를 걸고 즉시 정지 명령을 보낸다. 진행 중이던
+            move/dock action 은 abort 하지 않는다(pause-continue). 주행 루프가
+            래치를 보고 제자리에 멈춰 재개를 기다린다. picky_state 는 그대로
+            둔다(이동 중이면 MOVING_* 유지) — 도착하면 정상 전이된다.
+        emergency_stop=False: 래치를 풀어 멈춰 있던 주행 루프가 같은 동작을
+            이어서 계속하게 한다.
+        """
+        if request.emergency_stop:
+            self._emergency.stop(request.reason)
+            # 즉시 정지 명령(주행 루프가 래치를 보기 전 latency 보강).
+            self._cmd_vel_pub.publish(Twist())
+            self._move.cancel_navigation()
+            response.accepted = True
+            response.status = 'EMERGENCY_STOP'
+            response.message = (
+                f'emergency stop accepted: reason={self._emergency.reason}, '
+                f'task_id={request.task_id}, request_id={request.request_id}'
+            )
+            self.get_logger().warn(f'[StateManager] {response.message}')
+            return response
+
+        self._emergency.resume()
+        response.accepted = True
+        response.status = 'RESUMED'
+        response.message = (
+            f'resume accepted: reason={request.reason}, '
+            f'task_id={request.task_id}, request_id={request.request_id}'
+        )
+        self.get_logger().info(f'[StateManager] {response.message}')
+        return response
+
 
 def main(args=None) -> None:
     rclpy.init(args=args)
 
-    move_node = MoveToGoal()
-    reverse_docking_node = ReverseDocking()
-    state_mgr = StateManager(move_node, reverse_docking_node)
+    # 세 노드가 공유할 단일 비상 정지 래치. 서비스 콜백(state_mgr)이 걸면
+    # 주행 루프(move_node/reverse_docking_node)가 같은 래치를 보고 멈춘다.
+    emergency_latch = EmergencyLatch()
+
+    move_node = MoveToGoal(emergency_latch)
+    reverse_docking_node = ReverseDocking(emergency_latch)
+    state_mgr = StateManager(move_node, reverse_docking_node, emergency_latch)
 
     # 노드별로 executor 를 분리한다. 셋을 하나의 MultiThreadedExecutor 에 모으면
     # rclpy(7.1.x)가 wait 마다 "세 노드 전체"의 wait set 을 재구성하는데, move_to_goal 의

@@ -50,8 +50,15 @@ class PID:
 
 
 class ReverseDocking(Node):
-    def __init__(self):
+    def __init__(self, emergency_latch=None):
         super().__init__("reverse_docking")
+
+        # 비상 정지 래치. state_manager 가 공유 인스턴스를 주입한다.
+        # 단독 실행(__main__)이면 자체 생성한다.
+        if emergency_latch is None:
+            from pinky_amr_1.emergency_latch import EmergencyLatch
+            emergency_latch = EmergencyLatch()
+        self._emergency = emergency_latch
 
         # ArUco
         self.declare_parameter("aruco_marker_dict", 0)
@@ -219,6 +226,11 @@ class ReverseDocking(Node):
         deadline = time.time() + self._timeout
 
         while time.time() < deadline:
+            if self._emergency.is_stopped():
+                self._stop()
+                deadline += self._wait_if_paused()
+                continue
+
             frame = self._get_latest_frame()
             if frame is None:
                 time.sleep(0.05)
@@ -263,6 +275,11 @@ class ReverseDocking(Node):
         deadline = time.time() + 10.0
 
         while time.time() < deadline:
+            if self._emergency.is_stopped():
+                self._stop()
+                deadline += self._wait_if_paused()
+                continue
+
             frame = self._get_latest_frame()
             if frame is None:
                 time.sleep(0.05)
@@ -310,6 +327,11 @@ class ReverseDocking(Node):
         deadline = time.time() + 30.0
 
         while time.time() < deadline:
+            if self._emergency.is_stopped():
+                self._stop()
+                deadline += self._wait_if_paused()
+                continue
+
             frame = self._get_latest_frame()
             if frame is None:
                 time.sleep(0.05)
@@ -359,6 +381,11 @@ class ReverseDocking(Node):
         deadline = time.time() + 15.0
 
         while time.time() < deadline:
+            if self._emergency.is_stopped():
+                self._stop()
+                deadline += self._wait_if_paused()
+                continue
+
             frame = self._get_latest_frame()
             if frame is None:
                 time.sleep(0.05)
@@ -475,6 +502,27 @@ class ReverseDocking(Node):
 
     def _stop(self):
         self._cmd_pub.publish(Twist())
+
+    def _wait_if_paused(self) -> float:
+        """비상 정지 중이면 재개될 때까지 제자리에서 대기한다(pause-continue).
+
+        대기 동안 0 속도 명령을 재발행해 도킹 중 로봇을 확실히 멈춰둔다.
+        반환값은 대기 시간(초)으로, 각 phase 의 deadline 을 그만큼 미뤄
+        비상 정지 시간이 phase timeout 을 잡아먹지 않게 한다.
+        """
+        if not self._emergency.is_stopped():
+            return 0.0
+
+        start = time.time()
+        self.get_logger().warn(
+            f"[비상정지] 도킹 일시정지 — reason={self._emergency.reason}"
+        )
+        while self._emergency.is_stopped() and rclpy.ok():
+            self._stop()
+            time.sleep(0.1)
+        waited = time.time() - start
+        self.get_logger().info(f"[비상정지] 도킹 재개 ({waited:.1f}s 정지)")
+        return waited
 
 
 def main(args=None):
