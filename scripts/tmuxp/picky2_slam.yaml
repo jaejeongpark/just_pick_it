@@ -1,0 +1,43 @@
+session_name: picky2-slam
+start_directory: /home/pinky/just_pick_it
+windows:
+  - window_name: slam-map
+    layout: tiled
+    panes:
+      - shell_command:
+          - cd /home/pinky/just_pick_it
+          - 'echo "로봇 SSH 접속 후 PICKY2 bringup 실행: pinky@192.168.1.93"'
+          - 'echo "비밀번호를 물어보면 로봇 비밀번호를 직접 입력하세요."'
+          - ssh -t "pinky@192.168.1.93" 'cd ~/just_pick_it && source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 launch pinky_amr_2 picky2_bringup.launch.py'
+        focus: true
+      - shell_command:
+          - cd /home/pinky/just_pick_it
+          - source /opt/ros/jazzy/setup.bash
+          - source install/setup.bash
+          - sleep 6
+          - ros2 run tf2_ros tf2_echo base_footprint rplidar_link --ros-args -r /tf:=/picky2/tf -r /tf_static:=/picky2/tf_static
+      - shell_command:
+          - cd /home/pinky/just_pick_it
+          - source /opt/ros/jazzy/setup.bash
+          - source install/setup.bash
+          - sleep 8
+          - ros2 launch pinky_amr_2 picky2_slam.launch.py
+      - shell_command:
+          - cd /home/pinky/just_pick_it
+          - source /opt/ros/jazzy/setup.bash
+          - source install/setup.bash
+          - sleep 10
+          - ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r /cmd_vel:=/picky2/cmd_vel
+      - shell_command:
+          - cd /home/pinky/just_pick_it
+          - source /opt/ros/jazzy/setup.bash
+          - source install/setup.bash
+          - sleep 12
+          - bash scripts/navigation/rviz_picky2.sh
+      - shell_command:
+          - cd /home/pinky/just_pick_it
+          - source /opt/ros/jazzy/setup.bash
+          - source install/setup.bash
+          - 'echo "맵 저장: ros2 run nav2_map_server map_saver_cli -f ~/just_pick_it/src/just_pick_it/pinky_amr_2/maps/picky2_map --ros-args -r map:=/picky2/map"'
+          - 'echo "종료: tmux kill-session -t picky2-slam"'
+          - bash

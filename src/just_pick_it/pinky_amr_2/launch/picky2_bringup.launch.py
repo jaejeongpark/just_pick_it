@@ -61,7 +61,10 @@ def generate_launch_description():
             SetRemap(src="/camera/image_raw", dst=ns("camera/image_raw")),
             IncludeLaunchDescription(
                 AnyLaunchDescriptionSource(robot_description_launch),
-                launch_arguments={"use_sim_time": use_sim_time}.items(),
+                launch_arguments={
+                    "namespace": "",
+                    "is_sim": use_sim_time,
+                }.items(),
             ),
             IncludeLaunchDescription(
                 AnyLaunchDescriptionSource(lidar_launch),
