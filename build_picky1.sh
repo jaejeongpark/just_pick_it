@@ -11,7 +11,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-PACKAGES=(
+if [ -f /opt/ros/jazzy/setup.bash ] && [ -z "${ROS_DISTRO:-}" ]; then
+  # shellcheck source=/opt/ros/jazzy/setup.bash
+  source /opt/ros/jazzy/setup.bash
+fi
+
+REQUIRED_PACKAGES=(
   just_pick_it_interfaces
   just_pick_it_perception
   sllidar_ros2
@@ -23,15 +28,15 @@ PACKAGES=(
 
 CLEAN=false
 COLCON_ARGS=()
-HAS_INSTALL_MODE=false
+HAS_SYMLINK_INSTALL=false
 
 for arg in "$@"; do
   case "$arg" in
     --clean)
       CLEAN=true
       ;;
-    --symlink-install|--merge-install)
-      HAS_INSTALL_MODE=true
+    --symlink-install)
+      HAS_SYMLINK_INSTALL=true
       COLCON_ARGS+=("$arg")
       ;;
     *)
@@ -40,16 +45,45 @@ for arg in "$@"; do
   esac
 done
 
-if [ "$HAS_INSTALL_MODE" = false ]; then
+if [ "$HAS_SYMLINK_INSTALL" = false ]; then
   COLCON_ARGS=(--symlink-install "${COLCON_ARGS[@]}")
+fi
+
+mapfile -t DISCOVERED_PACKAGES < <(colcon list --base-paths src --names-only)
+MISSING_PACKAGES=()
+
+has_discovered_package() {
+  local target="$1"
+  local discovered
+
+  for discovered in "${DISCOVERED_PACKAGES[@]}"; do
+    if [ "$discovered" = "$target" ]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+for pkg in "${REQUIRED_PACKAGES[@]}"; do
+  if ! has_discovered_package "$pkg"; then
+    MISSING_PACKAGES+=("$pkg")
+  fi
+done
+
+if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
+  echo "[build_picky1] missing packages in this repository: ${MISSING_PACKAGES[*]}" >&2
+  echo "[build_picky1] check that the git repository was cloned with the full src tree." >&2
+  exit 1
 fi
 
 if [ "$CLEAN" = true ]; then
   echo "[build_picky1] clean selected package build/install outputs"
-  for pkg in "${PACKAGES[@]}"; do
+  for pkg in "${REQUIRED_PACKAGES[@]}"; do
     rm -rf "build/$pkg" "install/$pkg"
   done
 fi
 
-echo "[build_picky1] packages: ${PACKAGES[*]}"
-colcon build --packages-select "${PACKAGES[@]}" "${COLCON_ARGS[@]}"
+echo "[build_picky1] packages: ${REQUIRED_PACKAGES[*]}"
+echo "[build_picky1] colcon args: ${COLCON_ARGS[*]}"
+colcon build --packages-select "${REQUIRED_PACKAGES[@]}" "${COLCON_ARGS[@]}"
