@@ -1,5 +1,5 @@
 -- Zone poses. map frame, 좌하단 원점(+x 오른쪽, +y 위쪽), 약 2.0m x 1.0m arena.
--- docs/Traffic_node_graph.jpg 토폴로지 기준이며 ZONE 좌표는 traffic_manager.py 의
+-- docs/Traffic_node_2.1.jpg 토폴로지 기준이며 ZONE 좌표는 traffic_manager.py 의
 -- DEFAULT_ZONE_COORDS 와 일치시킨다. 대략값이므로 실측 후 미세조정 필요.
 -- *_ZONE_* = PICKY 주행/주차 pose. *_SLOT_* = COBOT 작업용 물리 pose(z=0.35 선반/슬롯 높이).
 -- TRAFFIC_*/CHARGING_DOCK_* 그래프 노드 좌표는 DB 가 아니라 DEFAULT_ZONE_COORDS 에 있다.
@@ -29,9 +29,6 @@ INSERT INTO zone (zone_name, zone_type, pos_x, pos_y, pos_z, pos_theta) VALUES
     -- 좌표는 traffic_manager.py DEFAULT_ZONE_COORDS 와 일치(좌하단 원점).
     ('CHARGING_DOCK_1', 'CHARGING', 0.11, 0.07, 0.00, 1.5708),
     ('CHARGING_DOCK_2', 'CHARGING', 0.28, 0.07, 0.00, 1.5708),
-    ('TRAFFIC_L1', 'TRAFFIC', 0.52, 0.85, 0.00, 0.00),
-    ('TRAFFIC_L2', 'TRAFFIC', 0.52, 0.40, 0.00, 0.00),
-    ('TRAFFIC_L3', 'TRAFFIC', 0.52, 0.15, 0.00, 0.00),
     ('TRAFFIC_T1', 'TRAFFIC', 0.70, 0.85, 0.00, 0.00),
     ('TRAFFIC_T2', 'TRAFFIC', 1.05, 0.85, 0.00, 0.00),
     ('TRAFFIC_T3', 'TRAFFIC', 1.40, 0.85, 0.00, 0.00),
