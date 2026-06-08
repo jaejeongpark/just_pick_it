@@ -344,9 +344,9 @@ class JetcobotSliderGUI:
             value=str(self.capture_dir / "camera_calibration.yaml")
         )
 
-        self.center_angles = [-82.88, 56.42, -19.86, -93.51, 16.78, -124.71]
-        self.left_scan_angles = [-82.88, 56.51, -19.33, -93.60, 24.96, -121.46]
-        self.right_scan_angles = [-82.88, 56.51, -19.77, -94.65, 2.10, -129.55]
+        self.center_angles = [57.40, 82.88, -21.80, -97.20, 29.35, -155.91]
+        self.left_scan_angles = [83.37, 82.88, -21.80, -97.20, 29.35, -155.91]
+        self.right_scan_angles = [38.12, 82.88, -21.80, -97.20, 29.35, -155.91]
         self.home_angles = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
         self.build_ui()

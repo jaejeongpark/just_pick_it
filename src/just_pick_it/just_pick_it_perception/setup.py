@@ -50,6 +50,7 @@ setup(
             'apriltag_detector_real = just_pick_it_perception.apriltag_detector_real:main',
             'yolo_seg_trainer = just_pick_it_perception.yolo_seg_trainer:main',
             'yolo_seg_infer = just_pick_it_perception.yolo_seg_infer_node:main',
+            'ibvs_controller = just_pick_it_perception.ibvs_controller_node:main',
         ],
     },
 )

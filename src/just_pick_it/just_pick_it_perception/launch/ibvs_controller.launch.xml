@@ -1,0 +1,82 @@
+<launch>
+  <!-- Robot / namespace -->
+  <arg name="robot_name" default="jetcobot1"/>
+
+  <!-- Detection -->
+  <arg name="detection_topic"       default="/infer/tracked_objects"/>
+  <arg name="target_class_label"    default="watermelon"/>
+  <arg name="center_source"         default="bbox"/>
+  <arg name="detection_timeout_sec" default="2.0"/>
+  <arg name="min_confidence"        default="0.5"/>
+
+  <!-- Image size: 실제 inference 좌표계에 맞춰야 함 -->
+  <arg name="image_width"  default="640.0"/>
+  <arg name="image_height" default="480.0"/>
+
+  <!-- IBVS control -->
+  <arg name="lambda_gain"         default="0.8"/>
+  <arg name="damping"             default="0.04"/>
+  <arg name="max_delta_deg"       default="0.5"/>
+  <arg name="control_rate_hz"     default="10.0"/>
+  <arg name="jacobian_delta_deg"  default="2.0"/>
+  <arg name="jacobian_settle_sec" default="1.2"/>
+  <arg name="stop_error"          default="0.01"/>
+  <arg name="max_steps"           default="150"/>
+
+  <!-- Motion speed -->
+  <arg name="pregrasp_speed" default="15"/>
+  <arg name="ibvs_speed"     default="10"/>
+
+  <!-- Optional -->
+  <arg name="lock_track_id"     default="true"/>
+  <arg name="use_status_for_q0" default="true"/>
+  <arg name="status_timeout_sec" default="1.0"/>
+  <arg name="pregrasp_wait_sec"  default="3.0"/>
+  <arg name="use_sim_time"       default="false"/>
+
+  <!-- Pregrasp pose -->
+  <arg
+    name="pregrasp_angles"
+    default="[82.8, 56.5, -19.3, -93.6, 24.9, -121.4]"
+  />
+
+  <node pkg="just_pick_it_perception" exec="ibvs_controller" output="screen">
+    <!-- Robot / namespace -->
+    <param name="robot_name" value="$(var robot_name)"/>
+
+    <!-- Detection -->
+    <param name="detection_topic"       value="$(var detection_topic)"/>
+    <param name="target_class_label"    value="$(var target_class_label)"/>
+    <param name="center_source"         value="$(var center_source)"/>
+    <param name="detection_timeout_sec" value="$(var detection_timeout_sec)"/>
+    <param name="min_confidence"        value="$(var min_confidence)"/>
+
+    <!-- Image size -->
+    <param name="image_width"  value="$(var image_width)"/>
+    <param name="image_height" value="$(var image_height)"/>
+
+    <!-- IBVS control -->
+    <param name="lambda_gain"         value="$(var lambda_gain)"/>
+    <param name="damping"             value="$(var damping)"/>
+    <param name="max_delta_deg"       value="$(var max_delta_deg)"/>
+    <param name="control_rate_hz"     value="$(var control_rate_hz)"/>
+    <param name="jacobian_delta_deg"  value="$(var jacobian_delta_deg)"/>
+    <param name="jacobian_settle_sec" value="$(var jacobian_settle_sec)"/>
+    <param name="stop_error"          value="$(var stop_error)"/>
+    <param name="max_steps"           value="$(var max_steps)"/>
+
+    <!-- Motion speed -->
+    <param name="pregrasp_speed" value="$(var pregrasp_speed)"/>
+    <param name="ibvs_speed"     value="$(var ibvs_speed)"/>
+
+    <!-- Optional -->
+    <param name="lock_track_id"      value="$(var lock_track_id)"/>
+    <param name="use_status_for_q0"  value="$(var use_status_for_q0)"/>
+    <param name="status_timeout_sec" value="$(var status_timeout_sec)"/>
+    <param name="pregrasp_wait_sec"  value="$(var pregrasp_wait_sec)"/>
+    <param name="use_sim_time"       value="$(var use_sim_time)"/>
+
+    <!-- Pregrasp pose -->
+    <param name="pregrasp_angles" value="$(var pregrasp_angles)"/>
+  </node>
+</launch>
