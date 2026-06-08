@@ -38,7 +38,12 @@ amcl:
     z_short: 0.05
     scan_topic: scan
     set_initial_pose: true
-    initial_pose: [0, 0, 0]
+    # PICKY2 시작 도크 = CHARGING_DOCK_2 (절대좌표, map=절대 프레임). 헤드는 +y(위) 방향.
+    initial_pose:
+      x: 0.28
+      y: 0.07
+      z: 0.0
+      yaw: 1.5708
 
 bt_navigator:
   ros__parameters:
