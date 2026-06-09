@@ -7,6 +7,8 @@ LLM이 이를 구조화된 명령으로 바꿔 Fleet Manager에게 전달한다"
 참고하기 위한 정리본이다.
 아직 코드는 수정하지 않았고, **무엇을 어디에 어떻게 구현해야 하는지**만 정리했다.
 
+> **구현 범위:** Order Task(주문)만 구현한다. Display Task(진열)는 구현 대상에서 제외한다.
+
 ---
 
 ## 1. 배경 — Order Task에서 LLM의 역할
@@ -115,7 +117,8 @@ LLM이 이를 구조화된 명령으로 바꿔 Fleet Manager에게 전달한다"
 즉 이 함수의 시그니처(`message: str, context: dict | None`)와 호출부(`llm_router.py`)는
 그대로 두고, 내부 구현 + 반환 스키마만 실제 동작에 맞게 바꾸면 된다.
 stub의 단수 필드(`display_policy`, `display_item_id` 등)는 5절에서 `items` 리스트로
-교체할 때 함께 제거한다.
+교체할 때 함께 제거한다. Display Task 관련 필드(`display_policy`, `display_item_id`)는
+구현 대상이 아니므로 제거해도 무방하다.
 
 ### 6종 상품 카탈로그 (`db/seed.sql:42-49` 기준)
 
@@ -194,8 +197,11 @@ stub의 단수 필드(`display_policy`, `display_item_id` 등)는 5절에서 `it
 `llm_client.py`에서 `items` 리스트를 올바른 스키마로 반환하면 router와 Fleet API가
 그대로 처리한다. 스키마 확인이 필요하면 아래 파일을 참고한다.
 
-- `web/app/routers/llm_router.py` — `items` 순회 및 Fleet API 호출 로직
+- `web/app/routers/llm_router.py` — ORDER 액션 분기 및 `items` 순회 후 Fleet API 호출 로직 (API 담당자 구현 예정)
 - `src/.../fleet_manager/fleet_manager/fleet_api_schemas.py` — `OrderCreateIn` 스키마
+
+> **참고:** `llm_router.py`에 기존 DISPLAY 분기(`_create_display_item`)가 있으나
+> Display Task는 구현 대상이 아니므로 건드리지 않는다. ORDER 분기만 추가하면 된다.
 
 ---
 
