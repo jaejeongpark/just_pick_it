@@ -1,13 +1,23 @@
 #!/usr/bin/env python3
 """
-Reverse Docking - ArUco 시각 서보 후진 도킹
+Reverse Docking - 마커 깊이 + 노란 주차라인 정밀 정렬 후진 도킹
 
-4단계:
-  0단계: 마커 탐색 및 rvec[1] 기반 yaw 정렬
-  1단계: tvec[0] 기반 횡방향 pre-alignment (전진 아크)
-  2단계: tvec + rvec PID 후진 (부호 반전), tvec[2] <= dock_switch_distance 시 종료
-  3단계: 노란 주차라인 중심 추종 후진 + 파란 정지선 감지 시 정지
+설계 (좁은 도크 정밀 도킹용):
+  역할 분담
+    - ArUco 마커(상시 가시): 깊이(정지 시점) + 시작 coarse 정렬 + 도킹 후 /initialpose 보정
+    - 노란 주차라인:        lateral + yaw 정밀 정렬. 두 라인의 대칭선(채널 중심)을
+                            이미지 중심·수직(법선)으로 PID. 후진할수록 더 잘 보인다.
+    - 라인 검출 신뢰도(conf)로 "마커 coarse → 라인 정밀" 블렌딩.
+      시작(라인 일부만 보임)=마커 위주, 삽입(라인 충분)=라인 위주. ω 는 항상 한 값으로
+      합쳐 매끄럽게 움직인다(lateral+yaw 합산).
+    - 정지: 마커까지 거리로 추정한 로봇 world y 가 dock_y 에 도달하면.
 
+  좌표/부호 전제 (실차 브링업에서 검증·튜닝 대상):
+    - 로봇은 헤드(+x_body, 전방 카메라)가 +y_world(마커 쪽)를 보며 -y 로 후진해 도크에 들어간다.
+    - solvePnP tvec: 카메라(optical) 기준. tvec[0]>0 = 마커가 우측, tvec[2] = 카메라→마커 거리.
+    - 후진 시 조향 부호는 전진과 반대(마커가 우측이면 좌회전).
+
+마커 월드 좌표는 state_manager 가 아니라 이 노드 설정(marker_id 별)에 둔다.
 reverse_dock(marker_id, dock_map_x, dock_map_y, dock_map_yaw) 를 state_manager 가 호출.
 """
 
@@ -49,95 +59,120 @@ class PID:
         return out
 
 
+class LaneResult:
+    """노란 주차라인 검출 결과.
+
+    lateral_px : 채널 중심선의 이미지 중심 대비 수평 오프셋(px). +면 중심이 우측.
+    yaw_rad    : 채널 중심선의 수직 대비 기울기(rad). +면 위로 갈수록 우측으로 기욺.
+    conf       : 검출 신뢰도 0..1 (양쪽 라인 존재 + 픽셀 수 기반).
+    """
+    __slots__ = ("lateral_px", "yaw_rad", "conf")
+
+    def __init__(self, lateral_px: float, yaw_rad: float, conf: float):
+        self.lateral_px = lateral_px
+        self.yaw_rad = yaw_rad
+        self.conf = conf
+
+
 class ReverseDocking(Node):
     def __init__(self, emergency_latch=None):
         super().__init__("reverse_docking")
 
         # 비상 정지 래치. state_manager 가 공유 인스턴스를 주입한다.
-        # 단독 실행(__main__)이면 자체 생성한다.
         if emergency_latch is None:
             from pinky_amr_1.emergency_latch import EmergencyLatch
             emergency_latch = EmergencyLatch()
         self._emergency = emergency_latch
 
-        # ArUco
-        self.declare_parameter("aruco_marker_dict", 0)
+        # ── ArUco ────────────────────────────────────────────────────────
+        self.declare_parameter("aruco_marker_dict", 0)        # DICT_4X4_50
         self.declare_parameter("marker_size_m", 0.10)
 
-        # 카메라 (비전 담당 캘리브레이션 후 채워줌, wide lens 1080p placeholder)
+        # 마커 월드 좌표 (marker_id 별 병렬 배열). 가로벽에 도크를 바라보게 부착.
+        # 법선은 -y(원점 쪽) 고정이라 yaw 따로 안 받는다.
+        self.declare_parameter("marker_ids", [0, 1])
+        self.declare_parameter("marker_world_x", [0.07, 0.28])
+        self.declare_parameter("marker_world_y", [0.655, 0.655])
+
+        # ── 카메라 (비전팀 캘리브레이션 실측값, 1280x720) ────────────────
         self.declare_parameter("camera_matrix", [
             777.0, 0.0, 960.0,
             0.0, 777.0, 540.0,
             0.0, 0.0, 1.0,
         ])
         self.declare_parameter("dist_coeffs", [0.0, 0.0, 0.0, 0.0, 0.0])
+        # base_link(중심) 에서 카메라가 전방(+x_body=+y_world)으로 떨어진 거리(m).
+        # 마커 거리로 로봇 base 의 world y 를 추정할 때 보정에 쓴다(URDF 기준 근사).
+        self.declare_parameter("camera_forward_offset_m", 0.05)
 
-        # 거리 임계값
-        self.declare_parameter("dock_switch_distance", 0.20)   # Phase 2→3 전환 (m)
+        # ── 시작 coarse 정렬 (마커 상대) ────────────────────────────────
+        self.declare_parameter("acquire_rotate_speed", 0.3)   # 마커 탐색 회전(rad/s)
+        self.declare_parameter("marker_lat_kp", 1.0)          # tvec[0] coarse 횡 게인
+        self.declare_parameter("marker_yaw_kp", 0.8)          # rvec[1] coarse yaw 게인
 
-        # Phase 0: yaw 정렬
-        self.declare_parameter("rotate_kp", 1.5)
-        self.declare_parameter("rotate_ki", 0.0)
-        self.declare_parameter("rotate_kd", 0.1)
-        self.declare_parameter("rotate_thresh_rad", 0.05)
+        # ── 정밀 정렬 (노란 라인) ───────────────────────────────────────
+        self.declare_parameter("lane_lat_kp", 0.004)          # lateral_px 게인
+        self.declare_parameter("lane_yaw_kp", 0.8)            # yaw_rad 게인
+        self.declare_parameter("lane_yellow_lower", [20, 100, 100])  # HSV
+        self.declare_parameter("lane_yellow_upper", [35, 255, 255])
+        self.declare_parameter("lane_min_pixels", 150)        # 한쪽 라인 최소 픽셀(conf 0)
+        self.declare_parameter("lane_full_pixels", 1200)      # 이 이상이면 conf 1
 
-        # Phase 1: 횡방향 pre-alignment
-        self.declare_parameter("prealign_kp", 1.2)
-        self.declare_parameter("prealign_thresh_m", 0.03)
+        # ── 후진/정지 ───────────────────────────────────────────────────
+        self.declare_parameter("reverse_speed", 0.04)         # 후진 속도(m/s)
+        self.declare_parameter("stop_y_tolerance_m", 0.01)    # dock_y 도달 허용오차
+        self.declare_parameter("settle_sec", 0.5)             # 정지 후 안정화 대기
 
-        # Phase 2: ArUco 후진
-        self.declare_parameter("lat_kp", 1.0)
-        self.declare_parameter("lat_ki", 0.0)
-        self.declare_parameter("lat_kd", 0.05)
-        self.declare_parameter("yaw_kp", 0.8)
-        self.declare_parameter("yaw_ki", 0.0)
-        self.declare_parameter("yaw_kd", 0.05)
-        self.declare_parameter("reverse_speed", 0.05)
-
-        # Phase 3: 주차라인 + 정지선
-        self.declare_parameter("lane_kp", 0.003)
-        self.declare_parameter("final_speed", 0.03)
-
-        # 파란 정지선 (HSV)
-        self.declare_parameter("tape_hsv_lower", [100, 100, 50])
-        self.declare_parameter("tape_hsv_upper", [130, 255, 255])
-        self.declare_parameter("tape_coverage_thresh", 0.5)
-
-        # 공통
+        # ── 공통 ────────────────────────────────────────────────────────
         self.declare_parameter("max_angular_vel", 0.4)
-        self.declare_parameter("aruco_timeout_sec", 30.0)
+        self.declare_parameter("acquire_timeout_sec", 30.0)
+        self.declare_parameter("insert_timeout_sec", 40.0)
         self.declare_parameter("camera_topic", "camera/image_raw")
 
-        # 파라미터 로드
+        # ── 파라미터 로드 ───────────────────────────────────────────────
         dict_id = self.get_parameter("aruco_marker_dict").value
         self._marker_size = self.get_parameter("marker_size_m").value
+
+        ids = list(self.get_parameter("marker_ids").value)
+        mwx = list(self.get_parameter("marker_world_x").value)
+        mwy = list(self.get_parameter("marker_world_y").value)
+        # marker_id -> (world_x, world_y)
+        self._marker_world = {int(i): (float(x), float(y))
+                              for i, x, y in zip(ids, mwx, mwy)}
 
         cam = self.get_parameter("camera_matrix").value
         self._cam_matrix = np.array(cam, dtype=np.float64).reshape(3, 3)
         self._dist_coeffs = np.array(
             self.get_parameter("dist_coeffs").value, dtype=np.float64
         )
+        self._cam_fwd = self.get_parameter("camera_forward_offset_m").value
 
-        self._switch_dist     = self.get_parameter("dock_switch_distance").value
-        self._rotate_thresh   = self.get_parameter("rotate_thresh_rad").value
-        self._prealign_kp     = self.get_parameter("prealign_kp").value
-        self._prealign_thresh = self.get_parameter("prealign_thresh_m").value
-        self._reverse_speed   = self.get_parameter("reverse_speed").value
-        self._lane_kp         = self.get_parameter("lane_kp").value
-        self._final_speed     = self.get_parameter("final_speed").value
-        self._tape_lower      = tuple(int(v) for v in self.get_parameter("tape_hsv_lower").value)
-        self._tape_upper      = tuple(int(v) for v in self.get_parameter("tape_hsv_upper").value)
-        self._tape_thresh     = self.get_parameter("tape_coverage_thresh").value
-        self._max_ang         = self.get_parameter("max_angular_vel").value
-        self._timeout         = self.get_parameter("aruco_timeout_sec").value
+        self._acquire_rot   = self.get_parameter("acquire_rotate_speed").value
+        self._marker_lat_kp = self.get_parameter("marker_lat_kp").value
+        self._marker_yaw_kp = self.get_parameter("marker_yaw_kp").value
 
-        # ArUco 검출기
+        self._lane_lat_kp = self.get_parameter("lane_lat_kp").value
+        self._lane_yaw_kp = self.get_parameter("lane_yaw_kp").value
+        self._yellow_lo = tuple(int(v) for v in self.get_parameter("lane_yellow_lower").value)
+        self._yellow_hi = tuple(int(v) for v in self.get_parameter("lane_yellow_upper").value)
+        self._lane_min_px  = int(self.get_parameter("lane_min_pixels").value)
+        self._lane_full_px = int(self.get_parameter("lane_full_pixels").value)
+
+        self._reverse_speed = self.get_parameter("reverse_speed").value
+        self._stop_tol      = self.get_parameter("stop_y_tolerance_m").value
+        self._settle        = self.get_parameter("settle_sec").value
+
+        self._max_ang        = self.get_parameter("max_angular_vel").value
+        self._acquire_to     = self.get_parameter("acquire_timeout_sec").value
+        self._insert_to      = self.get_parameter("insert_timeout_sec").value
+
+        # ── ArUco 검출기 / solvePnP 기준점 ──────────────────────────────
         aruco_dict   = cv2.aruco.getPredefinedDictionary(dict_id)
         aruco_params = cv2.aruco.DetectorParameters()
         self._detector = cv2.aruco.ArucoDetector(aruco_dict, aruco_params)
 
-        # solvePnP 용 마커 3D 기준점 (마커 중심 원점, XY 평면)
         h = self._marker_size / 2.0
+        # IPPE_SQUARE 규약 순서(좌상,우상,우하,좌하)에 맞춘 마커 평면 3D 점.
         self._marker_obj_pts = np.array([
             [-h,  h, 0.0],
             [ h,  h, 0.0],
@@ -145,24 +180,11 @@ class ReverseDocking(Node):
             [-h, -h, 0.0],
         ], dtype=np.float64)
 
-        # PID
-        self._rotate_pid = PID(
-            self.get_parameter("rotate_kp").value,
-            self.get_parameter("rotate_ki").value,
-            self.get_parameter("rotate_kd").value,
-        )
-        self._lat_pid = PID(
-            self.get_parameter("lat_kp").value,
-            self.get_parameter("lat_ki").value,
-            self.get_parameter("lat_kd").value,
-        )
-        self._yaw_pid = PID(
-            self.get_parameter("yaw_kp").value,
-            self.get_parameter("yaw_ki").value,
-            self.get_parameter("yaw_kd").value,
-        )
+        # ── PID (정밀 정렬용 라인 lateral/yaw) ──────────────────────────
+        self._lane_lat_pid = PID(self._lane_lat_kp, 0.0, 0.0005)
+        self._lane_yaw_pid = PID(self._lane_yaw_kp, 0.0, 0.05)
 
-        # 카메라
+        # ── 카메라/퍼블리셔 ─────────────────────────────────────────────
         self._bridge = CvBridge()
         self._lock = threading.Lock()
         self._latest_frame = None
@@ -170,18 +192,16 @@ class ReverseDocking(Node):
         cam_topic = self.get_parameter("camera_topic").value
         self.create_subscription(Image, cam_topic, self._image_cb, 10)
 
-        # 퍼블리셔. 노드 namespace 가 'picky1' 이면 자동으로 /picky1/cmd_vel,
-        # /picky1/initialpose 가 된다 (AMCL 도 같은 namespace 안에서 띄운다는 가정).
         self._cmd_pub = self.create_publisher(Twist, "cmd_vel", 10)
         self._init_pose_pub = self.create_publisher(
             PoseWithCovarianceStamped, "initialpose", 10
         )
 
-        self.get_logger().info("ReverseDocking ready.")
+        self.get_logger().info("ReverseDocking ready (marker-depth + yellow-lane).")
 
-    # ------------------------------------------------------------------ #
+    # ====================================================================== #
     # 외부 인터페이스
-    # ------------------------------------------------------------------ #
+    # ====================================================================== #
 
     def reverse_dock(
         self,
@@ -190,41 +210,51 @@ class ReverseDocking(Node):
         dock_map_y: float,
         dock_map_yaw: float,
     ) -> bool:
-        """ArUco 기반 4단계 후진 도킹. 성공 시 True."""
+        """마커 깊이 + 노란 라인 정밀 정렬 후진 도킹. 성공 시 True."""
+        if marker_id not in self._marker_world:
+            self.get_logger().error(
+                f"reverse_dock: marker_id={marker_id} 월드좌표 설정 없음"
+            )
+            return False
+        marker_x, marker_y = self._marker_world[marker_id]
+
         self.get_logger().info(
-            f"reverse_dock: marker={marker_id}, "
-            f"target=({dock_map_x:.3f}, {dock_map_y:.3f}, "
+            f"reverse_dock: marker={marker_id}@world({marker_x:.3f},{marker_y:.3f}), "
+            f"dock=({dock_map_x:.3f},{dock_map_y:.3f},"
             f"{math.degrees(dock_map_yaw):.1f}deg)"
         )
-        self._rotate_pid.reset()
-        self._lat_pid.reset()
-        self._yaw_pid.reset()
+        self._lane_lat_pid.reset()
+        self._lane_yaw_pid.reset()
 
-        phases = [
-            ("Phase 0", lambda: self._phase0_rotate_to_marker(marker_id)),
-            ("Phase 1", lambda: self._phase1_lateral_prealign(marker_id)),
-            ("Phase 2", lambda: self._phase2_aruco_reverse(marker_id)),
-            ("Phase 3", self._phase3_final_approach),
-        ]
-        for name, fn in phases:
-            if not fn():
-                self._stop()
-                self.get_logger().error(f"reverse_dock: FAILED at {name}")
-                return False
+        # 1) 마커 획득 (보일 때까지 탐색 회전)
+        if not self._acquire_marker(marker_id):
+            self._stop()
+            self.get_logger().error("reverse_dock: FAILED — 마커 미획득")
+            return False
 
+        # 2) 후진 삽입 (라인 정밀 정렬 블렌딩, 마커 깊이로 정지)
+        #    마커가 도크 바로 위가 아닐 수 있어(예: dock1 마커x 0.07 vs 도크x 0.11),
+        #    coarse 단계의 횡 목표는 (marker_x - dock_x) 만큼 오프셋을 준다.
+        lat_offset = marker_x - dock_map_x
+        if not self._reverse_insert(marker_id, marker_y, dock_map_y, lat_offset):
+            self._stop()
+            self.get_logger().error("reverse_dock: FAILED — 삽입 단계")
+            return False
+
+        # 3) 정지 + 안정화 + 위치 보정
         self._stop()
+        time.sleep(self._settle)
         self.get_logger().info("reverse_dock: SUCCESS")
         self._publish_pose_correction(dock_map_x, dock_map_y, dock_map_yaw)
         return True
 
-    # ------------------------------------------------------------------ #
-    # 0단계: 마커 탐색 + yaw 정렬
-    # ------------------------------------------------------------------ #
+    # ====================================================================== #
+    # 단계 A: 마커 획득
+    # ====================================================================== #
 
-    def _phase0_rotate_to_marker(self, marker_id: int) -> bool:
-        """마커 미검출 시 탐색 회전, 검출 후 rvec[1] 기반 yaw 정렬."""
-        deadline = time.time() + self._timeout
-
+    def _acquire_marker(self, marker_id: int) -> bool:
+        """마커가 검출될 때까지 제자리 탐색 회전. 검출되면 True."""
+        deadline = time.time() + self._acquire_to
         while time.time() < deadline:
             if self._emergency.is_stopped():
                 self._stop()
@@ -236,43 +266,41 @@ class ReverseDocking(Node):
                 time.sleep(0.05)
                 continue
 
-            result = self._detect_aruco(frame, marker_id)
-
-            if result is None:
-                twist = Twist()
-                twist.angular.z = 0.3
-                self._cmd_pub.publish(twist)
-                time.sleep(0.05)
-                continue
-
-            _, rvec = result
-            yaw_err = float(rvec[1])
-
-            if abs(yaw_err) <= self._rotate_thresh:
+            if self._detect_aruco(frame, marker_id) is not None:
                 self._stop()
-                self.get_logger().info(f"Phase 0: done — rvec[1]={yaw_err:.3f} rad")
+                self.get_logger().info("Acquire: 마커 검출")
                 return True
 
             twist = Twist()
-            twist.angular.z = self._clamp(self._rotate_pid.compute(-yaw_err))
+            twist.angular.z = self._acquire_rot
             self._cmd_pub.publish(twist)
             time.sleep(0.05)
 
         self._stop()
-        self.get_logger().warn("Phase 0: timeout")
+        self.get_logger().warn("Acquire: timeout")
         return False
 
-    # ------------------------------------------------------------------ #
-    # 1단계: 횡방향 pre-alignment
-    # ------------------------------------------------------------------ #
+    # ====================================================================== #
+    # 단계 C: 후진 삽입 (라인 정밀 + 마커 깊이)
+    # ====================================================================== #
 
-    def _phase1_lateral_prealign(self, marker_id: int) -> bool:
-        """tvec[0] 허용 범위 이내가 될 때까지 아크로 횡방향 보정.
+    def _reverse_insert(
+        self,
+        marker_id: int,
+        marker_world_y: float,
+        dock_y: float,
+        lat_offset: float,
+    ) -> bool:
+        """노란 라인으로 lateral+yaw 정밀 정렬하며 후진. 마커 깊이가 dock_y 도달 시 정지.
 
-        기본은 후진 아크. tvec[2] <= dock_switch_distance 에 도달하면
-        전진 아크로 전환하여 벽 충돌 없이 보정을 완료한다.
+        ω = conf·(라인 PID) + (1-conf)·(마커 coarse 정렬)
+          - conf 0(라인 부족, 시작): 마커 tvec[0]/rvec[1] coarse
+          - conf 1(라인 충분, 삽입): 라인 대칭선 lateral+yaw 정밀
+        v = -reverse_speed (느린 후진)
+        정지: 로봇 world y(= marker_y - 마커거리 - 카메라 전방오프셋) <= dock_y
         """
-        deadline = time.time() + 10.0
+        deadline = time.time() + self._insert_to
+        lost = 0
 
         while time.time() < deadline:
             if self._emergency.is_stopped():
@@ -285,136 +313,74 @@ class ReverseDocking(Node):
                 time.sleep(0.05)
                 continue
 
-            result = self._detect_aruco(frame, marker_id)
-            if result is None:
-                time.sleep(0.05)
-                continue
-
-            tvec, _ = result
-            lat_err = float(tvec[0])
-            dist    = float(tvec[2])
-
-            if abs(lat_err) <= self._prealign_thresh:
-                self._stop()
-                self.get_logger().info(f"Phase 1: done — tvec[0]={lat_err:.3f} m")
-                return True
-
-            if dist <= self._switch_dist:
-                # 너무 가까워졌으면 전진 아크로 전환 (벽 충돌 방지)
-                lin = 0.04
-                ang = self._clamp(self._prealign_kp * lat_err)
-            else:
-                # 기본: 후진 아크 (부호 반전)
-                lin = -0.04
-                ang = self._clamp(-self._prealign_kp * lat_err)
-
-            twist = Twist()
-            twist.linear.x  = lin
-            twist.angular.z = ang
-            self._cmd_pub.publish(twist)
-            time.sleep(0.05)
-
-        self._stop()
-        self.get_logger().warn("Phase 1: timeout")
-        return False
-
-    # ------------------------------------------------------------------ #
-    # 2단계: ArUco 기반 후진
-    # ------------------------------------------------------------------ #
-
-    def _phase2_aruco_reverse(self, marker_id: int) -> bool:
-        """tvec[0] + rvec[1] PID 후진. tvec[2] <= dock_switch_distance 시 종료."""
-        deadline = time.time() + 30.0
-
-        while time.time() < deadline:
-            if self._emergency.is_stopped():
-                self._stop()
-                deadline += self._wait_if_paused()
-                continue
-
-            frame = self._get_latest_frame()
-            if frame is None:
-                time.sleep(0.05)
-                continue
-
-            result = self._detect_aruco(frame, marker_id)
-
-            if result is None:
-                # 검출 실패: 각도 보정 없이 저속 직진 후진
+            marker = self._detect_aruco(frame, marker_id)
+            if marker is None:
+                # 마커는 상시 가시 전제. 잠깐 놓치면 저속 직진 후진 유지, 길면 실패.
+                lost += 1
+                if lost > 40:   # 약 2s
+                    self._stop()
+                    self.get_logger().warn("Insert: 마커 장기 미검출")
+                    return False
                 twist = Twist()
                 twist.linear.x = -self._reverse_speed * 0.5
                 self._cmd_pub.publish(twist)
                 time.sleep(0.05)
                 continue
+            lost = 0
 
-            tvec, rvec = result
-            dist = float(tvec[2])
+            tvec, rvec = marker
+            marker_dist = float(tvec[2])
 
-            if dist <= self._switch_dist:
+            # 깊이 기반 정지: 로봇 base 의 world y 추정
+            robot_y = marker_world_y - marker_dist - self._cam_fwd
+            if robot_y <= dock_y + self._stop_tol:
                 self._stop()
-                self.get_logger().info(f"Phase 2: done — dist={dist:.3f} m")
+                self.get_logger().info(
+                    f"Insert: 정지 — robot_y≈{robot_y:.3f} <= dock_y {dock_y:.3f}"
+                )
                 return True
 
-            # 후진 시 부호 반전: 마커가 우측(tvec[0] > 0)이면 좌회전(-angular.z)
-            ang_cmd = self._clamp(
-                -(self._lat_pid.compute(float(tvec[0]))
-                  + self._yaw_pid.compute(float(rvec[1])))
-            )
-            speed = min(self._reverse_speed, dist * 0.15 + 0.02)
+            # ── 정렬 ω 계산 (라인 신뢰도로 블렌딩) ──────────────────────
+            lane = self._detect_lane(frame)
+            marker_omega = self._marker_coarse_omega(tvec, rvec, lat_offset)
+
+            if lane is not None and lane.conf > 0.0:
+                lane_omega = -(self._lane_lat_pid.compute(lane.lateral_px)
+                               + self._lane_yaw_pid.compute(lane.yaw_rad))
+                w = lane.conf
+                omega = w * lane_omega + (1.0 - w) * marker_omega
+            else:
+                omega = marker_omega
 
             twist = Twist()
-            twist.linear.x = -speed
-            twist.angular.z = ang_cmd
+            twist.linear.x = -self._reverse_speed
+            twist.angular.z = self._clamp(omega)
             self._cmd_pub.publish(twist)
             time.sleep(0.05)
 
         self._stop()
-        self.get_logger().warn("Phase 2: timeout")
+        self.get_logger().warn("Insert: timeout")
         return False
 
-    # ------------------------------------------------------------------ #
-    # 3단계: 주차라인 기반 최종 접근
-    # ------------------------------------------------------------------ #
+    def _marker_coarse_omega(self, tvec, rvec, lat_offset: float) -> float:
+        """마커 상대 coarse 정렬 ω. 라인이 안 보이는 시작 구간용.
 
-    def _phase3_final_approach(self) -> bool:
-        """노란 주차라인 중심 추종 후진 + 파란 정지선 감지 시 정지."""
-        deadline = time.time() + 15.0
+        후진 부호 반전: 마커가 (목표보다) 우측이면 좌회전.
+        횡 목표는 lat_offset(= marker_x - dock_x)/거리 만큼 카메라 횡으로 둔다.
+        """
+        dist = max(float(tvec[2]), 0.1)
+        # 도크에 맞춰 정렬됐을 때 마커가 카메라 광축에서 떨어져 보여야 하는 횡(rad 근사).
+        target_lat = lat_offset / dist
+        lat_err = float(tvec[0]) / dist - target_lat   # 카메라 기준 횡 오차(rad 근사)
+        yaw_err = float(rvec[1])                        # 마커 평면 yaw
+        return -(self._marker_lat_kp * lat_err + self._marker_yaw_kp * yaw_err)
 
-        while time.time() < deadline:
-            if self._emergency.is_stopped():
-                self._stop()
-                deadline += self._wait_if_paused()
-                continue
-
-            frame = self._get_latest_frame()
-            if frame is None:
-                time.sleep(0.05)
-                continue
-
-            if self._detect_tape(frame):
-                self._stop()
-                self.get_logger().info("Phase 3: stop line detected — docking complete")
-                return True
-
-            lane_err = self._detect_lane_center(frame)
-            ang_cmd = self._clamp(-self._lane_kp * lane_err) if lane_err is not None else 0.0
-
-            twist = Twist()
-            twist.linear.x = -self._final_speed
-            twist.angular.z = ang_cmd
-            self._cmd_pub.publish(twist)
-            time.sleep(0.05)
-
-        self._stop()
-        self.get_logger().warn("Phase 3: timeout")
-        return False
-
-    # ------------------------------------------------------------------ #
+    # ====================================================================== #
     # 검출
-    # ------------------------------------------------------------------ #
+    # ====================================================================== #
 
     def _detect_aruco(self, frame, target_id: int):
-        """solvePnP 기반 ArUco pose 추정. (tvec[3], rvec[3]) 또는 None."""
+        """IPPE_SQUARE solvePnP 기반 ArUco pose. (tvec[3], rvec[3]) 또는 None."""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         corners, ids, _ = self._detector.detectMarkers(gray)
         if ids is None:
@@ -428,43 +394,68 @@ class ReverseDocking(Node):
                 corners[i][0].astype(np.float64),
                 self._cam_matrix,
                 self._dist_coeffs,
+                flags=cv2.SOLVEPNP_IPPE_SQUARE,   # 평면 정사각 마커 ambiguity 처리
             )
             if ok:
                 return tvec.flatten(), rvec.flatten()
 
         return None
 
-    def _detect_lane_center(self, frame) -> float | None:
-        """노란 주차라인 좌/우 중심 평균으로 횡방향 오차(px) 반환."""
-        h, w = frame.shape[:2]
-        roi = frame[h * 2 // 3 :, :]
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        yellow = cv2.inRange(hsv, (20, 100, 100), (35, 255, 255))
+    def _detect_lane(self, frame) -> LaneResult | None:
+        """노란 주차라인 2개 → 채널 대칭선의 (lateral_px, yaw_rad, conf).
 
-        left_pts  = cv2.findNonZero(yellow[:, : w // 2])
-        right_pts = cv2.findNonZero(yellow[:, w // 2 :])
-        if left_pts is None or right_pts is None:
+        하단 ROI 에서 좌/우 절반의 노란 픽셀을 각각 직선 피팅해 두 라인을 얻고,
+        그 중심선(대칭선)의 이미지 중심 대비 수평 오프셋과 수직 대비 기울기를 낸다.
+        """
+        h, w = frame.shape[:2]
+        roi = frame[h // 2:, :]              # 하단 절반(바닥)
+        rh = roi.shape[0]
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        yellow = cv2.inRange(hsv, self._yellow_lo, self._yellow_hi)
+
+        left = self._fit_line(yellow[:, : w // 2], 0)
+        right = self._fit_line(yellow[:, w // 2:], w // 2)
+        if left is None or right is None:
             return None
+        (lx_bottom, l_ang, l_px) = left
+        (rx_bottom, r_ang, r_px) = right
 
-        left_cx  = float(np.mean(left_pts[:, 0, 0]))
-        right_cx = float(np.mean(right_pts[:, 0, 0])) + w // 2
-        return (left_cx + right_cx) / 2.0 - w / 2.0
+        # 대칭선: 두 라인의 평균(중심선). 하단(로봇 가까운 쪽) 기준점 + 평균 각.
+        center_x_bottom = (lx_bottom + rx_bottom) / 2.0
+        center_ang = (l_ang + r_ang) / 2.0
+        lateral_px = center_x_bottom - w / 2.0   # +면 중심이 우측
+        yaw_rad = center_ang                     # 수직 대비 기울기(우측+)
 
-    def _detect_tape(self, frame) -> bool:
-        """파란 정지선이 하단 ROI 가로의 tape_coverage_thresh 이상이면 True."""
-        h, w = frame.shape[:2]
-        roi = frame[h * 2 // 3 :, :]
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, self._tape_lower, self._tape_upper)
-        row_coverage = np.sum(mask > 0, axis=1) / w
-        return bool(np.any(row_coverage > self._tape_thresh))
+        # 신뢰도: 양쪽 라인 픽셀 수가 충분할수록 1 에 가까움.
+        m = min(l_px, r_px)
+        conf = (m - self._lane_min_px) / max(self._lane_full_px - self._lane_min_px, 1)
+        conf = float(max(0.0, min(1.0, conf)))
+        if conf <= 0.0:
+            return None
+        return LaneResult(lateral_px, yaw_rad, conf)
 
-    # ------------------------------------------------------------------ #
+    def _fit_line(self, mask, x_offset: int):
+        """마스크 비영 픽셀을 직선 피팅. (하단 x, 수직대비각rad, 픽셀수) 또는 None."""
+        pts = cv2.findNonZero(mask)
+        if pts is None or len(pts) < self._lane_min_px:
+            return None
+        pts = pts.reshape(-1, 2).astype(np.float32)
+        vx, vy, x0, y0 = cv2.fitLine(pts, cv2.DIST_L2, 0, 0.01, 0.01).flatten()
+        if abs(vy) < 1e-6:
+            return None
+        rh = mask.shape[0]
+        # 하단 행(y=rh-1)에서의 x (로봇에 가장 가까운 지점)
+        x_bottom = x0 + (rh - 1 - y0) * (vx / vy) + x_offset
+        # 수직(이미지 아래방향) 대비 기울기. vx/vy 가 0이면 완전 수직.
+        ang = math.atan2(vx, abs(vy))   # +면 위로 갈수록 우측
+        return float(x_bottom), float(ang), int(len(pts))
+
+    # ====================================================================== #
     # 위치 보정
-    # ------------------------------------------------------------------ #
+    # ====================================================================== #
 
     def _publish_pose_correction(self, x: float, y: float, yaw: float):
-        """알려진 dock 절대 좌표를 /initialpose 로 발행해 AMCL 재초기화."""
+        """도크 절대 좌표를 /initialpose 로 발행해 AMCL 재초기화."""
         msg = PoseWithCovarianceStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = "map"
@@ -481,9 +472,9 @@ class ReverseDocking(Node):
             f"Pose correction: ({x:.3f}, {y:.3f}, {math.degrees(yaw):.1f}deg)"
         )
 
-    # ------------------------------------------------------------------ #
+    # ====================================================================== #
     # 유틸
-    # ------------------------------------------------------------------ #
+    # ====================================================================== #
 
     def _clamp(self, val: float) -> float:
         return max(min(val, self._max_ang), -self._max_ang)
@@ -504,15 +495,13 @@ class ReverseDocking(Node):
         self._cmd_pub.publish(Twist())
 
     def _wait_if_paused(self) -> float:
-        """비상 정지 중이면 재개될 때까지 제자리에서 대기한다(pause-continue).
+        """비상 정지 중이면 재개될 때까지 제자리에서 대기(pause-continue).
 
         대기 동안 0 속도 명령을 재발행해 도킹 중 로봇을 확실히 멈춰둔다.
-        반환값은 대기 시간(초)으로, 각 phase 의 deadline 을 그만큼 미뤄
-        비상 정지 시간이 phase timeout 을 잡아먹지 않게 한다.
+        반환값은 대기 시간(초)으로 호출부 deadline 을 그만큼 미룬다.
         """
         if not self._emergency.is_stopped():
             return 0.0
-
         start = time.time()
         self.get_logger().warn(
             f"[비상정지] 도킹 일시정지 — reason={self._emergency.reason}"
