@@ -78,22 +78,22 @@ PATCH  /api/fleet/pickup-slots/{slot_id}
 이 API들은 외부 디버깅/관리용으로 열려 있지만, 일반 운영 흐름에서는 `TaskManager`와
 `FleetRepository`가 프로세스 내부에서 직접 상태를 갱신한다.
 
-## LLM 진열 명령
+## 고객 음성 주문 메시지
 
 ```http
-POST /api/admin/llm/messages
+POST /api/customer/llm/messages
 ```
 
 요청:
 
 ```json
 {
-  "message": "생수 3개 진열"
+  "message": "생수 두 개 주문해줘"
 }
 ```
 
-현재 `llm_client.py`는 stub이다. 담당자가 `action="DISPLAY"` 형태로 파싱하면
-Web Gateway가 Fleet API `POST /api/admin/display-items`를 호출한다.
+`llm_client.py`가 `action="ORDER"`와 `items`를 반환하면 Web Gateway가
+Fleet API `POST /api/orders`를 호출한다.
 
 직접 진열 요청 생성:
 

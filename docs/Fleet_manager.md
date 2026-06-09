@@ -118,7 +118,6 @@ POST /api/orders (Web Gateway 프록시)
 진열 요청(`display_item`)은 창고에서 상품을 꺼내 진열 구역에 채우는 **진열 task** 흐름으로 처리한다. 모든 task는 주문과 무관하므로 `order_id`/`order_item_id` 없이 `display_item_id`로만 연결된다. 창고에서 상품을 선별·적재하는 단계는 주문 흐름의 `SORTING_AND_LOAD`를 재사용한다(`display_item` 기준).
 
 ```text
-POST /api/admin/llm/messages -> (web llm_client 파싱) -> action=DISPLAY 이면
 POST /api/admin/display-items -> create_display_item(): status=REQUESTED
   -> (polling) TaskManager._process_new_display_item()
      MOVE_TO_STOCK(PICKY)                창고 구역 이동

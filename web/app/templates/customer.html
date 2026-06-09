@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Just Pick It Customer</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260609-voice-order">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260609-voice-auto-mic">
   </head>
   <body>
     <header class="topbar">
@@ -37,26 +37,33 @@
                 >대기 중</span
               >
             </div>
-            <form id="voice-order-form" class="voice-order-form">
-              <input
-                id="voice-order-input"
-                type="text"
-                autocomplete="off"
-                placeholder="예: 생수 두 개 주문해줘"
-              >
+            <div id="voice-order-panel" class="voice-order-panel">
               <button
                 id="voice-order-mic-button"
-                class="mic-button"
+                class="mic-button voice-order-mic-button"
                 type="button"
                 aria-label="음성 입력 시작"
               >
                 <span class="mic-icon" aria-hidden="true"></span>
+                <strong>음성 주문</strong>
               </button>
-              <button id="voice-order-submit" class="primary-button" type="submit">
-                주문 요청
-              </button>
-            </form>
-            <p id="voice-order-result" class="voice-order-result">대기 중</p>
+              <div class="voice-order-readout">
+                <span>인식된 주문</span>
+                <strong id="voice-order-transcript">아직 인식된 주문 없음</strong>
+              </div>
+              <div class="voice-order-actions">
+                <button
+                  id="voice-order-retry-button"
+                  class="secondary-button"
+                  type="button"
+                >
+                  다시 말하기
+                </button>
+              </div>
+              <p id="voice-order-result" class="voice-order-result">
+                마이크 버튼을 누르고 주문을 말해주세요
+              </p>
+            </div>
           </section>
 
           <section class="section-band">
@@ -83,6 +90,6 @@
       </section>
     </main>
 
-    <script src="/static/js/customer.js?v=20260609-voice-order"></script>
+    <script src="/static/js/customer.js?v=20260609-voice-auto-mic"></script>
   </body>
 </html>

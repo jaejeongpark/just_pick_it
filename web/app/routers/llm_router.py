@@ -26,64 +26,56 @@ class LlmMessageIn(BaseModel):
 
 
 # =====================================
-# Fleet API helpers
+# Fleet API forwarding
 # =====================================
 
 def _fleet_api_url(path: str) -> str:
     return urljoin(FLEET_API_BASE_URL.rstrip("/") + "/", path.lstrip("/"))
 
 
-async def _create_display_item(parsed: dict) -> dict:
-    product_id = parsed.get("product_id")
-    if product_id is None:
-        return {
-            **parsed,
-            "result": "error",
-            "message": "진열 명령은 파싱됐지만 product_id가 없습니다. LLM parser가 product_id를 반환해야 합니다.",
-        }
+def _fleet_error_message(response: httpx.Response) -> str:
+    try:
+        return response.json().get("detail")
+    except ValueError:
+        return response.text
 
+
+async def _create_order(parsed: dict) -> dict:
     payload = {
-        "product_id": product_id,
-        "requested_quantity": parsed.get("requested_quantity"),
-        "display_policy": parsed.get("display_policy"),
+        "items": [
+            {
+                "product_id": item.get("product_id"),
+                "quantity": item.get("quantity"),
+            }
+            for item in parsed.get("items", [])
+        ]
     }
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(_fleet_api_url("/api/admin/display-items"), json=payload)
+            response = await client.post(_fleet_api_url("/api/orders"), json=payload)
     except httpx.RequestError as exc:
         return {
             **parsed,
             "result": "error",
-            "message": f"Fleet API 진열 요청 생성 실패: {exc}",
+            "message": f"Fleet API 주문 생성 실패: {exc}",
         }
 
     if response.status_code >= 400:
-        try:
-            detail = response.json().get("detail")
-        except ValueError:
-            detail = response.text
         return {
             **parsed,
             "result": "error",
-            "message": f"Fleet API 진열 요청 생성 실패: {detail}",
+            "message": f"Fleet API 주문 생성 실패: {_fleet_error_message(response)}",
         }
 
-    display_item = response.json()
+    order = response.json()
     return {
         **parsed,
         "result": "ok",
-        "message": (
-            f"진열 요청이 생성되었습니다. "
-            f"display_item_id={display_item.get('display_item_id')}, "
-            f"상품={display_item.get('product_name') or parsed.get('product_name') or parsed.get('product_id')}"
-        ),
-        "display_item_id": display_item.get("display_item_id"),
-        "product_id": display_item.get("product_id", parsed.get("product_id")),
-        "product_name": display_item.get("product_name", parsed.get("product_name")),
-        "requested_quantity": display_item.get("requested_quantity", parsed.get("requested_quantity")),
-        "display_policy": display_item.get("display_policy", parsed.get("display_policy")),
-        "display_status": display_item.get("status"),
+        "message": f"주문이 생성되었습니다. order_id={order.get('order_id')}, order_no={order.get('order_no')}",
+        "order": order,
+        "order_id": order.get("order_id"),
+        "order_no": order.get("order_no"),
     }
 
 
@@ -91,24 +83,14 @@ async def _create_display_item(parsed: dict) -> dict:
 # Routes
 # =====================================
 
-@router.post("/api/admin/llm/messages")
-async def create_admin_llm_message(body: LlmMessageIn) -> dict:
-    """관리자 AI 명령을 처리한다.
-
-    LLM parser/client 는 Web Gateway 에 남긴다. 다만 DB 쓰기는 직접 하지 않고,
-    DISPLAY 로 파싱된 경우 Fleet API 에 display_item 생성을 위임한다.
-    """
-    parsed = build_llm_message(body.message, context={"surface": "admin"})
-    if parsed.get("result") == "error":
-        return parsed
-
-    if str(parsed.get("action") or "").upper() == "DISPLAY":
-        return await _create_display_item(parsed)
-
-    return parsed
-
-
 @router.post("/api/customer/llm/messages")
 async def create_customer_llm_message(body: LlmMessageIn) -> dict:
     """고객 음성/텍스트 주문 메시지를 LLM parser/client 로 전달한다."""
-    return build_llm_message(body.message, context={"surface": "customer"})
+    parsed = build_llm_message(body.message, context={"surface": "customer"})
+    if parsed.get("result") == "error":
+        return parsed
+
+    if str(parsed.get("action") or "").upper() == "ORDER":
+        return await _create_order(parsed)
+
+    return parsed

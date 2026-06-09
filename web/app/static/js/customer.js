@@ -5,11 +5,10 @@ const productCount = document.querySelector("#product-count");
 const cartList = document.querySelector("#cart-list");
 const clearCartButton = document.querySelector("#clear-cart-button");
 const orderCountPill = document.querySelector("#order-count-pill");
-const voiceOrderForm = document.querySelector("#voice-order-form");
-const voiceOrderInput = document.querySelector("#voice-order-input");
 const voiceOrderMicButton = document.querySelector("#voice-order-mic-button");
-const voiceOrderSubmit = document.querySelector("#voice-order-submit");
+const voiceOrderRetryButton = document.querySelector("#voice-order-retry-button");
 const voiceOrderStatus = document.querySelector("#voice-order-status");
+const voiceOrderTranscript = document.querySelector("#voice-order-transcript");
 const voiceOrderResult = document.querySelector("#voice-order-result");
 
 let productsById = new Map();
@@ -34,6 +33,9 @@ const orderStatusText = {
   ERROR: "예외 발생",
 };
 
+const voiceOrderDefaultTranscript = "아직 인식된 주문 없음";
+const voiceOrderDefaultResult = "마이크 버튼을 누르고 주문을 말해주세요";
+
 function setVoiceOrderFeedback(state, statusText, resultText) {
   if (voiceOrderStatus) {
     voiceOrderStatus.className = `voice-order-status ${state}`;
@@ -46,16 +48,22 @@ function setVoiceOrderFeedback(state, statusText, resultText) {
 }
 
 function setVoiceOrderControlsDisabled(disabled) {
-  if (voiceOrderSubmit) {
-    voiceOrderSubmit.disabled = disabled;
-  }
-
   if (voiceOrderMicButton && voiceRecognitionSupported) {
     if (disabled) {
       voiceOrderMicButton.disabled = true;
     } else if (!voiceListening) {
       voiceOrderMicButton.disabled = false;
     }
+  }
+
+  if (voiceOrderRetryButton && voiceRecognitionSupported) {
+    voiceOrderRetryButton.disabled = disabled;
+  }
+}
+
+function setVoiceOrderTranscript(message) {
+  if (voiceOrderTranscript) {
+    voiceOrderTranscript.textContent = message || voiceOrderDefaultTranscript;
   }
 }
 
@@ -83,21 +91,55 @@ async function handleVoiceOrderMessage(message) {
   try {
     const response = await sendCustomerLlmMessage(message);
     const isError = response.result === "error";
+    const resultMessage = response.message || "주문 요청이 처리되었습니다.";
+    if (!isError && response.order) {
+      updateOrderStatus(response.order);
+    }
     setVoiceOrderFeedback(
       isError ? "error" : "success",
       isError ? "응답 실패" : "응답 완료",
-      response.message || "주문 요청이 처리되었습니다.",
+      resultMessage,
     );
   } catch (error) {
+    const errorMessage = "음성 주문 요청을 처리하지 못했습니다.";
     setVoiceOrderFeedback(
       "error",
       "응답 실패",
-      "음성 주문 요청을 처리하지 못했습니다.",
+      errorMessage,
     );
   } finally {
     voiceOrderSending = false;
     setVoiceOrderControlsDisabled(false);
-    voiceOrderInput?.focus();
+  }
+}
+
+function startVoiceRecognition() {
+  if (!window.isSecureContext) {
+    setVoiceOrderFeedback(
+      "error",
+      "마이크 차단",
+      "마이크는 localhost 또는 HTTPS 주소에서만 사용할 수 있습니다.",
+    );
+    return;
+  }
+
+  if (!voiceRecognition) {
+    voiceRecognition = createVoiceRecognition();
+  }
+
+  if (!voiceRecognition) {
+    return;
+  }
+
+  if (voiceListening) {
+    voiceRecognition.stop();
+    return;
+  }
+
+  try {
+    voiceRecognition.start();
+  } catch (error) {
+    setVoiceOrderFeedback("error", "인식 실패", "음성 입력을 시작하지 못했습니다.");
   }
 }
 
@@ -109,7 +151,7 @@ function createVoiceRecognition() {
     if (voiceOrderMicButton) {
       voiceOrderMicButton.disabled = true;
     }
-    setVoiceOrderFeedback("error", "음성 미지원", "텍스트로 주문 요청을 입력해주세요.");
+    setVoiceOrderFeedback("error", "음성 미지원", "이 브라우저에서는 음성 주문을 사용할 수 없습니다.");
     return null;
   }
 
@@ -132,14 +174,24 @@ function createVoiceRecognition() {
       return;
     }
 
-    if (voiceOrderInput) {
-      voiceOrderInput.value = transcript;
-    }
+    setVoiceOrderTranscript(transcript);
+    setVoiceOrderFeedback("running", "주문 확인 중", `"${transcript}"`);
     handleVoiceOrderMessage(transcript);
   });
 
-  recognition.addEventListener("error", () => {
-    setVoiceOrderFeedback("error", "인식 실패", "음성을 인식하지 못했습니다.");
+  recognition.addEventListener("error", (event) => {
+    const errorMessages = {
+      "not-allowed": "브라우저의 마이크 권한을 허용해주세요.",
+      "service-not-allowed": "브라우저가 음성 인식 서비스를 허용하지 않았습니다.",
+      "no-speech": "음성이 들리지 않았습니다. 다시 말해주세요.",
+      "audio-capture": "마이크 장치를 찾지 못했습니다.",
+      network: "음성 인식 네트워크 연결에 실패했습니다.",
+    };
+    setVoiceOrderFeedback(
+      "error",
+      "인식 실패",
+      errorMessages[event.error] || "음성을 인식하지 못했습니다.",
+    );
   });
 
   recognition.addEventListener("end", () => {
@@ -639,38 +691,12 @@ orderStatusList?.addEventListener("click", async (event) => {
   }
 });
 
-voiceOrderForm?.addEventListener("submit", (event) => {
-  event.preventDefault();
+voiceOrderMicButton?.addEventListener("click", startVoiceRecognition);
 
-  const message = voiceOrderInput?.value.trim();
-
-  if (!message) {
-    setVoiceOrderFeedback("error", "입력 필요", "주문 내용을 입력해주세요.");
-    return;
-  }
-
-  handleVoiceOrderMessage(message);
-});
-
-voiceOrderMicButton?.addEventListener("click", () => {
-  if (!voiceRecognition) {
-    voiceRecognition = createVoiceRecognition();
-  }
-
-  if (!voiceRecognition) {
-    return;
-  }
-
-  if (voiceListening) {
-    voiceRecognition.stop();
-    return;
-  }
-
-  try {
-    voiceRecognition.start();
-  } catch (error) {
-    setVoiceOrderFeedback("error", "인식 실패", "음성 입력을 시작하지 못했습니다.");
-  }
+voiceOrderRetryButton?.addEventListener("click", () => {
+  setVoiceOrderTranscript("");
+  setVoiceOrderFeedback("idle", "대기 중", voiceOrderDefaultResult);
+  startVoiceRecognition();
 });
 
 loadProducts();

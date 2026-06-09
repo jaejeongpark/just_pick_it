@@ -250,33 +250,9 @@ body {
   box-shadow: 0 10px 24px rgba(31, 41, 51, 0.06);
 }
 
-.voice-order-form {
+.voice-order-panel {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 44px 92px;
-  gap: 8px;
-}
-
-.voice-order-form input {
-  min-width: 0;
-  min-height: 40px;
-  padding: 0 12px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  color: var(--text);
-  font: inherit;
-}
-
-.voice-order-form input:focus {
-  border-color: var(--accent);
-  outline: none;
-  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
-}
-
-.voice-order-form .primary-button {
-  min-width: 0;
-  padding: 0 10px;
-  font-size: 13px;
-  white-space: nowrap;
+  gap: 12px;
 }
 
 .mic-button {
@@ -289,6 +265,22 @@ body {
   cursor: pointer;
   display: inline-grid;
   place-items: center;
+}
+
+.voice-order-mic-button {
+  width: 100%;
+  min-height: 124px;
+  border-color: #c9d8e7;
+  border-radius: 8px;
+  background: #f8fbff;
+  color: var(--accent);
+  gap: 10px;
+}
+
+.voice-order-mic-button strong {
+  color: var(--navy);
+  font-size: 15px;
+  font-weight: 800;
 }
 
 .mic-button:disabled {
@@ -329,6 +321,60 @@ body {
   bottom: -10px;
   width: 14px;
   height: 2px;
+}
+
+.voice-order-mic-button .mic-icon {
+  width: 34px;
+  height: 44px;
+  border-width: 4px;
+  border-radius: 22px;
+}
+
+.voice-order-mic-button .mic-icon::before {
+  bottom: -17px;
+  width: 4px;
+  height: 16px;
+}
+
+.voice-order-mic-button .mic-icon::after {
+  bottom: -20px;
+  width: 34px;
+  height: 4px;
+}
+
+.voice-order-readout {
+  display: grid;
+  gap: 6px;
+  min-height: 72px;
+  padding: 12px;
+  border: 1px solid #e4e9f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.voice-order-readout span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.voice-order-readout strong {
+  color: var(--navy);
+  font-size: 15px;
+  font-weight: 800;
+  line-height: 1.45;
+}
+
+.voice-order-actions {
+  display: grid;
+  gap: 8px;
+}
+
+.voice-order-actions .secondary-button {
+  width: 100%;
+  min-width: 0;
+  padding: 0 10px;
+  white-space: nowrap;
 }
 
 .voice-order-status {
