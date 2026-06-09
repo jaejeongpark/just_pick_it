@@ -1,6 +1,7 @@
 from sqlalchemy.orm import Session
 
 from just_pick_it_db.models import Product, DisplayItem
+from just_pick_it_db.services.inventory_status import AUTO_DISPLAY_REQUEST_QTY, LOW_STOCK_MAX
 from just_pick_it_db.services.product_images import resolve_product_image_url
 
 
@@ -46,6 +47,35 @@ def create_display_item_record(
     )
     db.add(item)
     return item
+
+
+def queue_auto_display_if_low_stock(db: Session, product: Product) -> DisplayItem | None:
+    if product.stock_qty > LOW_STOCK_MAX:
+        return None
+
+    active_display_item = (
+        db.query(DisplayItem)
+        .filter(
+            DisplayItem.product_id == product.product_id,
+            ~DisplayItem.status.in_(FINAL_DISPLAY_ITEM_STATUSES),
+        )
+        .first()
+    )
+    if active_display_item is not None:
+        return None
+
+    stock_delta = AUTO_DISPLAY_REQUEST_QTY
+    if stock_delta <= 0:
+        return None
+
+    return create_display_item_record(
+        db,
+        product_id=product.product_id,
+        requested_quantity=stock_delta,
+        stock_delta=stock_delta,
+        display_policy="REQUESTED_QUANTITY",
+        status="REQUESTED",
+    )
 
 
 def resolve_display_policy(

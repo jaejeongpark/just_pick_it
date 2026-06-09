@@ -29,11 +29,10 @@ from just_pick_it_db.services.status_service import (
     build_zone_pose,
 )
 from just_pick_it_db.services.display_service import (
-    FINAL_DISPLAY_ITEM_STATUSES,
     build_display_item_summary,
     create_display_item_record,
+    queue_auto_display_if_low_stock,
 )
-from just_pick_it_db.services.inventory_status import AUTO_DISPLAY_REQUEST_QTY, LOW_STOCK_MAX
 from just_pick_it_db.services.workflow_service import (
     ORDER_PRIORITY,
     apply_task_runtime_state,
@@ -957,37 +956,14 @@ class FleetRepository:
 
     def _queue_auto_display_if_low_stock(self, db, product: Product) -> None:
         """상품 재고가 부족이면 기존 진열 흐름에 자동 요청을 추가한다."""
-        if product.stock_qty > LOW_STOCK_MAX:
+        display_item = queue_auto_display_if_low_stock(db, product)
+        if display_item is None:
             return
-
-        active_display_item = (
-            db.query(DisplayItem)
-            .filter(
-                DisplayItem.product_id == product.product_id,
-                ~DisplayItem.status.in_(FINAL_DISPLAY_ITEM_STATUSES),
-            )
-            .first()
-        )
-        if active_display_item is not None:
-            return
-
-        stock_delta = AUTO_DISPLAY_REQUEST_QTY
-        if stock_delta <= 0:
-            return
-
-        display_item = create_display_item_record(
-            db,
-            product_id=product.product_id,
-            requested_quantity=stock_delta,
-            stock_delta=stock_delta,
-            display_policy="REQUESTED_QUANTITY",
-            status="REQUESTED",
-        )
         db.flush()
         self._log().info(
             "[FleetRepository] low stock auto display queued: "
             f"product_id={product.product_id}, stock_qty={product.stock_qty}, "
-            f"stock_delta={stock_delta}, display_item_id={display_item.display_item_id}"
+            f"stock_delta={display_item.stock_delta}, display_item_id={display_item.display_item_id}"
         )
 
     def list_requested_display_items(self) -> list[dict[str, Any]]:
@@ -1149,7 +1125,6 @@ class FleetRepository:
 
             for pid, qty in quantities.items():
                 products_by_id[pid].stock_qty -= qty
-                self._queue_auto_display_if_low_stock(db, products_by_id[pid])
                 db.add(
                     OrderItem(
                         order_id=order.order_id,

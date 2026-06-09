@@ -2,7 +2,11 @@ from sqlalchemy.orm import Session
 
 from just_pick_it_db.models import Order, OrderItem, PickupSlot, Product, Robot, DisplayItem, Task
 from just_pick_it_db.services.robot_runtime_policy import FINAL_TASK_STATUSES, UNAVAILABLE_ROBOT_STATUSES
-from just_pick_it_db.services.display_service import FINAL_DISPLAY_ITEM_STATUSES, resolve_stock_delta
+from just_pick_it_db.services.display_service import (
+    FINAL_DISPLAY_ITEM_STATUSES,
+    queue_auto_display_if_low_stock,
+    resolve_stock_delta,
+)
 
 
 ORDER_PRIORITY = 2
@@ -92,8 +96,30 @@ def start_runtime_task(db: Session, task: Task) -> None:
     if order:
         if task.task_type == "INSPECTION":
             reserve_pickup_slot(db, order)
+        elif task.task_type == "MOVE_TO_PRODUCT":
+            queue_auto_display_for_order_items(db, order)
 
         order.status = ORDER_STATUS_BY_RUNNING_TASK.get(task.task_type, order.status)
+
+
+def queue_auto_display_for_order_items(db: Session, order: Order) -> None:
+    order_items = (
+        db.query(OrderItem)
+        .filter(OrderItem.order_id == order.order_id)
+        .all()
+    )
+    product_ids = {item.product_id for item in order_items}
+    if not product_ids:
+        return
+
+    products = (
+        db.query(Product)
+        .filter(Product.product_id.in_(product_ids))
+        .with_for_update()
+        .all()
+    )
+    for product in products:
+        queue_auto_display_if_low_stock(db, product)
 
 
 def finish_runtime_task(

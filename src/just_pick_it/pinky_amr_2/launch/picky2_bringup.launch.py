@@ -33,8 +33,6 @@ def generate_launch_description():
     wheel_radius = LaunchConfiguration('wheel_radius')
     wheel_separation = LaunchConfiguration('wheel_separation')
     odom_stamp_offset_sec = LaunchConfiguration('odom_stamp_offset_sec')
-    battery_full_voltage = LaunchConfiguration('battery_full_voltage')
-    battery_empty_voltage = LaunchConfiguration('battery_empty_voltage')
 
     robot_xacro = PathJoinSubstitution(
         [FindPackageShare("pinky_description"), "urdf", "robot.urdf.xacro"]
@@ -119,20 +117,8 @@ def generate_launch_description():
                 ],
             ),
             Node(
-                package="pinky_amr_2",
-                executable="amr2_battery_publisher",
-                parameters=[
-                    {
-                        "battery_full_voltage": ParameterValue(
-                            battery_full_voltage,
-                            value_type=float,
-                        ),
-                        "battery_empty_voltage": ParameterValue(
-                            battery_empty_voltage,
-                            value_type=float,
-                        ),
-                    }
-                ],
+                package="pinky_bringup",
+                executable="battery_publisher",
             ),
             Node(
                 package="just_pick_it_perception",
@@ -172,7 +158,5 @@ def generate_launch_description():
         DeclareLaunchArgument('wheel_radius', default_value='0.027'),
         DeclareLaunchArgument('wheel_separation', default_value='0.0961'),
         DeclareLaunchArgument('odom_stamp_offset_sec', default_value='0.0'),
-        DeclareLaunchArgument('battery_full_voltage', default_value='8.8'),
-        DeclareLaunchArgument('battery_empty_voltage', default_value='8.0'),
         picky2_bringup,
     ])
