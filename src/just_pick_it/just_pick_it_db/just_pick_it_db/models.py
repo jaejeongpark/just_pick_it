@@ -217,6 +217,7 @@ class DisplayItem(Base):
     )
 
     display_item_id = Column(Integer, primary_key=True)
+    display_batch_id = Column(Integer)
     product_id = Column(Integer, ForeignKey("product.product_id"), nullable=False)
     requested_quantity = Column(Integer)
     processed_quantity = Column(Integer)
@@ -262,12 +263,17 @@ class Task(Base):
             "display_item_id IS NULL OR (order_id IS NULL AND order_item_id IS NULL)",
             name="ck_task_display_without_order",
         ),
+        CheckConstraint(
+            "display_batch_id IS NULL OR (order_id IS NULL AND order_item_id IS NULL)",
+            name="ck_task_display_batch_without_order",
+        ),
     )
 
     task_id = Column(Integer, primary_key=True)
     order_id = Column(Integer, ForeignKey("orders.order_id"))
     order_item_id = Column(Integer, ForeignKey("order_item.item_id"))
     display_item_id = Column(Integer, ForeignKey("display_item.display_item_id"))
+    display_batch_id = Column(Integer)
     sequence_no = Column(Integer, nullable=False)
     assigned_robot_id = Column(Integer, ForeignKey("robot.robot_id"))
     task_type = Column(task_type_enum, nullable=False)

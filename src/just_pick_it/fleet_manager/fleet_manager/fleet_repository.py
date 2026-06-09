@@ -31,6 +31,7 @@ from just_pick_it_db.services.status_service import (
 from just_pick_it_db.services.display_service import (
     build_display_item_summary,
     create_display_item_record,
+    has_open_display_item,
     queue_auto_display_if_low_stock,
 )
 from just_pick_it_db.services.workflow_service import (
@@ -240,14 +241,30 @@ class FleetRepository:
 
     def _validate_task_refs(self, db, task: dict) -> Robot | None:
         display_item_id = task.get("display_item_id")
+        display_batch_id = task.get("display_batch_id")
         order_id = task.get("order_id")
         order_item_id = task.get("order_item_id")
+        display_item = None
 
-        if display_item_id is not None:
+        if display_item_id is not None or display_batch_id is not None:
             if order_id is not None or order_item_id is not None:
                 raise RepoError("display task cannot reference order or order_item")
-            if not db.get(DisplayItem, display_item_id):
+        if display_item_id is not None:
+            display_item = db.get(DisplayItem, display_item_id)
+            if display_item is None:
                 raise RepoError("display item not found")
+        if display_batch_id is not None:
+            display_batch_id = int(display_batch_id)
+            if display_item is not None:
+                if display_item.display_batch_id != display_batch_id:
+                    raise RepoError("display item does not belong to display batch")
+            elif (
+                db.query(DisplayItem)
+                .filter(DisplayItem.display_batch_id == display_batch_id)
+                .first()
+                is None
+            ):
+                raise RepoError("display batch not found")
 
         if order_id is not None and not db.get(Order, order_id):
             raise RepoError("order not found")
@@ -276,7 +293,9 @@ class FleetRepository:
             return task["sequence_no"]
 
         task_query = db.query(Task)
-        if task.get("display_item_id") is not None:
+        if task.get("display_batch_id") is not None:
+            task_query = task_query.filter(Task.display_batch_id == task["display_batch_id"])
+        elif task.get("display_item_id") is not None:
             task_query = task_query.filter(Task.display_item_id == task["display_item_id"])
         elif task.get("order_id") is not None:
             task_query = task_query.filter(Task.order_id == task["order_id"])
@@ -287,6 +306,7 @@ class FleetRepository:
                 Task.order_id.is_(None),
                 Task.order_item_id.is_(None),
                 Task.display_item_id.is_(None),
+                Task.display_batch_id.is_(None),
             )
             if robot is not None:
                 task_query = task_query.filter(Task.assigned_robot_id == robot.robot_id)
@@ -577,7 +597,11 @@ class FleetRepository:
                             stock_delta = new_quantity - item.quantity
                             product.stock_qty -= stock_delta
                             if stock_delta != 0:
-                                self._queue_auto_display_if_low_stock(db, product)
+                                self._queue_auto_display_if_low_stock(
+                                    db,
+                                    product,
+                                    require_active_context=True,
+                                )
                             item.quantity = new_quantity
 
                 if status is not None:
@@ -837,6 +861,7 @@ class FleetRepository:
                         order_id=task.get("order_id"),
                         order_item_id=task.get("order_item_id"),
                         display_item_id=task.get("display_item_id"),
+                        display_batch_id=task.get("display_batch_id"),
                         sequence_no=self._resolve_task_sequence_no(db, task, robot),
                         assigned_robot_id=robot.robot_id if robot else None,
                         task_type=task["task_type"],
@@ -954,8 +979,17 @@ class FleetRepository:
     # Display
     # ==================================================================
 
-    def _queue_auto_display_if_low_stock(self, db, product: Product) -> None:
+    def _queue_auto_display_if_low_stock(
+        self,
+        db,
+        product: Product,
+        *,
+        require_active_context: bool = False,
+    ) -> None:
         """상품 재고가 부족이면 기존 진열 흐름에 자동 요청을 추가한다."""
+        if require_active_context and not self._has_active_auto_display_context(db):
+            return
+
         display_item = queue_auto_display_if_low_stock(db, product)
         if display_item is None:
             return
@@ -966,13 +1000,25 @@ class FleetRepository:
             f"stock_delta={display_item.stock_delta}, display_item_id={display_item.display_item_id}"
         )
 
+    def _has_active_auto_display_context(self, db) -> bool:
+        """주문 생성 시점에 자동진열을 즉시 queue해도 되는 실행 중인 흐름이 있는지 확인한다."""
+        if has_open_display_item(db):
+            return True
+
+        return (
+            db.query(Order)
+            .filter(Order.status.in_(("SORTING", "DELIVERING", "INSPECTING")))
+            .first()
+            is not None
+        )
+
     def list_requested_display_items(self) -> list[dict[str, Any]]:
         """REQUESTED 상태의 display_item 목록을 조회한다."""
         with session_scope() as db:
             display_items = (
                 db.query(DisplayItem)
                 .filter(DisplayItem.status == "REQUESTED")
-                .order_by(DisplayItem.display_item_id.desc())
+                .order_by(DisplayItem.display_batch_id.asc(), DisplayItem.display_item_id.asc())
                 .limit(50)
                 .all()
             )
@@ -982,6 +1028,7 @@ class FleetRepository:
         self,
         *,
         product_id: int,
+        display_batch_id: int | None = None,
         requested_quantity: int | None = None,
         processed_quantity: int | None = None,
         stock_delta: int | None = None,
@@ -1004,6 +1051,7 @@ class FleetRepository:
                 display_item = create_display_item_record(
                     db,
                     product_id=product_id,
+                    display_batch_id=display_batch_id,
                     requested_quantity=requested_quantity,
                     processed_quantity=processed_quantity,
                     stock_delta=stock_delta,
@@ -1022,6 +1070,7 @@ class FleetRepository:
         display_item_id: int,
         *,
         status: str | None = None,
+        display_batch_id: int | None = None,
         assigned_unit_id: int | None = None,
         processed_quantity: int | None = None,
         stock_delta: int | None = None,
@@ -1029,6 +1078,7 @@ class FleetRepository:
         """display_item 상태나 진열 수량 정보를 갱신한다."""
         if (
             status is None
+            and display_batch_id is None
             and assigned_unit_id is None
             and processed_quantity is None
             and stock_delta is None
@@ -1050,6 +1100,8 @@ class FleetRepository:
                 if assigned_unit_id is not None:
                     self._validate_robot_unit(db, assigned_unit_id)
                     display_item.assigned_unit_id = assigned_unit_id
+                if display_batch_id is not None:
+                    display_item.display_batch_id = display_batch_id
 
                 if processed_quantity is not None:
                     display_item.processed_quantity = processed_quantity
@@ -1125,6 +1177,11 @@ class FleetRepository:
 
             for pid, qty in quantities.items():
                 products_by_id[pid].stock_qty -= qty
+                self._queue_auto_display_if_low_stock(
+                    db,
+                    products_by_id[pid],
+                    require_active_context=True,
+                )
                 db.add(
                     OrderItem(
                         order_id=order.order_id,
@@ -1318,6 +1375,7 @@ class FleetRepository:
                         "sequence_no": task.sequence_no,
                         "order_id": task.order_id,
                         "display_item_id": task.display_item_id,
+                        "display_batch_id": task.display_batch_id,
                         "source_zone_name": source_zone.zone_name if source_zone else None,
                         "target_zone_name": target_zone.zone_name if target_zone else None,
                         "robot_name": robot.robot_name if robot else None,
@@ -1457,6 +1515,7 @@ class FleetRepository:
 
         return {
             "display_item_id": display_item.get("display_item_id"),
+            "display_batch_id": display_item.get("display_batch_id"),
             "product_id": int(product_id),
             "product_name": (display_item.get("product_name") or product.get("name")),
             "requested_quantity": display_item.get("requested_quantity"),

@@ -165,7 +165,7 @@ def should_release_robot_after_success(task: Task) -> bool:
     if task.order_id is not None:
         return task.task_type in ORDER_FLOW_RELEASE_TASKS | HOUSEKEEPING_RELEASE_TASKS
 
-    if task.display_item_id is not None:
+    if task.display_item_id is not None or task.display_batch_id is not None:
         return task.task_type in DISPLAY_FLOW_RELEASE_TASKS | HOUSEKEEPING_RELEASE_TASKS
 
     return True
@@ -263,6 +263,8 @@ def find_next_open_task(db: Session, task: Task) -> Task | None:
 
     if task.order_id is not None:
         query = query.filter(Task.order_id == task.order_id)
+    elif task.display_batch_id is not None:
+        query = query.filter(Task.display_batch_id == task.display_batch_id)
     elif task.display_item_id is not None:
         query = query.filter(Task.display_item_id == task.display_item_id)
     else:

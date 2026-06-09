@@ -216,8 +216,9 @@ class TaskManager:
         처리 순서:
         0. 충전 완료 조건을 만족한 CHARGE task 정리
         1. 이미 시작된 주문/진열 flow의 다음 task 생성 또는 막힌 flow 재시도
-        2. 새 작업을 받을 수 있는 unit이 있으면 ORDER_WAIT/REQUESTED를 priority queue로 처리
-        3. 새로 생성됐거나 이미 ASSIGNED 상태인 실행 가능 task를 dispatch
+        2. REQUESTED 진열 중 기존 batch에 붙일 수 있는 것은 먼저 이어붙인다
+        3. 새 작업을 받을 수 있는 unit이 있으면 ORDER_WAIT/REQUESTED를 priority queue로 처리
+        4. 새로 생성됐거나 이미 ASSIGNED 상태인 실행 가능 task를 dispatch
 
         새 작업 priority:
         - 숫자가 낮을수록 먼저 처리한다.
@@ -242,6 +243,7 @@ class TaskManager:
             self._complete_ready_charge_tasks()
             self._advance_existing_orders()
             self._advance_existing_display_items()
+            self._process_requested_display_appends()
             self._process_waiting_work_if_unit_available()
             self._dispatch_ready_tasks()
         finally:
@@ -269,6 +271,7 @@ class TaskManager:
             self._complete_ready_charge_tasks()
             self._advance_existing_orders()
             self._advance_existing_display_items()
+            self._process_requested_display_appends()
             self._process_waiting_work_if_unit_available()
             self._dispatch_ready_tasks()
 
@@ -692,15 +695,12 @@ class TaskManager:
         """같은 주문/진열 흐름에서 현재 task 다음 task를 찾는다."""
         sequence_no = int(task.get("sequence_no") or 0)
         order_id = task.get("order_id")
-        display_item_id = task.get("display_item_id")
+        display_flow_id = self._display_flow_id_for_task(task)
 
         if order_id is not None:
             tasks = self._repo.list_order_tasks(int(order_id))
-        elif display_item_id is not None:
-            tasks = [
-                item for item in self._repo.list_tasks()
-                if item.get("display_item_id") == display_item_id
-            ]
+        elif display_flow_id is not None:
+            tasks = self._display_tasks_for_flow(display_flow_id)
         else:
             return None
 
@@ -711,7 +711,7 @@ class TaskManager:
         if not later_tasks:
             return None
 
-        later_tasks.sort(key=lambda item: (int(item.get("sequence_no") or 0), int(item.get("task_id") or 0)))
+        later_tasks.sort(key=self._task_sequence_sort_key)
         return later_tasks[0]
 
     def _find_task_by_id(self, task_id: int) -> dict[str, Any] | None:
@@ -720,6 +720,35 @@ class TaskManager:
             if int(task.get("task_id") or 0) == task_id:
                 return task
         return None
+
+    @staticmethod
+    def _task_sequence_sort_key(task: dict[str, Any]) -> tuple[int, int]:
+        return (int(task.get("sequence_no") or 0), int(task.get("task_id") or 0))
+
+    def _display_flow_id_for_task(self, task: dict[str, Any]) -> int | None:
+        """진열 task가 속한 batch 우선 flow id를 반환한다."""
+        display_batch_id = task.get("display_batch_id")
+        if display_batch_id is not None:
+            return int(display_batch_id)
+
+        display_item_id = task.get("display_item_id")
+        if display_item_id is not None:
+            return int(display_item_id)
+
+        return None
+
+    def _display_tasks_for_flow(
+        self,
+        display_flow_id: int,
+        *,
+        tasks: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """같은 진열 flow id에 속한 task 목록을 반환한다."""
+        source_tasks = tasks if tasks is not None else self._repo.list_tasks()
+        return [
+            task for task in source_tasks
+            if self._display_flow_id_for_task(task) == display_flow_id
+        ]
 
     def inject_running_robot_task_success(
         self,
@@ -847,8 +876,7 @@ class TaskManager:
         배터리/housekeeping 조건 때문에 새 작업을 받을 수 없으면 Fleet API의
         ORDER_WAIT/REQUESTED 목록을 조회하지 않는다.
 
-        단, 기존 task advance/dispatch/charge fallback 정리는 cycle 뒤쪽에서 수행할 수 있으므로
-        cycle 전체를 return하지 않고 신규 작업 polling만 skip한다.
+        기존 진열 batch append는 이 함수 전에 처리하므로, 여기서는 독립 신규 작업만 guard한다.
         """
         if self._fleet_paused:
             self._node.get_logger().debug(
@@ -863,6 +891,19 @@ class TaskManager:
             return
 
         self._process_waiting_work()
+
+    def _process_requested_display_appends(self) -> None:
+        """기존 진열 batch에 붙일 수 있는 REQUESTED 진열은 unit availability와 무관하게 task화한다."""
+        if self._fleet_paused:
+            return
+
+        for display_item in self._repo.list_requested_display_items():
+            display_item_id = display_item.get("display_item_id")
+            if display_item_id is None:
+                continue
+            if self._display_item_has_tasks(int(display_item_id)):
+                continue
+            self._append_display_item_to_open_batch(display_item)
 
     def _picky_idle_for_waiting_work(self, robot: dict[str, Any]) -> bool:
         """PICKY가 대기 작업 polling을 시작할 수 있는 IDLE 상태인지 확인한다."""
@@ -1117,8 +1158,7 @@ class TaskManager:
         *,
         picky_name: str,
         cobot_name: str,
-        order_id: int | None = None,
-        display_item_id: int | None = None,
+        order_id: int,
     ) -> bool:
         """같은 unit에 현재 flow가 아닌 미완료 task가 있는지 확인한다.
 
@@ -1132,9 +1172,7 @@ class TaskManager:
                     continue
                 if self._is_preemptible_return_home(task):
                     continue
-                if order_id is not None and task.get("order_id") == order_id:
-                    continue
-                if display_item_id is not None and task.get("display_item_id") == display_item_id:
+                if task.get("order_id") == order_id:
                     continue
                 return True
 
@@ -1409,16 +1447,30 @@ class TaskManager:
     def _display_item_has_tasks(self, display_item_id: int) -> bool:
         """display_item에 이미 task가 생성되어 있는지 확인한다."""
         tasks = self._repo.list_tasks()
-        return any(task.get("display_item_id") == display_item_id for task in tasks)
+        return any(
+            task.get("display_item_id") is not None
+            and int(task["display_item_id"]) == display_item_id
+            for task in tasks
+        )
 
     def _process_new_display_item(self, display_item: dict[str, Any]) -> list[int]:
         """display_item 1건을 진열 task 5개로 변환한다."""
+        appended_task_ids = self._append_display_item_to_open_batch(display_item)
+        if appended_task_ids:
+            return appended_task_ids
+
         unit = self._select_available_unit()
         if unit is None:
             self._node.get_logger().info("[TaskManager] 진열 배정 가능한 robot unit 없음")
             return []
 
         display_item_id = int(display_item["display_item_id"])
+        if display_item.get("display_batch_id") is None:
+            display_item = self._repo.update_display_item(
+                display_item_id,
+                display_batch_id=display_item_id,
+            ) or display_item
+
         display_work = self._repo.get_display_work(
             {
                 **display_item,
@@ -1448,53 +1500,169 @@ class TaskManager:
 
         return task_ids
 
-    def create_display_tasks_for_item(self, display_work: dict[str, Any]) -> list[int]:
+    def _append_display_item_to_open_batch(self, display_item: dict[str, Any]) -> list[int]:
+        """아직 housekeeping 전인 기존 진열 batch에 새 display_item task를 이어붙인다."""
+        batch_tasks = self._find_appendable_display_batch_tasks()
+        if not batch_tasks:
+            return []
+
+        display_item_id = int(display_item["display_item_id"])
+        display_batch_id = int(batch_tasks[0]["display_batch_id"])
+        assigned_unit_id = self._unit_id_from_batch_tasks(batch_tasks)
+        if assigned_unit_id is None:
+            return []
+
+        picky_name = self._picky_name_from_tasks(batch_tasks)
+        cobot_name = self._cobot_name_from_tasks(batch_tasks)
+        if not picky_name or not cobot_name:
+            return []
+
+        current_zone = self._last_picky_target_zone(batch_tasks)
+        if current_zone is None:
+            current_zone = self._default_source_zone(assigned_unit_id)
+
+        display_item = self._repo.update_display_item(
+            display_item_id,
+            display_batch_id=display_batch_id,
+        ) or display_item
+
+        display_work = self._repo.get_display_work(
+            {
+                **display_item,
+                "display_batch_id": display_batch_id,
+                "assigned_unit_id": assigned_unit_id,
+            }
+        )
+        if display_work is None:
+            return []
+
+        display_work["picky_name"] = picky_name
+        display_work["cobot_name"] = cobot_name
+
+        task_ids = self.create_display_tasks_for_item(
+            display_work,
+            base_sequence_no=max(int(task.get("sequence_no") or 0) for task in batch_tasks) + 1,
+            current_zone=current_zone,
+        )
+        if not task_ids:
+            return []
+
+        updated = self._repo.update_display_item(
+            display_item_id,
+            status="ASSIGNED",
+            assigned_unit_id=assigned_unit_id,
+        )
+        if updated is None:
+            self._node.get_logger().warn(
+                f"[TaskManager] display_item_id={display_item_id} 기존 display_batch_id="
+                f"{display_batch_id} 배정 기록 실패"
+            )
+
+        if task_ids:
+            self._node.get_logger().info(
+                f"[TaskManager] display_item_id={display_item_id} 기존 display_batch_id="
+                f"{display_batch_id}에 추가: {task_ids}"
+            )
+        return task_ids
+
+    def _find_appendable_display_batch_tasks(self) -> list[dict[str, Any]]:
+        """housekeeping에 들어가기 전인 기존 진열 batch task를 찾는다."""
+        tasks_by_batch: dict[int, list[dict[str, Any]]] = {}
+        housekeeping_batches: set[int] = set()
+        for task in self._repo.list_tasks():
+            display_batch_id = task.get("display_batch_id")
+            if display_batch_id is None:
+                continue
+            if task.get("task_type") in HOUSEKEEPING_TASK_TYPES:
+                housekeeping_batches.add(int(display_batch_id))
+                continue
+            tasks_by_batch.setdefault(int(display_batch_id), []).append(task)
+
+        for batch_id, tasks in sorted(tasks_by_batch.items()):
+            if batch_id in housekeeping_batches:
+                continue
+            statuses = {str(task.get("status") or "") for task in tasks}
+            if not statuses or statuses & {"FAILED", "CANCELLED"}:
+                continue
+            if any(status not in FINAL_TASK_STATUSES for status in statuses):
+                return sorted(tasks, key=self._task_sequence_sort_key)
+        return []
+
+    def _unit_id_from_batch_tasks(self, tasks: list[dict[str, Any]]) -> int | None:
+        for task in tasks:
+            robot_name = task.get("assigned_robot_name")
+            if robot_name:
+                unit_id = self._unit_id_from_robot_name(str(robot_name))
+                if unit_id is not None:
+                    return unit_id
+        return None
+
+    def _cobot_name_from_tasks(self, tasks: list[dict[str, Any]]) -> str | None:
+        for task in tasks:
+            if task.get("task_type") in COBOT_TASK_TYPES and task.get("assigned_robot_name"):
+                return str(task["assigned_robot_name"])
+        return None
+
+    def create_display_tasks_for_item(
+        self,
+        display_work: dict[str, Any],
+        *,
+        base_sequence_no: int = 1,
+        current_zone: str | None = None,
+    ) -> list[int]:
         """진열 요청 1건에 대한 task 5개를 생성한다."""
         priority = int(display_work.get("priority") or 2)
         display_item_id = int(display_work["display_item_id"])
+        display_batch_id = int(display_work.get("display_batch_id") or display_item_id)
+        source_zone = current_zone or display_work.get("source_zone_name")
 
         tasks = [
             self._build_task_payload(
-                sequence_no=1,
+                sequence_no=base_sequence_no,
                 task_type="MOVE_TO_STOCK",
                 assigned_robot_name=display_work["picky_name"],
                 display_item_id=display_item_id,
-                source_zone_name=display_work.get("source_zone_name"),
+                display_batch_id=display_batch_id,
+                source_zone_name=source_zone,
                 target_zone_name=display_work["stock_zone_name"],
                 priority=priority,
             ),
             self._build_task_payload(
-                sequence_no=2,
+                sequence_no=base_sequence_no + 1,
                 task_type="SORTING_AND_LOAD",
                 assigned_robot_name=display_work["cobot_name"],
                 display_item_id=display_item_id,
+                display_batch_id=display_batch_id,
                 source_zone_name=display_work["stock_slot_name"],
                 target_zone_name=display_work["stock_slot_name"],
                 priority=priority,
             ),
             self._build_task_payload(
-                sequence_no=3,
+                sequence_no=base_sequence_no + 2,
                 task_type="MOVE_TO_DISPLAY",
                 assigned_robot_name=display_work["picky_name"],
                 display_item_id=display_item_id,
+                display_batch_id=display_batch_id,
                 source_zone_name=display_work["stock_zone_name"],
                 target_zone_name=display_work["product_zone_name"],
                 priority=priority,
             ),
             self._build_task_payload(
-                sequence_no=4,
+                sequence_no=base_sequence_no + 3,
                 task_type="DISPLAY_SCAN",
                 assigned_robot_name=display_work["cobot_name"],
                 display_item_id=display_item_id,
+                display_batch_id=display_batch_id,
                 source_zone_name=display_work["product_slot_name"],
                 target_zone_name=display_work["product_slot_name"],
                 priority=priority,
             ),
             self._build_task_payload(
-                sequence_no=5,
+                sequence_no=base_sequence_no + 4,
                 task_type="DISPLAY_PLACE",
                 assigned_robot_name=display_work["cobot_name"],
                 display_item_id=display_item_id,
+                display_batch_id=display_batch_id,
                 source_zone_name=display_work["product_slot_name"],
                 target_zone_name=display_work["product_slot_name"],
                 priority=priority,
@@ -1507,7 +1675,8 @@ class TaskManager:
 
         task_ids = [int(task_id) for task_id in result_data.get("task_ids", [])]
         self._node.get_logger().info(
-            f"[TaskManager] display_item_id={display_item_id} 진열 task 생성 완료: {task_ids}"
+            f"[TaskManager] display_batch_id={display_batch_id} display_item_id="
+            f"{display_item_id} 진열 task 생성 완료: {task_ids}"
         )
         return task_ids
 
@@ -1524,6 +1693,7 @@ class TaskManager:
         order_id: int | None = None,
         order_item_id: int | None = None,
         display_item_id: int | None = None,
+        display_batch_id: int | None = None,
         source_zone_name: str | None = None,
         target_zone_name: str | None = None,
         priority: int = 2,
@@ -1539,6 +1709,7 @@ class TaskManager:
             "order_id": order_id,
             "order_item_id": order_item_id,
             "display_item_id": display_item_id,
+            "display_batch_id": display_batch_id,
             "sequence_no": sequence_no,
             "assigned_robot_name": assigned_robot_name,
             "task_type": task_type,
@@ -1853,29 +2024,20 @@ class TaskManager:
 
     def _advance_existing_display_items(self) -> None:
         """진열 흐름이 끝난 뒤 필요한 housekeeping task를 이어서 만든다."""
-        tasks_by_item: dict[int, list[dict[str, Any]]] = {}
+        tasks_by_batch: dict[int, list[dict[str, Any]]] = {}
 
         for task in self._repo.list_tasks():
-            display_item_id = task.get("display_item_id")
-            if display_item_id is None:
+            display_flow_id = self._display_flow_id_for_task(task)
+            if display_flow_id is None:
                 continue
-            tasks_by_item.setdefault(int(display_item_id), []).append(task)
+            tasks_by_batch.setdefault(display_flow_id, []).append(task)
 
-        for display_item_id, tasks in tasks_by_item.items():
-            self._advance_display_item_if_ready(display_item_id, tasks)
+        for display_flow_id, tasks in tasks_by_batch.items():
+            self._advance_display_flow_if_ready(display_flow_id, tasks)
 
-    def _advance_display_item_by_id_if_ready(self, display_item_id: int) -> None:
-        """task result 직후 해당 진열 흐름만 다음 단계로 즉시 진행한다."""
-        tasks = [
-            task for task in self._repo.list_tasks()
-            if task.get("display_item_id") is not None
-            and int(task["display_item_id"]) == display_item_id
-        ]
-        self._advance_display_item_if_ready(display_item_id, tasks)
-
-    def _advance_display_item_if_ready(
+    def _advance_display_flow_if_ready(
         self,
-        display_item_id: int,
+        display_flow_id: int,
         tasks: list[dict[str, Any]],
     ) -> None:
         """진열 task가 모두 끝났으면 housekeeping task를 이어서 만든다."""
@@ -1889,7 +2051,7 @@ class TaskManager:
         self._create_next_housekeeping_task(
             tasks=tasks,
             flow_kind="display",
-            flow_id=display_item_id,
+            flow_id=display_flow_id,
             unit_id=self._unit_id_from_robot_name(picky_name),
             picky_name=picky_name,
             priority=max(int(task.get("priority") or 2) for task in tasks),
@@ -2029,7 +2191,7 @@ class TaskManager:
             task_type=task_type,
             assigned_robot_name=assigned_robot_name,
             order_id=flow_id if flow_kind == "order" else None,
-            display_item_id=flow_id if flow_kind == "display" else None,
+            display_batch_id=flow_id if flow_kind == "display" else None,
             source_zone_name=source_zone_name,
             target_zone_name=target_zone_name,
             priority=priority,
@@ -2136,7 +2298,7 @@ class TaskManager:
             return None
         return max(
             tasks,
-            key=lambda item: (int(item.get("sequence_no") or 0), int(item.get("task_id") or 0)),
+            key=self._task_sequence_sort_key,
         )
 
     def _housekeeping_reason(self, task: dict[str, Any]) -> str | None:
@@ -2229,9 +2391,9 @@ class TaskManager:
         if order_id is not None:
             return ("order", int(order_id))
 
-        display_item_id = task.get("display_item_id")
-        if display_item_id is not None:
-            return ("display", int(display_item_id))
+        display_flow_id = self._display_flow_id_for_task(task)
+        if display_flow_id is not None:
+            return ("display", display_flow_id)
 
         return None
 
@@ -2276,15 +2438,12 @@ class TaskManager:
         """같은 주문/진열 묶음의 이전 sequence task가 모두 SUCCESS인지 확인한다."""
         sequence_no = int(task.get("sequence_no") or 0)
         order_id = task.get("order_id")
-        display_item_id = task.get("display_item_id")
+        display_flow_id = self._display_flow_id_for_task(task)
 
         if order_id is not None:
             related_tasks = self._repo.list_order_tasks(int(order_id))
-        elif display_item_id is not None:
-            related_tasks = [
-                item for item in all_tasks
-                if item.get("display_item_id") == display_item_id
-            ]
+        elif display_flow_id is not None:
+            related_tasks = self._display_tasks_for_flow(display_flow_id, tasks=all_tasks)
         else:
             related_tasks = all_tasks
 
@@ -2755,9 +2914,12 @@ class TaskManager:
             self._advance_order_by_id_if_ready(int(order_id))
             return
 
-        display_item_id = task.get("display_item_id")
-        if display_item_id is not None:
-            self._advance_display_item_by_id_if_ready(int(display_item_id))
+        display_flow_id = self._display_flow_id_for_task(task)
+        if display_flow_id is not None:
+            self._advance_display_flow_if_ready(
+                display_flow_id,
+                self._display_tasks_for_flow(display_flow_id),
+            )
 
     def _cleanup_finished_flow_memory(self, task: dict[str, Any]) -> None:
         """완료된 주문/진열 흐름의 TaskManager 임시 메모리를 정리한다."""
@@ -2790,11 +2952,7 @@ class TaskManager:
         if flow_kind == "order":
             return self._repo.list_order_tasks(flow_id)
 
-        return [
-            task for task in self._repo.list_tasks()
-            if task.get("display_item_id") is not None
-            and int(task["display_item_id"]) == flow_id
-        ]
+        return self._display_tasks_for_flow(flow_id)
 
     def _cleanup_preplanned_memory(self, flow_task_ids: set[int]) -> None:
         """완료된 flow에 묶인 COBOT preplan 임시 메모리를 제거한다."""

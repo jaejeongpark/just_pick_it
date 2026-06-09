@@ -433,8 +433,8 @@ function taskTargetLabel(task) {
     return orderNumber;
   }
 
-  if (task?.display_item_id) {
-    return `진열 #${task.display_item_id}`;
+  if (task?.display_item_id || task?.display_batch_id) {
+    return `진열 #${displayBatchId(task)}`;
   }
 
   return `작업 #${task?.task_id ?? "-"}`;
@@ -445,8 +445,8 @@ function taskReferenceLabel(task) {
     return `주문 상품 #${task.order_item_id}`;
   }
 
-  if (task?.display_item_id) {
-    return `진열 요청 #${task.display_item_id}`;
+  if (task?.display_item_id || task?.display_batch_id) {
+    return `진열 요청 #${displayBatchId(task)}`;
   }
 
   return "단독 작업";
@@ -842,7 +842,7 @@ function isDisplayWork(work) {
 }
 
 function displayWorkNumber(displayItem) {
-  return `진열 #${displayItem?.display_item_id ?? "-"}`;
+  return `진열 #${displayBatchId(displayItem) ?? "-"}`;
 }
 
 function orderWorkNumber(order) {
@@ -874,25 +874,137 @@ function displayWorkQuantity(displayItem) {
   );
 }
 
+function displayBatchId(displayItem) {
+  return displayItem?.display_batch_id ?? displayItem?.display_item_id ?? null;
+}
+
+function displayItemIds(displayItem) {
+  if (Array.isArray(displayItem?.display_item_ids)) {
+    return displayItem.display_item_ids;
+  }
+
+  return displayItem?.display_item_id === undefined || displayItem?.display_item_id === null
+    ? []
+    : [displayItem.display_item_id];
+}
+
+const DISPLAY_STATUS_RANK = {
+  REQUESTED: 1,
+  ASSIGNED: 2,
+  IN_PROGRESS: 3,
+  COMPLETED: 4,
+  FAILED: 5,
+  CANCELLED: 5,
+};
+
+function mergeDisplayStatus(currentStatus, nextStatus) {
+  if (!currentStatus) {
+    return nextStatus;
+  }
+
+  return (DISPLAY_STATUS_RANK[nextStatus] || 0) > (DISPLAY_STATUS_RANK[currentStatus] || 0)
+    ? nextStatus
+    : currentStatus;
+}
+
+function addNullableQuantity(currentValue, nextValue) {
+  if (currentValue === null || nextValue === null || nextValue === undefined) {
+    return null;
+  }
+
+  return Number(currentValue || 0) + Number(nextValue || 0);
+}
+
+function groupDisplayItems(displayItems = []) {
+  const groups = new Map();
+
+  displayItems.forEach((displayItem) => {
+    const batchId = displayBatchId(displayItem);
+    if (batchId === null) {
+      return;
+    }
+
+    const key = normalizeId(batchId);
+    const itemQuantity = displayWorkQuantity(displayItem);
+    const workItem = {
+      item_id: `display-${displayItem.display_item_id}`,
+      display_item_id: displayItem.display_item_id,
+      product_id: displayItem.product_id,
+      product_name: displayItem.product_name,
+      image_url: displayItem.image_url,
+      quantity: itemQuantity,
+      status: displayItem.status,
+    };
+
+    if (!groups.has(key)) {
+      groups.set(key, {
+        ...displayItem,
+        display_batch_id: batchId,
+        display_item_id: batchId,
+        display_item_ids: [],
+        requested_quantity:
+          displayItem.requested_quantity === null || displayItem.requested_quantity === undefined
+            ? null
+            : Number(displayItem.requested_quantity),
+        processed_quantity:
+          displayItem.processed_quantity === null || displayItem.processed_quantity === undefined
+            ? null
+            : Number(displayItem.processed_quantity),
+        stock_delta:
+          displayItem.stock_delta === null || displayItem.stock_delta === undefined
+            ? null
+            : Number(displayItem.stock_delta),
+        items: [],
+      });
+    }
+
+    const group = groups.get(key);
+    group.display_item_ids.push(displayItem.display_item_id);
+    group.items.push(workItem);
+    group.status = mergeDisplayStatus(group.status, displayItem.status);
+    group.assigned_unit_id = group.assigned_unit_id ?? displayItem.assigned_unit_id;
+
+    if (group.items.length > 1) {
+      group.requested_quantity = addNullableQuantity(
+        group.requested_quantity,
+        displayItem.requested_quantity,
+      );
+      group.processed_quantity = addNullableQuantity(
+        group.processed_quantity,
+        displayItem.processed_quantity,
+      );
+      group.stock_delta = addNullableQuantity(group.stock_delta, displayItem.stock_delta);
+    }
+  });
+
+  return Array.from(groups.values());
+}
+
 function displayWorkItem(displayItem) {
-  const quantity = displayWorkQuantity(displayItem);
+  const batchId = displayBatchId(displayItem);
+  const items = Array.isArray(displayItem.items) && displayItem.items.length > 0
+    ? displayItem.items
+    : [
+        {
+          item_id: `display-${displayItem.display_item_id}`,
+          product_id: displayItem.product_id,
+          product_name: displayItem.product_name,
+          image_url: displayItem.image_url,
+          quantity: displayWorkQuantity(displayItem),
+          status: displayItem.status,
+        },
+      ];
 
   return {
     ...displayItem,
     work_kind: "DISPLAY",
-    work_key: `display:${displayItem.display_item_id}`,
+    display_item_id: batchId,
+    display_batch_id: batchId,
+    display_item_ids: displayItem.display_item_ids || displayItemIds(displayItem),
+    work_key: `display:${batchId}`,
     order_no: displayWorkNumber(displayItem),
     priority: 1,
-    items: [
-      {
-        item_id: `display-${displayItem.display_item_id}`,
-        product_id: displayItem.product_id,
-        product_name: displayItem.product_name,
-        image_url: displayItem.image_url,
-        quantity,
-        status: displayItem.status,
-      },
-    ],
+    items,
   };
 }
 
@@ -910,20 +1022,20 @@ function workKey(work) {
   }
 
   return isDisplayWork(work)
-    ? `display:${work.display_item_id}`
+    ? `display:${displayBatchId(work)}`
     : `order:${work.order_id}`;
 }
 
 function activeWorkItems(data = latestAdminStatus) {
   const orderWorks = (data?.orders || []).map(orderWorkItem);
-  const displayWorks = (data?.display_items || []).map(displayWorkItem);
+  const displayWorks = groupDisplayItems(data?.display_items || []).map(displayWorkItem);
 
   return [...displayWorks, ...orderWorks].sort(sortWorkItems);
 }
 
 function historyWorkItems(data = latestAdminStatus) {
   const orderWorks = (data?.order_history || []).map(orderWorkItem);
-  const displayWorks = (data?.display_item_history || []).map(displayWorkItem);
+  const displayWorks = groupDisplayItems(data?.display_item_history || []).map(displayWorkItem);
 
   return [...displayWorks, ...orderWorks].sort(sortWorkItems);
 }
@@ -933,7 +1045,7 @@ function historyWorkGroups(data = latestAdminStatus) {
     orders: (data?.order_history || [])
       .map(orderWorkItem)
       .sort(sortWorkItemsNewestFirst),
-    displays: (data?.display_item_history || [])
+    displays: groupDisplayItems(data?.display_item_history || [])
       .map(displayWorkItem)
       .sort(sortWorkItemsNewestFirst),
   };
@@ -979,7 +1091,7 @@ function latestTaskIdForWork(work) {
 }
 
 function workId(work) {
-  return isDisplayWork(work) ? work.display_item_id : work.order_id;
+  return isDisplayWork(work) ? displayBatchId(work) : work.order_id;
 }
 
 function workDisplayTitle(work) {
@@ -992,13 +1104,17 @@ function workKindLabel(work) {
 
 function findDisplayWork(displayItemId, { includeHistory = false } = {}) {
   const source = includeHistory
-    ? [...(latestAdminStatus?.display_items || []), ...(latestAdminStatus?.display_item_history || [])]
-    : latestAdminStatus?.display_items || [];
+    ? [...activeWorkItems(), ...historyWorkItems()]
+    : activeWorkItems();
   const displayItem = source.find((item) =>
-    sameId(item.display_item_id, displayItemId),
+    isDisplayWork(item) &&
+    (
+      sameId(displayBatchId(item), displayItemId) ||
+      displayItemIds(item).some((itemId) => sameId(itemId, displayItemId))
+    ),
   );
 
-  return displayItem ? displayWorkItem(displayItem) : null;
+  return displayItem || null;
 }
 
 function findWorkByKey(key, { includeHistory = false } = {}) {
@@ -1014,8 +1130,8 @@ function findWorkByTask(task, { includeHistory = false } = {}) {
     return null;
   }
 
-  if (task.display_item_id) {
-    return findDisplayWork(task.display_item_id, { includeHistory });
+  if (task.display_item_id || task.display_batch_id) {
+    return findDisplayWork(task.display_batch_id ?? task.display_item_id, { includeHistory });
   }
 
   if (task.order_id) {
@@ -1047,7 +1163,7 @@ function selectWork(work) {
   }
 
   if (isDisplayWork(work)) {
-    selectedDisplayItemId = Number(work.display_item_id);
+    selectedDisplayItemId = Number(displayBatchId(work));
     selectedOrderId = null;
     return;
   }
@@ -1172,7 +1288,13 @@ function orderTasks(order) {
   return (latestAdminStatus?.tasks || [])
     .filter((task) => {
       if (isDisplayWork(order)) {
-        return sameId(task.display_item_id, order.display_item_id);
+        const batchId = displayBatchId(order);
+        const itemIds = displayItemIds(order);
+
+        return (
+          sameId(task.display_batch_id, batchId) ||
+          itemIds.some((itemId) => sameId(task.display_item_id, itemId))
+        );
       }
 
       return (
@@ -1293,8 +1415,12 @@ function normalizeOrderWorkSelection(data) {
 
   if (
     selectedDisplayItemId !== null &&
-    !(data.display_items || []).some((item) =>
-      sameId(item.display_item_id, selectedDisplayItemId),
+    !works.some((work) =>
+      isDisplayWork(work) &&
+      (
+        sameId(displayBatchId(work), selectedDisplayItemId) ||
+        displayItemIds(work).some((itemId) => sameId(itemId, selectedDisplayItemId))
+      ),
     )
   ) {
     selectedDisplayItemId = null;
@@ -1345,7 +1471,7 @@ function renderOrderWorkDetail() {
   const activeTask =
     selectedTask &&
     (
-      (displayWork && sameId(selectedTask.display_item_id, order.display_item_id)) ||
+      (displayWork && tasks.some((task) => sameId(task.task_id, selectedTask.task_id))) ||
       (!displayWork && (selectedTask.order_id === order.order_id ||
         selectedTask.order_no === order.order_no))
     )
@@ -2332,6 +2458,7 @@ function renderOrders(orders) {
             adminPage === "orders" &&
             (
               (isDisplayWork(work) && sameId(work.display_item_id, selectedDisplayItemId)) ||
+              (isDisplayWork(work) && sameId(displayBatchId(work), selectedDisplayItemId)) ||
               (!isDisplayWork(work) && sameId(work.order_id, selectedOrderId)) ||
               linkedTaskSelected
             );
@@ -3087,6 +3214,7 @@ function taskSearchText(task) {
     task.order_id,
     task.order_item_id,
     task.display_item_id,
+    task.display_batch_id,
     assignedRobotLabel(task),
     task.status,
     label(task.status),

@@ -164,6 +164,7 @@ CREATE TABLE order_item (
 
 CREATE TABLE display_item (
     display_item_id SERIAL PRIMARY KEY,
+    display_batch_id INT,
     product_id INT NOT NULL REFERENCES product(product_id),
     requested_quantity INT CHECK (requested_quantity IS NULL OR requested_quantity > 0),
     processed_quantity INT CHECK (processed_quantity IS NULL OR processed_quantity >= 0),
@@ -204,6 +205,7 @@ CREATE TABLE task (
     order_id INT REFERENCES orders(order_id) ON DELETE CASCADE,
     order_item_id INT REFERENCES order_item(item_id) ON DELETE CASCADE,
     display_item_id INT REFERENCES display_item(display_item_id) ON DELETE CASCADE,
+    display_batch_id INT,
     sequence_no INT NOT NULL,
     assigned_robot_id INT REFERENCES robot(robot_id),
     task_type task_type NOT NULL,
@@ -217,6 +219,11 @@ CREATE TABLE task (
     ),
     CHECK (
         display_item_id IS NULL
+        OR
+        (order_id IS NULL AND order_item_id IS NULL)
+    ),
+    CHECK (
+        display_batch_id IS NULL
         OR
         (order_id IS NULL AND order_item_id IS NULL)
     )
@@ -263,6 +270,9 @@ ON order_item(product_id);
 CREATE INDEX idx_display_item_product_id
 ON display_item(product_id);
 
+CREATE INDEX idx_display_item_batch_id
+ON display_item(display_batch_id);
+
 CREATE INDEX idx_display_item_status
 ON display_item(status);
 
@@ -286,6 +296,9 @@ ON task(order_item_id);
 
 CREATE INDEX idx_task_display_item_id
 ON task(display_item_id);
+
+CREATE INDEX idx_task_display_batch_id
+ON task(display_batch_id);
 
 CREATE INDEX idx_task_assigned_robot_id
 ON task(assigned_robot_id);

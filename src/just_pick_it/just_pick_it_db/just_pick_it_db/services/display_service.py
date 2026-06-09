@@ -6,6 +6,7 @@ from just_pick_it_db.services.product_images import resolve_product_image_url
 
 
 FINAL_DISPLAY_ITEM_STATUSES = ("COMPLETED", "FAILED", "CANCELLED")
+OPEN_DISPLAY_ITEM_STATUSES = ("REQUESTED", "ASSIGNED", "IN_PROGRESS")
 
 
 def build_display_item_summary(db: Session, display_item: DisplayItem) -> dict:
@@ -13,6 +14,7 @@ def build_display_item_summary(db: Session, display_item: DisplayItem) -> dict:
 
     return {
         "display_item_id": display_item.display_item_id,
+        "display_batch_id": display_item.display_batch_id,
         "product_id": display_item.product_id,
         "product_name": product.name if product else None,
         "image_url": resolve_product_image_url(product) if product else None,
@@ -29,6 +31,7 @@ def create_display_item_record(
     db: Session,
     *,
     product_id: int,
+    display_batch_id: int | None = None,
     requested_quantity: int | None = None,
     processed_quantity: int | None = None,
     stock_delta: int | None = None,
@@ -36,7 +39,11 @@ def create_display_item_record(
     status: str = "REQUESTED",
     assigned_unit_id: int | None = None,
 ) -> DisplayItem:
+    if display_batch_id is None:
+        display_batch_id = find_open_display_batch_id(db)
+
     item = DisplayItem(
+        display_batch_id=display_batch_id,
         product_id=product_id,
         requested_quantity=requested_quantity,
         processed_quantity=processed_quantity,
@@ -46,10 +53,38 @@ def create_display_item_record(
         assigned_unit_id=assigned_unit_id,
     )
     db.add(item)
+    db.flush()
+    if item.display_batch_id is None:
+        item.display_batch_id = item.display_item_id
     return item
 
 
-def queue_auto_display_if_low_stock(db: Session, product: Product) -> DisplayItem | None:
+def find_open_display_batch_id(db: Session) -> int | None:
+    open_display_item = (
+        db.query(DisplayItem)
+        .filter(DisplayItem.status.in_(OPEN_DISPLAY_ITEM_STATUSES))
+        .order_by(DisplayItem.display_batch_id.asc(), DisplayItem.display_item_id.asc())
+        .first()
+    )
+    if open_display_item is None:
+        return None
+
+    return open_display_item.display_batch_id or open_display_item.display_item_id
+
+
+def has_open_display_item(db: Session) -> bool:
+    return (
+        db.query(DisplayItem)
+        .filter(DisplayItem.status.in_(OPEN_DISPLAY_ITEM_STATUSES))
+        .first()
+        is not None
+    )
+
+
+def queue_auto_display_if_low_stock(
+    db: Session,
+    product: Product,
+) -> DisplayItem | None:
     if product.stock_qty > LOW_STOCK_MAX:
         return None
 

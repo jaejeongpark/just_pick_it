@@ -227,11 +227,10 @@ class FakeRobotServers(Node):
 
         self.create_timer(
             self._state_publish_interval_sec,
-            self._publish_all_state_pose,
+            self._publish_all_telemetry,
             callback_group=callback_group,
         )
-        self._publish_all_state_pose()
-        self._publish_all_battery()
+        self._publish_all_telemetry()
 
         self.get_logger().info(
             "fake robot servers ready: "
@@ -248,6 +247,10 @@ class FakeRobotServers(Node):
     # ------------------------------------------------------------------
     # PICKY telemetry
     # ------------------------------------------------------------------
+
+    def _publish_all_telemetry(self) -> None:
+        self._publish_all_state_pose()
+        self._publish_all_battery()
 
     def _publish_all_state_pose(self) -> None:
         if self._is_shutdown_requested():
