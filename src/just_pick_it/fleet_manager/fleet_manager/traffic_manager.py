@@ -152,6 +152,7 @@ class TrafficManager:
         node: Node,
         robot_ids: list[str],
         zone_coords: dict[str, tuple[float, float]] | None = None,
+        assume_docked_at_start: bool = False,
     ) -> None:
         self._node = node
         self._lock = threading.Lock()
@@ -164,6 +165,13 @@ class TrafficManager:
         self._robot_reservations: dict[str, int | None] = {rid: None for rid in robot_ids}
         # robot_id -> 예약/점유 중인 충전 도크 이름 (없으면 None)
         self._robot_dock: dict[str, str | None] = {rid: None for rid in robot_ids}
+        # 콜드 스타트: 로봇은 자기 충전 도크에서 부팅한다(시연 기준, seed robot pos=도크).
+        # 점유로 초기화하지 않으면 다른 로봇 복귀 시 그 도크를 비었다고 보고 이미 점유된
+        # 도크로 도킹해 충돌한다. robot_ids 순서 == DOCK_PRIORITY 순서 전제로 매핑하고,
+        # undock(이동 상태 진입) 시 notify_state 가 자동 해제한다.
+        if assume_docked_at_start:
+            for rid, (dock, _standby) in zip(robot_ids, DOCK_PRIORITY):
+                self._robot_dock[rid] = dock
         # zone_name -> (pos_x, pos_y). 외부 주입값으로 DEFAULT 를 덮어쓴다.
         self._zone_coords: dict[str, tuple[float, float]] = dict(DEFAULT_ZONE_COORDS)
         if zone_coords:
@@ -171,7 +179,8 @@ class TrafficManager:
 
         node.get_logger().info(
             f'[TrafficManager] 초기화 완료 — 관리 로봇: {robot_ids}, '
-            f'zone 좌표 {len(self._zone_coords)}개'
+            f'zone 좌표 {len(self._zone_coords)}개, '
+            f'시작 도크 점유: {self._robot_dock}'
         )
 
     # ── 외부 인터페이스 (TaskManager 가 호출) ──────────────────────────
