@@ -40,7 +40,7 @@ LLM이 이를 구조화된 명령으로 바꿔 Fleet Manager에게 전달한다"
 즉 "음성 → 구조화 주문 명령" 변환을 담당하는 부분이 STT + LLM이며, 현재 코드베이스에는
 이 변환을 끼워 넣을 자리가 이미 stub 형태로 마련되어 있다.
 
-### 음성 입력 시나리오
+### 음성 입력 시나리오 (목표 흐름)
 
 ```text
 1. 사용자가 UI의 마이크 버튼을 클릭
@@ -57,7 +57,7 @@ LLM이 이를 구조화된 명령으로 바꿔 Fleet Manager에게 전달한다"
    (무음 판정 시간은 설정값으로 조정 가능)
         |
         v
-5. 녹음된 오디오 데이터를 POST /api/admin/llm/messages 로 전송
+5. 녹음된 오디오 데이터를 POST /api/customer/llm/messages 로 전송
         |
         v
 6. gpt-4o-mini-transcribe API가 오디오를 텍스트로 변환
@@ -67,6 +67,26 @@ LLM이 이를 구조화된 명령으로 바꿔 Fleet Manager에게 전달한다"
 7. LLM이 텍스트를 파싱해 구조화된 주문 명령 반환
    예: [{상품: 수박, 수량: 2}, {상품: 식빵, 수량: 1}]
 ```
+
+### 현재 프론트엔드 구현 상태 및 변경 필요 사항
+
+**현재 상태:** `web/app/static/js/customer.js`는 브라우저 내장 Web Speech API(`window.SpeechRecognition`)를 사용해 음성을 텍스트로 변환한다. 변환된 텍스트를 백엔드로 전송하므로 `gpt-4o-mini-transcribe`는 현재 호출되지 않는다.
+
+**변경 필요:** 위 목표 흐름대로 동작하려면 프론트엔드를 아래와 같이 수정해야 한다.
+
+| 항목 | 현재 | 변경 후 |
+|---|---|---|
+| STT 처리 주체 | 브라우저 Web Speech API | OpenAI gpt-4o-mini-transcribe |
+| 백엔드로 전송하는 데이터 | 변환된 텍스트 문자열 | 오디오 data URL (`data:audio/webm;base64,...`) |
+| 녹음 방식 | Web Speech API 자체 처리 | 브라우저 MediaRecorder로 직접 녹음 |
+| 브라우저 제약 | Chrome/Edge 전용 | 브라우저 무관 |
+
+**변경 시 프론트엔드 수정 포인트 (`customer.js`):**
+- `createVoiceRecognition()`: Web Speech API 초기화 코드를 `MediaRecorder` 기반 녹음으로 교체
+- 무음 감지 로직 추가 (현재는 Web Speech API가 자동 처리)
+- 녹음 종료 후 오디오 blob을 `data:audio/webm;base64,...` 형식으로 변환해 전송
+
+> **백엔드(`llm_client.py`)는 이미 준비 완료.** `data:audio/...` 형식이 오면 자동으로 `_transcribe()` 경로를 타도록 구현되어 있다. 프론트엔드 수정만 하면 된다.
 
 ---
 
@@ -211,4 +231,5 @@ stub의 단수 필드(`display_policy`, `display_item_id` 등)는 5절에서 `it
 - [x] `web/requirements.txt`에 OpenAI SDK(`openai`) 의존성 추가
 - [x] `build_llm_message`: `gpt-4o-mini-transcribe`로 음성 → 텍스트 변환 후, 텍스트를 LLM으로 파싱해 다중 상품 `items` 리스트 반환으로 교체
 - [x] 상품명 ↔ `product_id` 매핑 로직 (카탈로그 조회 또는 정적 매핑) 구현
-- [ ] (선택) `web/API_USAGE.md`의 `/api/admin/llm/messages` 예시를 다중 상품 입출력 예시로 갱신
+- [x] (선택) `web/API_USAGE.md`의 `/api/customer/llm/messages` 예시를 다중 상품 입출력 예시로 갱신
+- [ ] 프론트엔드(`customer.js`) STT 방식 변경: Web Speech API에서 MediaRecorder + gpt-4o-mini-transcribe 방식으로 교체 (프론트엔드 담당자 작업)
