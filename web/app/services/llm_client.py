@@ -82,13 +82,11 @@ def build_llm_message(
     data URL 형식 오디오(data:audio/... 또는 data:video/...)가 오면 STT 후 파싱,
     일반 텍스트면 바로 파싱한다.
     """
-    stt_api_key = os.getenv("STT_API_KEY")
-    llm_api_key = os.getenv("LLM_API_KEY")
-    if not stt_api_key or not llm_api_key:
-        missing = ", ".join(k for k, v in {"STT_API_KEY": stt_api_key, "LLM_API_KEY": llm_api_key}.items() if not v)
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
         return {
             "result": "error",
-            "message": f"환경변수가 설정되지 않았습니다: {missing}",
+            "message": "OPENAI_API_KEY 환경변수가 설정되지 않았습니다.",
             "action": "CHAT",
             "items": [],
             "provider": "none",
@@ -96,8 +94,9 @@ def build_llm_message(
 
     stt_model = os.getenv("STT_MODEL", "gpt-4o-mini-transcribe")
     parse_model = os.getenv("LLM_MODEL", "gpt-4o-mini")
-    stt_client = OpenAI(api_key=stt_api_key)
-    llm_client = OpenAI(api_key=llm_api_key)
+    client = OpenAI(api_key=api_key)
+    stt_client = client
+    llm_client = client
 
     # 1. STT: data URL이면 오디오로 처리, 아니면 텍스트로 그대로 사용
     is_audio = message.startswith("data:audio") or message.startswith("data:video")
