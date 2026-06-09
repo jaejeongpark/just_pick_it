@@ -653,3 +653,39 @@ class TestNewMapTopology:
             'STOCK_ZONE', 'TRAFFIC_T1', 'PRODUCT_ZONE_1',
             'PRODUCT_ZONE_4', 'TRAFFIC_B1',
         )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 콜드 스타트 도크 점유 (assume_docked_at_start)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestColdStartDockOccupancy:
+    def test_default_no_dock_occupancy(self, mock_node):
+        # 기본값(False): 도크 점유 없이 시작 (기존 동작 보존)
+        tm = TrafficManager(node=mock_node, robot_ids=['PICKY1', 'PICKY2'])
+        assert all(d is None for d in tm._robot_dock.values())
+
+    def test_assume_docked_marks_each_robot_dock(self, mock_node):
+        # 콜드 스타트(True): robot_ids 순서대로 DOCK_PRIORITY 도크를 점유로 초기화
+        tm = TrafficManager(
+            node=mock_node, robot_ids=['PICKY1', 'PICKY2'],
+            assume_docked_at_start=True,
+        )
+        assert tm._robot_dock['PICKY1'] == DOCK_PRIORITY[0][0]   # CHARGING_DOCK_1
+        assert tm._robot_dock['PICKY2'] == DOCK_PRIORITY[1][0]   # CHARGING_DOCK_2
+
+    def test_returning_robot_avoids_other_robots_dock(self, mock_node):
+        # 시나리오: 둘 다 도크에서 시작 → PICKY2 가 작업 나갔다(도크 해제) 복귀.
+        # PICKY1 이 dock1 에 그대로 있으므로 PICKY2 는 dock2(STANDBY_ZONE_2)로 귀환해야
+        # 한다(dock1 충돌 방지). 콜드 스타트 점유가 없으면 dock1 을 비었다고 오인한다.
+        tm = TrafficManager(
+            node=mock_node, robot_ids=['PICKY1', 'PICKY2'],
+            assume_docked_at_start=True,
+        )
+        tm.notify_state('PICKY2', 'MOVING_TO_PRODUCT')   # PICKY2 undock → dock2 해제
+        assert tm._robot_dock['PICKY2'] is None
+        assert tm._robot_dock['PICKY1'] == DOCK_PRIORITY[0][0]   # PICKY1 은 dock1 유지
+        r = tm.reserve_return_home_path('PICKY2', 1, 'TRAFFIC_T1')
+        assert r.ok
+        assert r.waypoints[-1] == 'STANDBY_ZONE_2'       # dock1 점유 → dock2 로 귀환

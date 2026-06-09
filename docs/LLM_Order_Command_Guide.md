@@ -40,53 +40,197 @@ LLM이 이를 구조화된 명령으로 바꿔 Fleet Manager에게 전달한다"
 즉 "음성 → 구조화 주문 명령" 변환을 담당하는 부분이 STT + LLM이며, 현재 코드베이스에는
 이 변환을 끼워 넣을 자리가 이미 stub 형태로 마련되어 있다.
 
-### 음성 입력 시나리오 (목표 흐름)
+### 음성 입력 시나리오 (구현 완료)
 
 ```text
-1. 사용자가 UI의 마이크 버튼을 클릭
+1. 사용자가 고객 UI의 마이크 버튼을 클릭
         |
         v
-2. 마이크 활성화 — 브라우저 MediaRecorder로 녹음 시작
+2. 브라우저가 마이크 권한 요청 (navigator.mediaDevices.getUserMedia)
         |
         v
-3. 사용자가 주문 명령을 말함
+3. 마이크 활성화 — MediaRecorder로 녹음 시작
+        |
+        v
+4. 사용자가 주문 명령을 말함
    예: "수박 두개 식빵 한개 주문해줘"
         |
         v
-4. 무음 감지 — 1초간 음성 입력 없으면 녹음 자동 종료
-   (무음 판정 시간은 설정값으로 조정 가능)
+5. 무음 감지 — 1초간 음성 입력 없으면 녹음 자동 종료
+   (SILENCE_DURATION_MS 상수로 조정 가능, 기본값 1000ms)
         |
         v
-5. 녹음된 오디오 데이터를 POST /api/customer/llm/messages 로 전송
+6. 녹음된 오디오 blob을 data:audio/webm;base64,... 형식으로 변환
         |
         v
-6. gpt-4o-mini-transcribe API가 오디오를 텍스트로 변환
+7. POST /api/customer/llm/messages 로 data URL 전송
+        |
+        v
+8. llm_client.py가 data URL 감지 후 _transcribe() 호출
+   gpt-4o-mini-transcribe API가 오디오를 텍스트로 변환
    예: "수박 두개 식빵 한개 주문해줘"
         |
         v
-7. LLM이 텍스트를 파싱해 구조화된 주문 명령 반환
+9. LLM이 텍스트를 파싱해 구조화된 주문 명령 반환
    예: [{상품: 수박, 수량: 2}, {상품: 식빵, 수량: 1}]
 ```
 
-### 현재 프론트엔드 구현 상태 및 변경 필요 사항
+---
 
-**현재 상태:** `web/app/static/js/customer.js`는 브라우저 내장 Web Speech API(`window.SpeechRecognition`)를 사용해 음성을 텍스트로 변환한다. 변환된 텍스트를 백엔드로 전송하므로 `gpt-4o-mini-transcribe`는 현재 호출되지 않는다.
+## 8. 프론트엔드 STT 방식 변경 (2026-06-09 적용)
 
-**변경 필요:** 위 목표 흐름대로 동작하려면 프론트엔드를 아래와 같이 수정해야 한다.
+### 변경 배경
 
-| 항목 | 현재 | 변경 후 |
+기존 `customer.js`는 브라우저 내장 Web Speech API(`window.SpeechRecognition`)를 사용해 음성을 텍스트로 변환한 뒤 텍스트를 백엔드에 전송했다. 이 방식에서는 `gpt-4o-mini-transcribe`가 전혀 호출되지 않아 백엔드 STT 구현이 동작하지 않는 문제가 있었다.
+
+| 항목 | 변경 전 | 변경 후 |
 |---|---|---|
-| STT 처리 주체 | 브라우저 Web Speech API | OpenAI gpt-4o-mini-transcribe |
+| STT 처리 주체 | 브라우저 Web Speech API (Google 서버) | OpenAI gpt-4o-mini-transcribe |
 | 백엔드로 전송하는 데이터 | 변환된 텍스트 문자열 | 오디오 data URL (`data:audio/webm;base64,...`) |
 | 녹음 방식 | Web Speech API 자체 처리 | 브라우저 MediaRecorder로 직접 녹음 |
-| 브라우저 제약 | Chrome/Edge 전용 | 브라우저 무관 |
+| 무음 감지 | Web Speech API 자동 처리 | RMS 기반 수동 감지 (100ms 간격) |
+| 브라우저 제약 | Chrome / Edge 전용 | 브라우저 무관 |
+| 비용 | 무료 | OpenAI API 과금 |
+| 정확도 | 보통 | 높음 (상품명 오인식 감소) |
 
-**변경 시 프론트엔드 수정 포인트 (`customer.js`):**
-- `createVoiceRecognition()`: Web Speech API 초기화 코드를 `MediaRecorder` 기반 녹음으로 교체
-- 무음 감지 로직 추가 (현재는 Web Speech API가 자동 처리)
-- 녹음 종료 후 오디오 blob을 `data:audio/webm;base64,...` 형식으로 변환해 전송
+### 변경된 파일
 
-> **백엔드(`llm_client.py`)는 이미 준비 완료.** `data:audio/...` 형식이 오면 자동으로 `_transcribe()` 경로를 타도록 구현되어 있다. 프론트엔드 수정만 하면 된다.
+`web/app/static/js/customer.js`
+
+### 상세 변경 내용
+
+#### 1. 상태 변수 교체
+
+```javascript
+// 변경 전
+let voiceRecognition = null;
+let voiceListening = false;
+let voiceOrderSending = false;
+let voiceRecognitionSupported = true;
+
+// 변경 후
+let mediaRecorder = null;       // MediaRecorder 인스턴스
+let audioChunks = [];           // 녹음 데이터 조각 누적 배열
+let voiceListening = false;
+let voiceOrderSending = false;
+let silenceCheckInterval = null; // 무음 감지 인터벌 ID
+let silenceTimer = null;         // 무음 지속 후 녹음 종료 타이머 ID
+const SILENCE_THRESHOLD = 0.01;  // RMS 무음 판정 임계값
+const SILENCE_DURATION_MS = 1000; // 무음 지속 시간(ms), 이 시간이 지나면 녹음 종료
+let voiceRecognitionSupported = true;
+```
+
+#### 2. `startVoiceRecognition()` 함수 교체
+
+```javascript
+// 변경 전: SpeechRecognition 객체를 생성하고 start() 호출
+function startVoiceRecognition() {
+  if (!voiceRecognition) {
+    voiceRecognition = createVoiceRecognition();
+  }
+  if (voiceListening) {
+    voiceRecognition.stop();
+    return;
+  }
+  voiceRecognition.start();
+}
+
+// 변경 후: 녹음 중이면 중단, 아니면 startMediaRecording() 호출
+function startVoiceRecognition() {
+  if (!window.isSecureContext) { ... }
+  if (voiceListening) {
+    if (mediaRecorder && mediaRecorder.state === "recording") {
+      mediaRecorder.stop();
+    }
+    return;
+  }
+  startMediaRecording();
+}
+```
+
+#### 3. `createVoiceRecognition()` 제거 및 `startMediaRecording()` 신규 추가
+
+기존 Web Speech API 초기화 함수(`createVoiceRecognition`)를 완전히 제거하고 `startMediaRecording` 비동기 함수로 대체했다.
+
+```javascript
+async function startMediaRecording() {
+  // 1. MediaRecorder 지원 여부 확인
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
+    voiceRecognitionSupported = false;
+    // 버튼 비활성화 및 에러 메시지 표시
+    return;
+  }
+
+  // 2. 마이크 권한 요청
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    // NotAllowedError: 권한 거부 / NotFoundError: 마이크 없음 등 처리
+    return;
+  }
+
+  // 3. UI 상태 업데이트
+  voiceListening = true;
+  voiceOrderMicButton?.classList.add("is-listening");
+  setVoiceOrderFeedback("listening", "듣는 중", "...");
+  audioChunks = [];
+
+  // 4. Web Audio API로 무음 감지 설정
+  const audioCtx = new AudioContext();
+  const analyser = audioCtx.createAnalyser();
+  audioCtx.createMediaStreamSource(stream).connect(analyser);
+  // 100ms마다 RMS를 계산해 SILENCE_THRESHOLD 미만이면 silenceTimer 시작
+  // 음성이 감지되면 silenceTimer 초기화
+  silenceCheckInterval = setInterval(() => { /* RMS 체크 */ }, 100);
+
+  // 5. MediaRecorder 설정 및 녹음 시작
+  mediaRecorder = new MediaRecorder(stream);
+  mediaRecorder.addEventListener("dataavailable", (event) => {
+    audioChunks.push(event.data);  // 녹음 데이터 누적
+  });
+  mediaRecorder.addEventListener("stop", () => {
+    // 인터벌/타이머 정리, 스트림 종료, AudioContext 닫기
+    // audioChunks를 Blob으로 합쳐 FileReader로 data URL 변환
+    // handleVoiceOrderMessage(dataUrl) 호출
+  });
+  mediaRecorder.start();
+}
+```
+
+#### 4. `handleVoiceOrderMessage()` 피드백 텍스트 분기 추가
+
+data URL 전체를 화면에 표시하는 것을 방지하기 위해 오디오 여부에 따라 표시 문구를 분기했다.
+
+```javascript
+// 변경 전
+setVoiceOrderFeedback("running", "처리 중", `"${message}"`);
+
+// 변경 후
+const isAudio = message.startsWith("data:audio") || message.startsWith("data:video");
+setVoiceOrderFeedback("running", "처리 중", isAudio ? "음성 변환 중..." : `"${message}"`);
+```
+
+### 무음 감지 동작 원리
+
+```text
+녹음 시작
+    |
+    v
+100ms마다 AnalyserNode에서 RMS(음량) 계산
+    |
+    +-- RMS >= 0.01 (음성 있음): silenceTimer 초기화
+    |
+    +-- RMS < 0.01 (무음): 1000ms 타이머 시작
+            |
+            v
+        타이머 만료 전에 음성 감지 시: 타이머 초기화
+            |
+            v
+        타이머 만료 (1초간 계속 무음): mediaRecorder.stop() 호출
+```
+
+`SILENCE_THRESHOLD`(기본값 0.01)와 `SILENCE_DURATION_MS`(기본값 1000)는 `customer.js` 상단 상수로 선언되어 있어 조정이 쉽다.
 
 ---
 
@@ -232,4 +376,4 @@ stub의 단수 필드(`display_policy`, `display_item_id` 등)는 5절에서 `it
 - [x] `build_llm_message`: `gpt-4o-mini-transcribe`로 음성 → 텍스트 변환 후, 텍스트를 LLM으로 파싱해 다중 상품 `items` 리스트 반환으로 교체
 - [x] 상품명 ↔ `product_id` 매핑 로직 (카탈로그 조회 또는 정적 매핑) 구현
 - [x] (선택) `web/API_USAGE.md`의 `/api/customer/llm/messages` 예시를 다중 상품 입출력 예시로 갱신
-- [ ] 프론트엔드(`customer.js`) STT 방식 변경: Web Speech API에서 MediaRecorder + gpt-4o-mini-transcribe 방식으로 교체 (프론트엔드 담당자 작업)
+- [x] 프론트엔드(`customer.js`) STT 방식 변경: Web Speech API에서 MediaRecorder + gpt-4o-mini-transcribe 방식으로 교체 (2026-06-09 완료)
