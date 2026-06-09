@@ -28,7 +28,13 @@ def _fetch_products() -> list[dict]:
         if resp.status_code == 200:
             data = resp.json()
             if isinstance(data, list) and data:
-                return data
+                return [
+                    {
+                        "product_id": p["product_id"],
+                        "product_name": p.get("product_name") or p.get("name"),
+                    }
+                    for p in data
+                ]
     except Exception:
         pass
     return _FALLBACK_PRODUCTS
