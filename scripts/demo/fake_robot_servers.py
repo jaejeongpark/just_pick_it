@@ -39,13 +39,13 @@ ARRIVAL_STATE = {
 }
 
 DOCK_POSES = {
-    "CHARGING_DOCK_1": (0.11, 0.07, 0.0),
-    "CHARGING_DOCK_2": (0.28, 0.07, 0.0),
+    "CHARGING_DOCK_1": (0.11, 0.08, 0.0),
+    "CHARGING_DOCK_2": (0.28, 0.08, 0.0),
 }
 
 INITIAL_PICKY_POSES = {
-    "PICKY1": (0.11, 0.07, 0.0),
-    "PICKY2": (0.28, 0.07, 0.0),
+    "PICKY1": (0.11, 0.08, 0.0),
+    "PICKY2": (0.28, 0.08, 0.0),
 }
 
 COBOT_TASK_PHASES = {

@@ -90,12 +90,12 @@ class Amr2StateMachine(Node):
         # 충전 도크별 ArUco 마커 ID와 도크의 절대 좌표(map frame).
         # DockCommand goal 의 dock_name 으로 lookup 한다.
         self.declare_parameter('charging_dock_1.marker_id', 0)
-        self.declare_parameter('charging_dock_1.map_x', 0.10)
-        self.declare_parameter('charging_dock_1.map_y', 0.10)
+        self.declare_parameter('charging_dock_1.map_x', 0.11)
+        self.declare_parameter('charging_dock_1.map_y', 0.08)
         self.declare_parameter('charging_dock_1.map_yaw', 0.0)
         self.declare_parameter('charging_dock_2.marker_id', 1)
-        self.declare_parameter('charging_dock_2.map_x', 0.27)
-        self.declare_parameter('charging_dock_2.map_y', 0.10)
+        self.declare_parameter('charging_dock_2.map_x', 0.28)
+        self.declare_parameter('charging_dock_2.map_y', 0.08)
         self.declare_parameter('charging_dock_2.map_yaw', 0.0)
 
         self._robot_id = self.get_parameter('robot_id').value

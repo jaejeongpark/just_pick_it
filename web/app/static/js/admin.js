@@ -47,16 +47,6 @@ const modalPanel = document.querySelector(".modal-panel");
 const modalTitle = document.querySelector("#modal-title");
 const modalBody = document.querySelector("#modal-body");
 const modalCloseButton = document.querySelector("#modal-close-button");
-const llmPanel = document.querySelector("#llm-panel");
-const llmOpenButton = document.querySelector("#llm-open-button");
-const llmCloseButton = document.querySelector("#llm-close-button");
-const llmMessages = document.querySelector("#llm-messages");
-const llmForm = document.querySelector("#llm-form");
-const llmInput = document.querySelector("#llm-input");
-const dashboardLlmForm = document.querySelector("#dashboard-llm-form");
-const dashboardLlmInput = document.querySelector("#dashboard-llm-input");
-const dashboardLlmStatus = document.querySelector("#dashboard-llm-status");
-const dashboardLlmResult = document.querySelector("#dashboard-llm-result");
 const adminPage = document.body.dataset.adminPage || "dashboard";
 let adminSocket = null;
 let fallbackTimer = null;
@@ -1640,6 +1630,32 @@ function currentMoveTask(robot) {
   };
 }
 
+function renderRobotCurrentTaskCell(robot, task) {
+  if (!task) {
+    return "-";
+  }
+
+  const taskText = `${taskTargetLabel(task)} · ${taskDisplayTitle(task)}`;
+  const taskStatus = robot?.current_task_status || task?.status;
+  const robotName = robot?.robot_name || robotDisplayName(robot);
+
+  if (taskStatus !== "RUNNING" || !robotName) {
+    return taskText;
+  }
+
+  return `
+    <span class="task-cell-main">${taskText}</span>
+    <span
+      class="debug-task-success-action"
+      role="button"
+      tabindex="0"
+      title="디버그용으로 현재 RUNNING task를 SUCCESS 처리"
+      data-debug-running-task="${robotName}"
+      data-debug-task-id="${task.task_id}"
+    >완료 처리</span>
+  `;
+}
+
 function plannedWaypointNamesForRobot(robot) {
   const waypoints =
     robot?.planned_waypoints || robot?.current_task?.planned_waypoints;
@@ -2220,7 +2236,7 @@ function renderRobotManagement(robots) {
               <span><span class="state-badge ${statusClass(status)}">${label(status)}</span></span>
               <span>${robotStateLabel(robot)}</span>
               <span>${renderBatteryMeter(robot.battery_level)}</span>
-              <span class="task-cell">${task ? `${taskTargetLabel(task)} · ${taskDisplayTitle(task)}` : "-"}</span>
+              <span class="task-cell">${renderRobotCurrentTaskCell(robot, task)}</span>
               <span class="location-cell">${robotLocationText(robot)}</span>
             </div>
           `;
@@ -2266,13 +2282,13 @@ function renderRobots(robots) {
           const status = robotStatusValue(robot);
 
           return `
-            <button class="admin-table-row robot-table-row" type="button" data-robot-detail="${robot.robot_id}">
+            <div class="admin-table-row robot-table-row" role="button" tabindex="0" data-robot-detail="${robot.robot_id}">
               <span class="robot-name-cell" title="#${robot.robot_id}"><i class="${robotTypeClass}"></i>${displayName}</span>
               <span><span class="state-badge ${statusClass(status)}">${label(status)}</span></span>
               <span>${robotStateLabel(robot)}</span>
-              <span class="task-cell">${task ? `${taskTargetLabel(task)} · ${taskDisplayTitle(task)}` : "-"}</span>
+              <span class="task-cell">${renderRobotCurrentTaskCell(robot, task)}</span>
               <span>${renderBatteryMeter(robot.battery_level)}</span>
-            </button>
+            </div>
           `;
         })
         .join("")}
@@ -3821,6 +3837,31 @@ async function updateRobotPanelState(robotId) {
   selectedRobotId = robotId;
 }
 
+async function debugCompleteRunningRobotTask(robotName, taskId) {
+  const encodedRobotName = encodeURIComponent(robotName);
+  await postJson(`/api/admin/debug/robots/${encodedRobotName}/running-task/success`, {
+    message: `admin debug SUCCESS for task #${taskId || "-"}`,
+  });
+}
+
+function handleDebugRunningTaskAction(debugAction) {
+  if (!debugAction || debugAction.getAttribute("aria-disabled") === "true") {
+    return false;
+  }
+
+  debugAction.classList.add("is-pending");
+  debugAction.setAttribute("aria-disabled", "true");
+  debugCompleteRunningRobotTask(
+    debugAction.dataset.debugRunningTask,
+    debugAction.dataset.debugTaskId,
+  ).catch((error) => {
+    alert(error.message);
+    debugAction.classList.remove("is-pending");
+    debugAction.removeAttribute("aria-disabled");
+  });
+  return true;
+}
+
 async function updateProductStock(productId, stockQty) {
   const response = await fetch(`/api/admin/products/${productId}/stock`, {
     method: "PATCH",
@@ -3961,67 +4002,6 @@ async function createPickupSlot() {
   openPickupSlotManager();
 }
 
-function appendLlmMessage(role, text) {
-  if (!llmMessages) {
-    return;
-  }
-
-  const message = document.createElement("div");
-  message.className = `llm-message ${role}`;
-  message.textContent = text;
-  llmMessages.appendChild(message);
-  llmMessages.scrollTop = llmMessages.scrollHeight;
-}
-
-function buildLlmFailureReply(command) {
-  const lowerCommand = command.toLowerCase();
-
-  if (
-    lowerCommand.includes("진열") ||
-    lowerCommand.includes("display") ||
-    lowerCommand.includes("place")
-  ) {
-    return "진열 명령을 처리하지 못했습니다. AI 메시지 API와 Fleet Manager 상태를 확인해주세요.";
-  }
-
-  if (lowerCommand.includes("재고") || lowerCommand.includes("stock")) {
-    return `현재 재고 부족 상품은 ${latestAdminStatus?.low_stock_count ?? 0}개입니다. Inventory 관리에서 수량을 조정할 수 있습니다.`;
-  }
-
-  if (lowerCommand.includes("예외") || lowerCommand.includes("exception")) {
-    return `미처리 예외는 ${latestAdminStatus?.unresolved_exception_count ?? 0}건입니다. Exceptions 영역에서 처리할 수 있습니다.`;
-  }
-
-  return "AI 메시지 API 호출에 실패했습니다. 서버 상태를 확인해주세요.";
-}
-
-async function sendLlmMessage(message) {
-  const response = await fetch("/api/admin/llm/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ message }),
-  });
-
-  if (!response.ok) {
-    throw new Error("AI 메시지 전송 실패");
-  }
-
-  return response.json();
-}
-
-function setDashboardLlmFeedback(state, statusText, resultText) {
-  if (dashboardLlmStatus) {
-    dashboardLlmStatus.className = `ai-command-status ${state}`;
-    dashboardLlmStatus.textContent = statusText;
-  }
-
-  if (dashboardLlmResult) {
-    dashboardLlmResult.textContent = resultText;
-  }
-}
-
 function refreshOrderManagementView() {
   renderOrders(latestAdminStatus?.orders || []);
   renderTaskSnapshot(latestAdminStatus?.tasks || []);
@@ -4160,6 +4140,14 @@ orderList?.addEventListener("click", (event) => {
 });
 
 robotStatus?.addEventListener("click", (event) => {
+  const debugAction = event.target.closest("[data-debug-running-task]");
+  if (debugAction) {
+    event.preventDefault();
+    event.stopPropagation();
+    handleDebugRunningTaskAction(debugAction);
+    return;
+  }
+
   const row = event.target.closest("[data-robot-select]");
 
   if (adminPage === "robots") {
@@ -4172,13 +4160,28 @@ robotStatus?.addEventListener("click", (event) => {
     return;
   }
 
-  const button = event.target.closest("button[data-robot-detail]");
+  const button = event.target.closest("[data-robot-detail]");
 
   if (!button) {
     return;
   }
 
   openRobotDetail(button.dataset.robotDetail);
+});
+
+robotStatus?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") {
+    return;
+  }
+
+  const debugAction = event.target.closest("[data-debug-running-task]");
+  if (!debugAction) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  handleDebugRunningTaskAction(debugAction);
 });
 
 robotDetailPanel?.addEventListener("click", (event) => {
@@ -4326,77 +4329,6 @@ modalBody?.addEventListener("change", (event) => {
   if (statusFilter) {
     event.stopPropagation();
     applyTaskHistoryFilter();
-  }
-});
-llmOpenButton?.addEventListener("click", () => {
-  if (llmPanel) {
-    llmPanel.hidden = false;
-    llmInput?.focus();
-  }
-});
-llmCloseButton?.addEventListener("click", () => {
-  if (llmPanel) {
-    llmPanel.hidden = true;
-  }
-});
-llmForm?.addEventListener("submit", async (event) => {
-  event.preventDefault();
-
-  const command = llmInput?.value.trim();
-
-  if (!command) {
-    return;
-  }
-
-  appendLlmMessage("user", command);
-  llmInput.value = "";
-
-  try {
-    const response = await sendLlmMessage(command);
-    appendLlmMessage("bot", response.message);
-  } catch (error) {
-    appendLlmMessage("bot", buildLlmFailureReply(command));
-  }
-});
-dashboardLlmForm?.addEventListener("submit", async (event) => {
-  event.preventDefault();
-
-  const command = dashboardLlmInput?.value.trim();
-
-  if (!command) {
-    return;
-  }
-
-  const submitButton = dashboardLlmForm.querySelector("button[type='submit']");
-  if (submitButton) {
-    submitButton.disabled = true;
-  }
-  dashboardLlmInput.value = "";
-  setDashboardLlmFeedback(
-    "running",
-    "명령 전송 중",
-    `"${command}" 명령을 AI 메시지 API로 보내는 중입니다.`,
-  );
-
-  try {
-    const response = await sendLlmMessage(command);
-    const isError = response.result === "error";
-    setDashboardLlmFeedback(
-      isError ? "error" : "success",
-      isError ? "응답 실패" : "응답 완료",
-      response.message || "AI 응답이 도착했습니다.",
-    );
-  } catch (error) {
-    setDashboardLlmFeedback(
-      "error",
-      "응답 실패",
-      "AI 메시지 API 호출에 실패했습니다. 서버 상태를 확인해주세요.",
-    );
-  } finally {
-    if (submitButton) {
-      submitButton.disabled = false;
-    }
-    dashboardLlmInput?.focus();
   }
 });
 modalCloseButton?.addEventListener("click", closeModal);

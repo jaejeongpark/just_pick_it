@@ -5,6 +5,12 @@ const productCount = document.querySelector("#product-count");
 const cartList = document.querySelector("#cart-list");
 const clearCartButton = document.querySelector("#clear-cart-button");
 const orderCountPill = document.querySelector("#order-count-pill");
+const voiceOrderForm = document.querySelector("#voice-order-form");
+const voiceOrderInput = document.querySelector("#voice-order-input");
+const voiceOrderMicButton = document.querySelector("#voice-order-mic-button");
+const voiceOrderSubmit = document.querySelector("#voice-order-submit");
+const voiceOrderStatus = document.querySelector("#voice-order-status");
+const voiceOrderResult = document.querySelector("#voice-order-result");
 
 let productsById = new Map();
 let cart = new Map();
@@ -12,6 +18,10 @@ let activeOrders = new Map();
 let customerSocket = null;
 let fallbackTimer = null;
 let failedOrderKey = 0;
+let voiceRecognition = null;
+let voiceListening = false;
+let voiceOrderSending = false;
+let voiceRecognitionSupported = true;
 
 const orderStatusText = {
   ORDER_RECEIVED: "주문 접수",
@@ -23,6 +33,125 @@ const orderStatusText = {
   COMPLETED: "수령 완료",
   ERROR: "예외 발생",
 };
+
+function setVoiceOrderFeedback(state, statusText, resultText) {
+  if (voiceOrderStatus) {
+    voiceOrderStatus.className = `voice-order-status ${state}`;
+    voiceOrderStatus.textContent = statusText;
+  }
+
+  if (voiceOrderResult) {
+    voiceOrderResult.textContent = resultText;
+  }
+}
+
+function setVoiceOrderControlsDisabled(disabled) {
+  if (voiceOrderSubmit) {
+    voiceOrderSubmit.disabled = disabled;
+  }
+
+  if (voiceOrderMicButton && voiceRecognitionSupported) {
+    if (disabled) {
+      voiceOrderMicButton.disabled = true;
+    } else if (!voiceListening) {
+      voiceOrderMicButton.disabled = false;
+    }
+  }
+}
+
+async function sendCustomerLlmMessage(message) {
+  const response = await fetch("/api/customer/llm/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ message }),
+  });
+
+  if (!response.ok) {
+    throw new Error("failed to send voice order");
+  }
+
+  return response.json();
+}
+
+async function handleVoiceOrderMessage(message) {
+  voiceOrderSending = true;
+  setVoiceOrderControlsDisabled(true);
+  setVoiceOrderFeedback("running", "처리 중", `"${message}"`);
+
+  try {
+    const response = await sendCustomerLlmMessage(message);
+    const isError = response.result === "error";
+    setVoiceOrderFeedback(
+      isError ? "error" : "success",
+      isError ? "응답 실패" : "응답 완료",
+      response.message || "주문 요청이 처리되었습니다.",
+    );
+  } catch (error) {
+    setVoiceOrderFeedback(
+      "error",
+      "응답 실패",
+      "음성 주문 요청을 처리하지 못했습니다.",
+    );
+  } finally {
+    voiceOrderSending = false;
+    setVoiceOrderControlsDisabled(false);
+    voiceOrderInput?.focus();
+  }
+}
+
+function createVoiceRecognition() {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+  if (!SpeechRecognition) {
+    voiceRecognitionSupported = false;
+    if (voiceOrderMicButton) {
+      voiceOrderMicButton.disabled = true;
+    }
+    setVoiceOrderFeedback("error", "음성 미지원", "텍스트로 주문 요청을 입력해주세요.");
+    return null;
+  }
+
+  const recognition = new SpeechRecognition();
+  recognition.lang = "ko-KR";
+  recognition.interimResults = false;
+  recognition.maxAlternatives = 1;
+
+  recognition.addEventListener("start", () => {
+    voiceListening = true;
+    voiceOrderMicButton?.classList.add("is-listening");
+    setVoiceOrderFeedback("listening", "듣는 중", "...");
+  });
+
+  recognition.addEventListener("result", (event) => {
+    const transcript = event.results?.[0]?.[0]?.transcript?.trim();
+
+    if (!transcript) {
+      setVoiceOrderFeedback("error", "인식 실패", "음성을 인식하지 못했습니다.");
+      return;
+    }
+
+    if (voiceOrderInput) {
+      voiceOrderInput.value = transcript;
+    }
+    handleVoiceOrderMessage(transcript);
+  });
+
+  recognition.addEventListener("error", () => {
+    setVoiceOrderFeedback("error", "인식 실패", "음성을 인식하지 못했습니다.");
+  });
+
+  recognition.addEventListener("end", () => {
+    voiceListening = false;
+    voiceOrderMicButton?.classList.remove("is-listening");
+    if (voiceOrderMicButton && !voiceOrderSending && voiceRecognitionSupported) {
+      voiceOrderMicButton.disabled = false;
+    }
+  });
+
+  return recognition;
+}
 
 function getCartTotal() {
   return Array.from(cart.values()).reduce((total, quantity) => total + quantity, 0);
@@ -507,6 +636,40 @@ orderStatusList?.addEventListener("click", async (event) => {
     updateOrderStatus(order);
   } catch (error) {
     button.disabled = false;
+  }
+});
+
+voiceOrderForm?.addEventListener("submit", (event) => {
+  event.preventDefault();
+
+  const message = voiceOrderInput?.value.trim();
+
+  if (!message) {
+    setVoiceOrderFeedback("error", "입력 필요", "주문 내용을 입력해주세요.");
+    return;
+  }
+
+  handleVoiceOrderMessage(message);
+});
+
+voiceOrderMicButton?.addEventListener("click", () => {
+  if (!voiceRecognition) {
+    voiceRecognition = createVoiceRecognition();
+  }
+
+  if (!voiceRecognition) {
+    return;
+  }
+
+  if (voiceListening) {
+    voiceRecognition.stop();
+    return;
+  }
+
+  try {
+    voiceRecognition.start();
+  } catch (error) {
+    setVoiceOrderFeedback("error", "인식 실패", "음성 입력을 시작하지 못했습니다.");
   }
 });
 

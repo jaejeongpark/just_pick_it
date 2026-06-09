@@ -21,7 +21,7 @@ router = APIRouter(tags=["llm-command"])
 # Schemas
 # =====================================
 
-class AdminLlmMessageIn(BaseModel):
+class LlmMessageIn(BaseModel):
     message: str = Field(min_length=1)
 
 
@@ -92,13 +92,13 @@ async def _create_display_item(parsed: dict) -> dict:
 # =====================================
 
 @router.post("/api/admin/llm/messages")
-async def create_llm_message(body: AdminLlmMessageIn) -> dict:
+async def create_admin_llm_message(body: LlmMessageIn) -> dict:
     """관리자 AI 명령을 처리한다.
 
     LLM parser/client 는 Web Gateway 에 남긴다. 다만 DB 쓰기는 직접 하지 않고,
     DISPLAY 로 파싱된 경우 Fleet API 에 display_item 생성을 위임한다.
     """
-    parsed = build_llm_message(body.message)
+    parsed = build_llm_message(body.message, context={"surface": "admin"})
     if parsed.get("result") == "error":
         return parsed
 
@@ -106,3 +106,9 @@ async def create_llm_message(body: AdminLlmMessageIn) -> dict:
         return await _create_display_item(parsed)
 
     return parsed
+
+
+@router.post("/api/customer/llm/messages")
+async def create_customer_llm_message(body: LlmMessageIn) -> dict:
+    """고객 음성/텍스트 주문 메시지를 LLM parser/client 로 전달한다."""
+    return build_llm_message(body.message, context={"surface": "customer"})

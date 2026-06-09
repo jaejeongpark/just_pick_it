@@ -5,11 +5,11 @@ def build_llm_message(
     message: str,
     context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Admin AI 명령 파싱 진입점.
+    """LLM 명령 파싱 진입점.
 
     LLM 담당자는 이 함수만 실제 구현으로 교체하면 된다.
-    반환값이 action=DISPLAY 이고 product_id/requested_quantity 등이 채워지면
-    llm_router 가 Fleet API 에 display_item 생성을 위임한다.
+    관리자 경로에서 반환값이 action=DISPLAY 이고 product_id/requested_quantity 등이
+    채워지면 llm_router 가 Fleet API 에 display_item 생성을 위임한다.
     """
 
     return {

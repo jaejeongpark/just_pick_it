@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Just Pick It Customer</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260513-assets">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260609-voice-order">
   </head>
   <body>
     <header class="topbar">
@@ -30,6 +30,35 @@
         </section>
 
         <aside class="side-stack">
+          <section class="section-band voice-order-section">
+            <div class="section-heading">
+              <h2>음성 주문</h2>
+              <span id="voice-order-status" class="voice-order-status idle"
+                >대기 중</span
+              >
+            </div>
+            <form id="voice-order-form" class="voice-order-form">
+              <input
+                id="voice-order-input"
+                type="text"
+                autocomplete="off"
+                placeholder="예: 생수 두 개 주문해줘"
+              >
+              <button
+                id="voice-order-mic-button"
+                class="mic-button"
+                type="button"
+                aria-label="음성 입력 시작"
+              >
+                <span class="mic-icon" aria-hidden="true"></span>
+              </button>
+              <button id="voice-order-submit" class="primary-button" type="submit">
+                주문 요청
+              </button>
+            </form>
+            <p id="voice-order-result" class="voice-order-result">대기 중</p>
+          </section>
+
           <section class="section-band">
             <div class="section-heading">
               <h2>장바구니</h2>
@@ -54,6 +83,6 @@
       </section>
     </main>
 
-    <script src="/static/js/customer.js?v=20260513-images"></script>
+    <script src="/static/js/customer.js?v=20260609-voice-order"></script>
   </body>
 </html>

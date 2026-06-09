@@ -41,7 +41,7 @@ amcl:
     # PICKY2 시작 도크 = CHARGING_DOCK_2 (절대좌표, map=절대 프레임). 헤드는 +y(위) 방향.
     initial_pose:
       x: 0.28
-      y: 0.07
+      y: 0.08
       z: 0.0
       yaw: 1.5708
 
@@ -98,18 +98,18 @@ controller_server:
     general_goal_checker:
       stateful: True
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.25
-      yaw_goal_tolerance: 0.25
+      xy_goal_tolerance: 0.03
+      yaw_goal_tolerance: 0.10
 
     # ★ 여기부터: Regulated Pure Pursuit 컨트롤러 설정
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
 
       # 기본 속도들 (Pinky 상황 맞게 나중에 조정 가능)
-      desired_linear_vel: 0.20      # [m/s]
-      max_linear_accel: 0.5         # [m/s^2]
-      max_linear_decel: 0.5         # [m/s^2]
-      max_angular_vel: 1.0          # [rad/s]
+      desired_linear_vel: 0.20 # [m/s]
+      max_linear_accel: 0.5 # [m/s^2]
+      max_linear_decel: 0.5 # [m/s^2]
+      max_angular_vel: 0.5 # [rad/s]
 
       # 경로 추종 관련
       lookahead_dist: 0.6
@@ -132,12 +132,12 @@ controller_server:
       rotate_to_heading_min_angle: 0.35
 
       # 3) 회전 속도 (in-place 회전일 때 angular vel)
-      rotate_to_heading_angular_vel: 1.0
+      rotate_to_heading_angular_vel: 0.4
 
       # 4) 회전할 때는 전진 속도 0에 가깝게 (거의 제자리 회전)
-      max_angular_accel: 3.2
+      max_angular_accel: 1.0
       allow_reversing: false
-      use_rotate_to_heading_threshold: 0.15  # 헤딩 오차 이내면 전진으로 전환
+      use_rotate_to_heading_threshold: 0.15 # 헤딩 오차 이내면 전진으로 전환
 
       # ========= goal 근처에서 고개 맞추기 =========
       final_rotation_alpha: 1.0
@@ -157,7 +157,6 @@ controller_server:
       cost_scaling_dist: 0.15
       cost_scaling_gain: 1.5
 
-
 local_costmap:
   local_costmap:
     ros__parameters:
@@ -170,7 +169,7 @@ local_costmap:
       height: 3
       resolution: 0.03
       #robot_radius: 0.22
-      footprint: '[[0.06, 0.06], [0.06, -0.06], [-0.06, -0.06], [-0.06, 0.06]]'
+      footprint: "[[0.06, 0.06], [0.06, -0.06], [-0.06, -0.06], [-0.06, 0.06]]"
       plugins: ["voxel_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
@@ -210,7 +209,7 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_footprint
       #robot_radius: 0.22
-      footprint: '[[0.06, 0.06], [0.06, -0.06], [-0.06, -0.06], [-0.06, 0.06]]'
+      footprint: "[[0.06, 0.06], [0.06, -0.06], [-0.06, -0.06], [-0.06, 0.06]]"
       resolution: 0.03
       track_unknown_space: true
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
@@ -278,7 +277,8 @@ behavior_server:
     local_footprint_topic: local_costmap/published_footprint
     global_footprint_topic: global_costmap/published_footprint
     cycle_frequency: 10.0
-    behavior_plugins: ["spin", "backup", "drive_on_heading", "assisted_teleop", "wait"]
+    behavior_plugins:
+      ["spin", "backup", "drive_on_heading", "assisted_teleop", "wait"]
     spin:
       plugin: "nav2_behaviors::Spin"
     backup:
