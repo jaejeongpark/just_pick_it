@@ -207,8 +207,8 @@ stub의 단수 필드(`display_policy`, `display_item_id` 등)는 5절에서 `it
 
 ## 7. 구현 체크리스트
 
-- [ ] `web/.env`(`.env.example`) + `config.py`에 STT/LLM provider / API 키 / 모델명 환경변수 추가 (`OPENAI_API_KEY`, `STT_MODEL=gpt-4o-mini-transcribe` 등)
-- [ ] `web/requirements.txt`에 OpenAI SDK(`openai`) 의존성 추가
-- [ ] `build_llm_message`: `gpt-4o-mini-transcribe`로 음성 → 텍스트 변환 후, 텍스트를 LLM으로 파싱해 다중 상품 `items` 리스트 반환으로 교체
-- [ ] 상품명 ↔ `product_id` 매핑 로직 (카탈로그 조회 또는 정적 매핑) 구현
+- [x] `web/.env`(`.env.example`) + `config.py`에 STT/LLM provider / API 키 / 모델명 환경변수 추가 (`OPENAI_API_KEY`, `STT_MODEL=gpt-4o-mini-transcribe` 등)
+- [x] `web/requirements.txt`에 OpenAI SDK(`openai`) 의존성 추가
+- [x] `build_llm_message`: `gpt-4o-mini-transcribe`로 음성 → 텍스트 변환 후, 텍스트를 LLM으로 파싱해 다중 상품 `items` 리스트 반환으로 교체
+- [x] 상품명 ↔ `product_id` 매핑 로직 (카탈로그 조회 또는 정적 매핑) 구현
 - [ ] (선택) `web/API_USAGE.md`의 `/api/admin/llm/messages` 예시를 다중 상품 입출력 예시로 갱신

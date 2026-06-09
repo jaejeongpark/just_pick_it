@@ -84,24 +84,33 @@ PATCH  /api/fleet/pickup-slots/{slot_id}
 POST /api/customer/llm/messages
 ```
 
-요청:
+요청 (텍스트 또는 data URL 형식 오디오):
 
 ```json
 {
-  "message": "생수 두 개 주문해줘"
+  "message": "수박 두개 식빵 한개 주문해줘"
 }
 ```
 
-`llm_client.py`가 `action="ORDER"`와 `items`를 반환하면 Web Gateway가
-Fleet API `POST /api/orders`를 호출한다.
+응답 (다중 상품 주문 성공 시):
 
-직접 진열 요청 생성:
-
-```bash
-curl -X POST http://localhost:8000/api/admin/display-items \
-  -H 'Content-Type: application/json' \
-  -d '{"product_id":1,"requested_quantity":3,"display_policy":"REQUESTED_QUANTITY"}'
+```json
+{
+  "result": "ok",
+  "message": "주문이 생성되었습니다. order_id=1, order_no=ORD-0001",
+  "action": "ORDER",
+  "items": [
+    {"product_id": 1, "product_name": "수박", "quantity": 2},
+    {"product_id": 2, "product_name": "식빵", "quantity": 1}
+  ],
+  "provider": "gpt-4o-mini-transcribe + gpt-4o-mini",
+  "order_id": 1,
+  "order_no": "ORD-0001"
+}
 ```
+
+`llm_client.py`가 음성 → STT(`gpt-4o-mini-transcribe`) → 텍스트 파싱(`gpt-4o-mini`) 순서로 처리하고,
+`action="ORDER"`이면 Web Gateway가 Fleet API `POST /api/orders`를 호출한다.
 
 ## WebSocket
 
