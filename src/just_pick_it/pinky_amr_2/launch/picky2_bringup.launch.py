@@ -19,7 +19,7 @@ from launch.actions import (
 from launch.conditions import IfCondition
 from launch.launch_description_sources import AnyLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import Node, SetRemap
+from launch_ros.actions import Node, SetRemap, PushROSNamespace
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
@@ -49,6 +49,12 @@ def generate_launch_description():
 
     picky2_bringup = GroupAction(
         [
+            # 노드 이름을 /<namespace>/<node> 로 네임스페이스화(2대 동시 시연 시
+            # /pinky_bringup, /sllidar_node, /battery_publisher 등 글로벌 노드 이름 충돌
+            # 방지). 아래 RSP/JSP 는 PushROSNamespace 가 일괄 적용하도록 명시 namespace 를
+            # 제거했다(중복 /picky2/picky2 방지). 프레임은 frame_prefix="" 라 무접두어 유지,
+            # /tf 분리는 SetRemap(/tf -> /picky2/tf)이 담당(PushROSNamespace 는 절대 /tf 무관).
+            PushROSNamespace(namespace),
             SetRemap(src="/cmd_vel", dst=ns("cmd_vel")),
             SetRemap(src="/odom", dst=ns("odom")),
             SetRemap(src="/scan", dst=ns("scan")),
@@ -62,7 +68,6 @@ def generate_launch_description():
             Node(
                 package="robot_state_publisher",
                 executable="robot_state_publisher",
-                namespace=namespace,
                 parameters=[{
                     "ignore_timestamp": False,
                     "use_sim_time": use_sim_time,
@@ -80,7 +85,6 @@ def generate_launch_description():
             Node(
                 package="joint_state_publisher",
                 executable="joint_state_publisher",
-                namespace=namespace,
                 parameters=[{
                     "source_list": ["joint_states"],
                     "rate": 20.0,

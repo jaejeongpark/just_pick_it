@@ -19,7 +19,7 @@ from launch.actions import (
 from launch.conditions import IfCondition
 from launch.launch_description_sources import AnyLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import SetRemap, Node
+from launch_ros.actions import SetRemap, Node, PushROSNamespace
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -39,6 +39,13 @@ def generate_launch_description():
 
     bringup = GroupAction(
         [
+            # 노드 이름을 /<namespace>/<node> 로 네임스페이스화(2대 동시 시연 시
+            # /pinky_bringup, /sllidar_node 등 글로벌 노드 이름 충돌 방지).
+            # 프레임은 여전히 무접두어(아래 inner group 이 namespace LaunchConfiguration 을
+            # 비워 frame_prefix="" 유지), /tf 분리는 SetRemap(/tf -> /picky1/tf)이 담당.
+            # PushROSNamespace 는 노드 이름·상대토픽만 prepend 하고 tf2 의 절대 /tf 와
+            # frame_prefix 엔 관여하지 않아 기존 "무접두어 프레임 + namespaced /tf" 설계와 양립.
+            PushROSNamespace(namespace),
             SetRemap(src="/cmd_vel", dst=ns("cmd_vel")),
             SetRemap(src="/odom", dst=ns("odom")),
             SetRemap(src="/scan", dst=ns("scan")),
