@@ -1,0 +1,30 @@
+rosbag2_bagfile_information:
+  version: 9
+  storage_identifier: sqlite3
+  duration:
+    nanoseconds: 29100441596
+  starting_time:
+    nanoseconds_since_epoch: 1780988469265083621
+  message_count: 292
+  topics_with_message_count:
+    - topic_metadata:
+        name: /nn_controller/training_sample
+        type: just_pick_it_interfaces/msg/VisualServoSample
+        serialization_format: cdr
+        offered_qos_profiles:
+          []
+        type_description_hash: ""
+      message_count: 292
+  compression_format: ""
+  compression_mode: ""
+  relative_file_paths:
+    - watermelon_teach_001_20260609_160109_0.db3
+  files:
+    - path: watermelon_teach_001_20260609_160109_0.db3
+      starting_time:
+        nanoseconds_since_epoch: 1780988469265083621
+      duration:
+        nanoseconds: 29100441596
+      message_count: 584
+  custom_data: ~
+  ros_distro: jazzy

@@ -37,7 +37,7 @@
   <!-- Pregrasp pose -->
   <arg
     name="pregrasp_angles"
-    default="[82.8, 56.5, -19.3, -93.6, 24.9, -121.4]"
+    default="[-82.8, 56.5, -19.3, -93.6, 24.9, -121.4]"
   />
 
   <node pkg="just_pick_it_perception" exec="ibvs_controller" output="screen">

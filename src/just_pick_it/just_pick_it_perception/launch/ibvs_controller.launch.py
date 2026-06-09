@@ -1,132 +1,163 @@
 #!/usr/bin/env python3
 
-import ast
-
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from launch.actions import OpaqueFunction
 
 
-def _parse_float_list(s):
-    try:
-        result = ast.literal_eval(s)
-        return [float(v) for v in result]
-    except Exception:
-        raise ValueError(f"Cannot parse float list from: {s!r}")
+def generate_launch_description():
+    args = [
+        DeclareLaunchArgument("robot_name", default_value="jetcobot1"),
+        DeclareLaunchArgument("detection_topic", default_value="/infer/tracked_objects"),
+        DeclareLaunchArgument("target_class_label", default_value="watermelon"),
+        DeclareLaunchArgument("min_confidence", default_value="0.5"),
+        DeclareLaunchArgument("detection_timeout_sec", default_value="2.0"),
+        DeclareLaunchArgument("lock_track_id", default_value="true"),
 
+        DeclareLaunchArgument("center_source", default_value="bbox"),
+        DeclareLaunchArgument("bbox_xy_mode", default_value="center"),
+        DeclareLaunchArgument("image_width", default_value="640.0"),
+        DeclareLaunchArgument("image_height", default_value="480.0"),
+        DeclareLaunchArgument("desired_cx", default_value="-1.0"),
+        DeclareLaunchArgument("desired_cy", default_value="-1.0"),
 
-def launch_setup(context, *args, **kwargs):
-    robot_name = LaunchConfiguration("robot_name").perform(context)
-    detection_topic = LaunchConfiguration("detection_topic").perform(context)
-    target_class_label = LaunchConfiguration("target_class_label").perform(context)
-    center_source = LaunchConfiguration("center_source").perform(context)
-    detection_timeout_sec = float(
-        LaunchConfiguration("detection_timeout_sec").perform(context)
-    )
-    min_confidence = float(LaunchConfiguration("min_confidence").perform(context))
-    image_width = float(LaunchConfiguration("image_width").perform(context))
-    image_height = float(LaunchConfiguration("image_height").perform(context))
+        # Joint split. 0-indexed: 0=J1, 1=J2, ..., 5=J6.
+        DeclareLaunchArgument("align_joints", default_value="[0,3,4]"),
+        DeclareLaunchArgument("approach_joints", default_value="[1,2]"),
+        DeclareLaunchArgument(
+            "pregrasp_angles",
+            default_value="[107.75,29.17,-31.11,-71.63,2.90,-134.12]",
+        ),
 
-    lambda_gain = float(LaunchConfiguration("lambda_gain").perform(context))
-    damping = float(LaunchConfiguration("damping").perform(context))
-    max_delta_deg = float(LaunchConfiguration("max_delta_deg").perform(context))
-    control_rate_hz = float(LaunchConfiguration("control_rate_hz").perform(context))
-    jacobian_delta_deg = float(
-        LaunchConfiguration("jacobian_delta_deg").perform(context)
-    )
-    jacobian_settle_sec = float(
-        LaunchConfiguration("jacobian_settle_sec").perform(context)
-    )
-    stop_error = float(LaunchConfiguration("stop_error").perform(context))
-    max_steps = int(LaunchConfiguration("max_steps").perform(context))
+        DeclareLaunchArgument("pregrasp_speed", default_value="15"),
+        DeclareLaunchArgument("command_speed", default_value="10"),
+        DeclareLaunchArgument("pregrasp_wait_sec", default_value="3.0"),
+        DeclareLaunchArgument("use_status_for_q0", default_value="true"),
+        DeclareLaunchArgument("status_timeout_sec", default_value="1.0"),
 
-    pregrasp_speed = int(LaunchConfiguration("pregrasp_speed").perform(context))
-    ibvs_speed = int(LaunchConfiguration("ibvs_speed").perform(context))
+        # Align Jacobian measurement.
+        DeclareLaunchArgument("jacobian_delta_deg", default_value="2.0"),
+        DeclareLaunchArgument("jacobian_settle_sec", default_value="1.2"),
 
-    lock_track_id = LaunchConfiguration("lock_track_id").perform(context).lower() in (
-        "true",
-        "1",
-    )
-    use_status_for_q0 = LaunchConfiguration(
-        "use_status_for_q0"
-    ).perform(context).lower() in ("true", "1")
-    status_timeout_sec = float(
-        LaunchConfiguration("status_timeout_sec").perform(context)
-    )
-    pregrasp_wait_sec = float(LaunchConfiguration("pregrasp_wait_sec").perform(context))
+        # Align controller.
+        DeclareLaunchArgument("lambda_gain", default_value="0.8"),
+        DeclareLaunchArgument("damping", default_value="0.04"),
+        DeclareLaunchArgument("max_align_delta_deg", default_value="1.0"),
+        DeclareLaunchArgument("max_align_offset_deg", default_value="20.0"),
+        DeclareLaunchArgument("control_rate_hz", default_value="5.0"),
 
-    pregrasp_angles = _parse_float_list(
-        LaunchConfiguration("pregrasp_angles").perform(context)
-    )
+        # ALIGN stuck recovery / active-set re-Jacobian.
+        DeclareLaunchArgument("enable_align_stuck_recovery", default_value="true"),
+        DeclareLaunchArgument("enable_align_active_set", default_value="true"),
+        DeclareLaunchArgument("align_stuck_frames", default_value="8"),
+        DeclareLaunchArgument("align_stuck_min_improvement", default_value="0.002"),
+        DeclareLaunchArgument("align_stuck_cmd_delta_deg", default_value="0.05"),
+        DeclareLaunchArgument("align_stuck_saturation_ratio", default_value="0.95"),
+        DeclareLaunchArgument("max_align_rejacobian_count", default_value="5"),
+        DeclareLaunchArgument("align_rejacobian_cooldown_sec", default_value="1.0"),
+        DeclareLaunchArgument("align_rejacobian_after_approach_steps", default_value="3"),
+
+        DeclareLaunchArgument("approach_center_threshold", default_value="0.09"),
+
+        # DONE condition.
+        # If area_done_center_threshold is negative, the node uses approach_center_threshold.
+        DeclareLaunchArgument("desired_area_norm", default_value="0.23"),
+        DeclareLaunchArgument("area_done_center_threshold", default_value="-1.0"),
+
+        # Area Jacobian approach.
+        DeclareLaunchArgument("approach_step_deg", default_value="3.0"),
+        DeclareLaunchArgument("approach_wait_sec", default_value="0.6"),
+        DeclareLaunchArgument("max_approach_steps", default_value="250"),
+        DeclareLaunchArgument("area_jacobian_delta_deg", default_value="3.0"),
+        DeclareLaunchArgument("area_jacobian_settle_sec", default_value="0.8"),
+        DeclareLaunchArgument("area_window_size", default_value="5"),
+        DeclareLaunchArgument("area_jacobian_min_grad", default_value="0.00001"),
+
+        # Area direction reuse.
+        # 1 = old behavior, measure every approach step.
+        # 3 = one measured approach + up to two cached approach steps.
+        DeclareLaunchArgument("area_jacobian_reuse_steps", default_value="3"),
+        DeclareLaunchArgument("area_min_gain_for_reuse", default_value="0.001"),
+        DeclareLaunchArgument("area_drop_tolerance", default_value="0.003"),
+
+        # General safety / filter.
+        DeclareLaunchArgument("max_total_steps", default_value="500"),
+        DeclareLaunchArgument("hard_stop_below_center_error", default_value="-1.0"),
+        DeclareLaunchArgument("filter_alpha", default_value="0.5"),
+        DeclareLaunchArgument("use_sim_time", default_value="false"),
+    ]
 
     node = Node(
         package="just_pick_it_perception",
         executable="ibvs_controller",
+        name="ibvs_controller",
         output="screen",
         parameters=[
             {
-                "robot_name": robot_name,
-                "detection_topic": detection_topic,
-                "target_class_label": target_class_label,
-                "center_source": center_source,
-                "detection_timeout_sec": detection_timeout_sec,
-                "min_confidence": min_confidence,
-                "image_width": image_width,
-                "image_height": image_height,
-                "lambda_gain": lambda_gain,
-                "damping": damping,
-                "max_delta_deg": max_delta_deg,
-                "control_rate_hz": control_rate_hz,
-                "jacobian_delta_deg": jacobian_delta_deg,
-                "jacobian_settle_sec": jacobian_settle_sec,
-                "stop_error": stop_error,
-                "max_steps": max_steps,
-                "pregrasp_speed": pregrasp_speed,
-                "ibvs_speed": ibvs_speed,
-                "lock_track_id": lock_track_id,
-                "use_status_for_q0": use_status_for_q0,
-                "status_timeout_sec": status_timeout_sec,
-                "pregrasp_wait_sec": pregrasp_wait_sec,
-                "pregrasp_angles": pregrasp_angles,
+                "robot_name": LaunchConfiguration("robot_name"),
+                "detection_topic": LaunchConfiguration("detection_topic"),
+                "target_class_label": LaunchConfiguration("target_class_label"),
+                "min_confidence": LaunchConfiguration("min_confidence"),
+                "detection_timeout_sec": LaunchConfiguration("detection_timeout_sec"),
+                "lock_track_id": LaunchConfiguration("lock_track_id"),
+
+                "center_source": LaunchConfiguration("center_source"),
+                "bbox_xy_mode": LaunchConfiguration("bbox_xy_mode"),
+                "image_width": LaunchConfiguration("image_width"),
+                "image_height": LaunchConfiguration("image_height"),
+                "desired_cx": LaunchConfiguration("desired_cx"),
+                "desired_cy": LaunchConfiguration("desired_cy"),
+
+                "align_joints": LaunchConfiguration("align_joints"),
+                "approach_joints": LaunchConfiguration("approach_joints"),
+                "pregrasp_angles": LaunchConfiguration("pregrasp_angles"),
+
+                "pregrasp_speed": LaunchConfiguration("pregrasp_speed"),
+                "command_speed": LaunchConfiguration("command_speed"),
+                "pregrasp_wait_sec": LaunchConfiguration("pregrasp_wait_sec"),
+                "use_status_for_q0": LaunchConfiguration("use_status_for_q0"),
+                "status_timeout_sec": LaunchConfiguration("status_timeout_sec"),
+
+                "jacobian_delta_deg": LaunchConfiguration("jacobian_delta_deg"),
+                "jacobian_settle_sec": LaunchConfiguration("jacobian_settle_sec"),
+
+                "lambda_gain": LaunchConfiguration("lambda_gain"),
+                "damping": LaunchConfiguration("damping"),
+                "max_align_delta_deg": LaunchConfiguration("max_align_delta_deg"),
+                "max_align_offset_deg": LaunchConfiguration("max_align_offset_deg"),
+                "control_rate_hz": LaunchConfiguration("control_rate_hz"),
+                "enable_align_stuck_recovery": LaunchConfiguration("enable_align_stuck_recovery"),
+                "enable_align_active_set": LaunchConfiguration("enable_align_active_set"),
+                "align_stuck_frames": LaunchConfiguration("align_stuck_frames"),
+                "align_stuck_min_improvement": LaunchConfiguration("align_stuck_min_improvement"),
+                "align_stuck_cmd_delta_deg": LaunchConfiguration("align_stuck_cmd_delta_deg"),
+                "align_stuck_saturation_ratio": LaunchConfiguration("align_stuck_saturation_ratio"),
+                "max_align_rejacobian_count": LaunchConfiguration("max_align_rejacobian_count"),
+                "align_rejacobian_cooldown_sec": LaunchConfiguration("align_rejacobian_cooldown_sec"),
+                "align_rejacobian_after_approach_steps": LaunchConfiguration("align_rejacobian_after_approach_steps"),
+                "approach_center_threshold": LaunchConfiguration("approach_center_threshold"),
+
+                "desired_area_norm": LaunchConfiguration("desired_area_norm"),
+                "area_done_center_threshold": LaunchConfiguration("area_done_center_threshold"),
+
+                "approach_step_deg": LaunchConfiguration("approach_step_deg"),
+                "approach_wait_sec": LaunchConfiguration("approach_wait_sec"),
+                "max_approach_steps": LaunchConfiguration("max_approach_steps"),
+                "area_jacobian_delta_deg": LaunchConfiguration("area_jacobian_delta_deg"),
+                "area_jacobian_settle_sec": LaunchConfiguration("area_jacobian_settle_sec"),
+                "area_window_size": LaunchConfiguration("area_window_size"),
+                "area_jacobian_min_grad": LaunchConfiguration("area_jacobian_min_grad"),
+                "area_jacobian_reuse_steps": LaunchConfiguration("area_jacobian_reuse_steps"),
+                "area_min_gain_for_reuse": LaunchConfiguration("area_min_gain_for_reuse"),
+                "area_drop_tolerance": LaunchConfiguration("area_drop_tolerance"),
+
+                "max_total_steps": LaunchConfiguration("max_total_steps"),
+                "hard_stop_below_center_error": LaunchConfiguration("hard_stop_below_center_error"),
+                "filter_alpha": LaunchConfiguration("filter_alpha"),
+                "use_sim_time": LaunchConfiguration("use_sim_time"),
             }
         ],
     )
-    return [node]
 
-
-def generate_launch_description():
-    return LaunchDescription(
-        [
-            DeclareLaunchArgument("robot_name", default_value="jetcobot1"),
-            DeclareLaunchArgument(
-                "detection_topic", default_value="/infer/tracked_objects"
-            ),
-            DeclareLaunchArgument("target_class_label", default_value="watermelon"),
-            DeclareLaunchArgument("center_source", default_value="bbox"),
-            DeclareLaunchArgument("detection_timeout_sec", default_value="2.0"),
-            DeclareLaunchArgument("min_confidence", default_value="0.5"),
-            DeclareLaunchArgument("image_width", default_value="640.0"),
-            DeclareLaunchArgument("image_height", default_value="480.0"),
-            DeclareLaunchArgument("lambda_gain", default_value="0.8"),
-            DeclareLaunchArgument("damping", default_value="0.04"),
-            DeclareLaunchArgument("max_delta_deg", default_value="0.5"),
-            DeclareLaunchArgument("control_rate_hz", default_value="10.0"),
-            DeclareLaunchArgument("jacobian_delta_deg", default_value="2.0"),
-            DeclareLaunchArgument("jacobian_settle_sec", default_value="1.2"),
-            DeclareLaunchArgument("stop_error", default_value="0.01"),
-            DeclareLaunchArgument("max_steps", default_value="150"),
-            DeclareLaunchArgument("pregrasp_speed", default_value="15"),
-            DeclareLaunchArgument("ibvs_speed", default_value="10"),
-            DeclareLaunchArgument("lock_track_id", default_value="true"),
-            DeclareLaunchArgument("use_status_for_q0", default_value="true"),
-            DeclareLaunchArgument("status_timeout_sec", default_value="1.0"),
-            DeclareLaunchArgument("pregrasp_wait_sec", default_value="3.0"),
-            DeclareLaunchArgument(
-                "pregrasp_angles",
-                default_value="[82.8, 56.5, -19.3, -93.6, 24.9, -121.4]",
-            ),
-            OpaqueFunction(function=launch_setup),
-        ]
-    )
+    return LaunchDescription(args + [node])

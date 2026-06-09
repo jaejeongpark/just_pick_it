@@ -181,6 +181,58 @@ class UdpVideoReceiver:
         self.status_queue.put("UDP video receiver stopped")
 
 
+class UdpFrameSender:
+    CHUNK_SIZE = 60000
+
+    def __init__(self):
+        self.sock = None
+        self.running = False
+        self.host = "127.0.0.1"
+        self.port = None
+        self._frame_id = 0
+
+    def start(self, host, port):
+        self.stop()
+        self.host = host
+        self.port = int(port)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.running = True
+
+    def stop(self):
+        self.running = False
+        if self.sock is not None:
+            try:
+                self.sock.close()
+            except Exception:
+                pass
+            self.sock = None
+
+    def send_frame(self, frame_rgb):
+        if not self.running or self.sock is None:
+            return
+
+        frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+        ok, encoded = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if not ok:
+            return
+
+        jpg_bytes = encoded.tobytes()
+        self._frame_id = (self._frame_id + 1) & 0xFFFFFFFF
+
+        chunks = [
+            jpg_bytes[i : i + self.CHUNK_SIZE]
+            for i in range(0, len(jpg_bytes), self.CHUNK_SIZE)
+        ]
+        total = len(chunks)
+
+        for idx, chunk in enumerate(chunks):
+            header = struct.pack(HEADER_FMT, self._frame_id, idx, total)
+            try:
+                self.sock.sendto(header + chunk, (self.host, self.port))
+            except Exception:
+                pass
+
+
 class JetcobotGuiPublisher(Node):
     def __init__(self, status_queue, robot_name):
         node_name = f"local_{robot_name}_gui_publisher"
@@ -325,6 +377,11 @@ class JetcobotSliderGUI:
             self.video_status_queue,
         )
 
+        self.rect_out_host_var = tk.StringVar(value="127.0.0.1")
+        self.rect_out_port_var = tk.StringVar(value="")
+        self.rect_out_status_var = tk.StringVar(value="Rectified 출력: 미설정")
+        self.udp_sender = UdpFrameSender()
+
         self.video_photo_raw = None
         self.video_photo_rect = None
         self.last_video_frame_time = 0.0
@@ -344,9 +401,9 @@ class JetcobotSliderGUI:
             value=str(self.capture_dir / "camera_calibration.yaml")
         )
 
-        self.center_angles = [57.40, 82.88, -21.80, -97.20, 29.35, -155.91]
-        self.left_scan_angles = [83.37, 82.88, -21.80, -97.20, 29.35, -155.91]
-        self.right_scan_angles = [38.12, 82.88, -21.80, -97.20, 29.35, -155.91]
+        self.center_angles = [114.78, -5.09, -9.05, -75.49, 9.05, -107.31]
+        self.left_scan_angles = [147.48, -8.96, -24.08, -59.85, 4.39, -73.12]
+        self.right_scan_angles = [94.39, 1.31, -26.19, -62.84, 3.51, -127.08]
         self.home_angles = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
         self.build_ui()
@@ -633,6 +690,25 @@ class JetcobotSliderGUI:
         ).pack(side="left", padx=5)
 
         ttk.Label(capture_row, text=f"Save dir: {self.capture_dir}").pack(side="left", padx=5)
+
+        rect_out_frame = ttk.LabelFrame(video_frame, text="Rectified UDP 출력 (Send)")
+        rect_out_frame.pack(fill="x", padx=8, pady=4)
+
+        rect_out_row = ttk.Frame(rect_out_frame)
+        rect_out_row.pack(fill="x", padx=8, pady=6)
+
+        ttk.Label(rect_out_row, text="Host").pack(side="left", padx=3)
+        ttk.Entry(rect_out_row, textvariable=self.rect_out_host_var, width=15).pack(side="left", padx=3)
+
+        ttk.Label(rect_out_row, text="Port").pack(side="left", padx=3)
+        rect_out_port_entry = ttk.Entry(rect_out_row, textvariable=self.rect_out_port_var, width=8)
+        rect_out_port_entry.pack(side="left", padx=3)
+        rect_out_port_entry.bind("<Return>", lambda event: self.start_rect_sender())
+
+        ttk.Button(rect_out_row, text="Start", command=self.start_rect_sender).pack(side="left", padx=5)
+        ttk.Button(rect_out_row, text="Stop", command=self.stop_rect_sender).pack(side="left", padx=3)
+
+        ttk.Label(rect_out_frame, textvariable=self.rect_out_status_var).pack(fill="x", padx=8, pady=2)
 
         calib_frame = ttk.LabelFrame(video_frame, text="Camera Calibration")
         calib_frame.pack(fill="x", padx=8, pady=6)
@@ -1085,6 +1161,29 @@ class JetcobotSliderGUI:
         self.video_status_var.set("UDP video stopped")
         self.video_label_raw.config(image="", text="UDP video stopped")
 
+    def start_rect_sender(self):
+        host = self.rect_out_host_var.get().strip()
+        port_text = self.rect_out_port_var.get().strip()
+
+        try:
+            port = int(port_text)
+            if not (1 <= port <= 65535):
+                raise ValueError()
+        except ValueError:
+            self.rect_out_status_var.set("Invalid port: 1~65535 사이 값을 입력하세요.")
+            return
+
+        if not host:
+            self.rect_out_status_var.set("Invalid host: 호스트를 입력하세요.")
+            return
+
+        self.udp_sender.start(host, port)
+        self.rect_out_status_var.set(f"Rectified 출력 중: {host}:{port}")
+
+    def stop_rect_sender(self):
+        self.udp_sender.stop()
+        self.rect_out_status_var.set("Rectified 출력: 중지됨")
+
     def poll_video_status_queue(self):
         try:
             while True:
@@ -1130,6 +1229,7 @@ class JetcobotSliderGUI:
             )
         else:
             self.show_image_on_label(rectified, self.video_label_rect, is_raw=False)
+            self.udp_sender.send_frame(rectified)
 
         h, w = frame_rgb.shape[:2]
         if rectified is None:
@@ -1370,6 +1470,7 @@ class JetcobotSliderGUI:
 
     def shutdown(self):
         self.video_receiver.stop()
+        self.udp_sender.stop()
 
 
 def spin_ros(node):
