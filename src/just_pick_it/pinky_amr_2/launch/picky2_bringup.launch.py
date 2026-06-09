@@ -1,9 +1,9 @@
 """PICKY2 Pinky bringup launch wrapper.
 
-원본 `pinky_bringup` launch 파일은 수정하지 않는다. 대신 원본 bringup이
-사용하는 전역 토픽을 `namespace` 인자로 받은 `/<namespace>/...` 토픽으로 remap해서
-PICKY1/PICKY2가 같은 ROS_DOMAIN_ID에서 실행될 때 `/odom`, `/cmd_vel`, `/scan`
-같은 전역 토픽이 충돌하지 않도록 한다.
+원본 `pinky_bringup` 코드는 수정하지 않는다. 대신 원본 bringup 노드를
+`namespace` 인자로 받은 ROS namespace 안에서 실행하고, `/tf`처럼 전역으로
+나가기 쉬운 토픽은 `/<namespace>/...` 토픽으로 remap해서 PICKY1/PICKY2가
+같은 ROS_DOMAIN_ID에서 실행될 때 충돌하지 않도록 한다.
 
 사용 예:
   ros2 launch pinky_amr_2 picky2_bringup.launch.py
@@ -33,6 +33,8 @@ def generate_launch_description():
     wheel_radius = LaunchConfiguration('wheel_radius')
     wheel_separation = LaunchConfiguration('wheel_separation')
     odom_stamp_offset_sec = LaunchConfiguration('odom_stamp_offset_sec')
+    battery_full_voltage = LaunchConfiguration('battery_full_voltage')
+    battery_empty_voltage = LaunchConfiguration('battery_empty_voltage')
 
     robot_xacro = PathJoinSubstitution(
         [FindPackageShare("pinky_description"), "urdf", "robot.urdf.xacro"]
@@ -117,8 +119,20 @@ def generate_launch_description():
                 ],
             ),
             Node(
-                package="pinky_bringup",
-                executable="battery_publisher",
+                package="pinky_amr_2",
+                executable="amr2_battery_publisher",
+                parameters=[
+                    {
+                        "battery_full_voltage": ParameterValue(
+                            battery_full_voltage,
+                            value_type=float,
+                        ),
+                        "battery_empty_voltage": ParameterValue(
+                            battery_empty_voltage,
+                            value_type=float,
+                        ),
+                    }
+                ],
             ),
             Node(
                 package="just_pick_it_perception",
@@ -158,5 +172,7 @@ def generate_launch_description():
         DeclareLaunchArgument('wheel_radius', default_value='0.027'),
         DeclareLaunchArgument('wheel_separation', default_value='0.0961'),
         DeclareLaunchArgument('odom_stamp_offset_sec', default_value='0.0'),
+        DeclareLaunchArgument('battery_full_voltage', default_value='8.8'),
+        DeclareLaunchArgument('battery_empty_voltage', default_value='8.0'),
         picky2_bringup,
     ])
