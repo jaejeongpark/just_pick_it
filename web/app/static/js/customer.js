@@ -17,9 +17,14 @@ let activeOrders = new Map();
 let customerSocket = null;
 let fallbackTimer = null;
 let failedOrderKey = 0;
-let voiceRecognition = null;
+let mediaRecorder = null;
+let audioChunks = [];
 let voiceListening = false;
 let voiceOrderSending = false;
+let silenceCheckInterval = null;
+let silenceTimer = null;
+const SILENCE_THRESHOLD = 0.01;
+const SILENCE_DURATION_MS = 1000;
 let voiceRecognitionSupported = true;
 
 const orderStatusText = {
@@ -86,7 +91,8 @@ async function sendCustomerLlmMessage(message) {
 async function handleVoiceOrderMessage(message) {
   voiceOrderSending = true;
   setVoiceOrderControlsDisabled(true);
-  setVoiceOrderFeedback("running", "처리 중", `"${message}"`);
+  const isAudio = message.startsWith("data:audio") || message.startsWith("data:video");
+  setVoiceOrderFeedback("running", "처리 중", isAudio ? "음성 변환 중..." : `"${message}"`);
 
   try {
     const response = await sendCustomerLlmMessage(message);
@@ -123,86 +129,104 @@ function startVoiceRecognition() {
     return;
   }
 
-  if (!voiceRecognition) {
-    voiceRecognition = createVoiceRecognition();
-  }
-
-  if (!voiceRecognition) {
-    return;
-  }
-
   if (voiceListening) {
-    voiceRecognition.stop();
+    if (mediaRecorder && mediaRecorder.state === "recording") {
+      mediaRecorder.stop();
+    }
     return;
   }
 
-  try {
-    voiceRecognition.start();
-  } catch (error) {
-    setVoiceOrderFeedback("error", "인식 실패", "음성 입력을 시작하지 못했습니다.");
-  }
+  startMediaRecording();
 }
 
-function createVoiceRecognition() {
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-
-  if (!SpeechRecognition) {
+async function startMediaRecording() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
     voiceRecognitionSupported = false;
     if (voiceOrderMicButton) {
       voiceOrderMicButton.disabled = true;
     }
     setVoiceOrderFeedback("error", "음성 미지원", "이 브라우저에서는 음성 주문을 사용할 수 없습니다.");
-    return null;
+    return;
   }
 
-  const recognition = new SpeechRecognition();
-  recognition.lang = "ko-KR";
-  recognition.interimResults = false;
-  recognition.maxAlternatives = 1;
-
-  recognition.addEventListener("start", () => {
-    voiceListening = true;
-    voiceOrderMicButton?.classList.add("is-listening");
-    setVoiceOrderFeedback("listening", "듣는 중", "...");
-  });
-
-  recognition.addEventListener("result", (event) => {
-    const transcript = event.results?.[0]?.[0]?.transcript?.trim();
-
-    if (!transcript) {
-      setVoiceOrderFeedback("error", "인식 실패", "음성을 인식하지 못했습니다.");
-      return;
-    }
-
-    setVoiceOrderTranscript(transcript);
-    setVoiceOrderFeedback("running", "주문 확인 중", `"${transcript}"`);
-    handleVoiceOrderMessage(transcript);
-  });
-
-  recognition.addEventListener("error", (event) => {
-    const errorMessages = {
-      "not-allowed": "브라우저의 마이크 권한을 허용해주세요.",
-      "service-not-allowed": "브라우저가 음성 인식 서비스를 허용하지 않았습니다.",
-      "no-speech": "음성이 들리지 않았습니다. 다시 말해주세요.",
-      "audio-capture": "마이크 장치를 찾지 못했습니다.",
-      network: "음성 인식 네트워크 연결에 실패했습니다.",
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    const messages = {
+      NotAllowedError: "브라우저의 마이크 권한을 허용해주세요.",
+      NotFoundError: "마이크 장치를 찾지 못했습니다.",
     };
     setVoiceOrderFeedback(
       "error",
-      "인식 실패",
-      errorMessages[event.error] || "음성을 인식하지 못했습니다.",
+      "마이크 오류",
+      messages[err.name] || "마이크에 접근하지 못했습니다.",
     );
-  });
+    return;
+  }
 
-  recognition.addEventListener("end", () => {
-    voiceListening = false;
-    voiceOrderMicButton?.classList.remove("is-listening");
-    if (voiceOrderMicButton && !voiceOrderSending && voiceRecognitionSupported) {
-      voiceOrderMicButton.disabled = false;
+  voiceListening = true;
+  voiceOrderMicButton?.classList.add("is-listening");
+  setVoiceOrderFeedback("listening", "듣는 중", "...");
+  audioChunks = [];
+
+  const audioCtx = new AudioContext();
+  const source = audioCtx.createMediaStreamSource(stream);
+  const analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 2048;
+  source.connect(analyser);
+  const dataArray = new Float32Array(analyser.fftSize);
+
+  silenceCheckInterval = setInterval(() => {
+    analyser.getFloatTimeDomainData(dataArray);
+    const rms = Math.sqrt(dataArray.reduce((s, v) => s + v * v, 0) / dataArray.length);
+    if (rms < SILENCE_THRESHOLD) {
+      if (!silenceTimer) {
+        silenceTimer = setTimeout(() => {
+          if (mediaRecorder && mediaRecorder.state === "recording") {
+            mediaRecorder.stop();
+          }
+        }, SILENCE_DURATION_MS);
+      }
+    } else {
+      clearTimeout(silenceTimer);
+      silenceTimer = null;
+    }
+  }, 100);
+
+  mediaRecorder = new MediaRecorder(stream);
+
+  mediaRecorder.addEventListener("dataavailable", (event) => {
+    if (event.data.size > 0) {
+      audioChunks.push(event.data);
     }
   });
 
-  return recognition;
+  mediaRecorder.addEventListener("stop", () => {
+    voiceListening = false;
+    voiceOrderMicButton?.classList.remove("is-listening");
+    clearInterval(silenceCheckInterval);
+    clearTimeout(silenceTimer);
+    silenceCheckInterval = null;
+    silenceTimer = null;
+    stream.getTracks().forEach((track) => track.stop());
+    audioCtx.close();
+
+    if (audioChunks.length === 0) {
+      setVoiceOrderFeedback("error", "인식 실패", "녹음된 음성이 없습니다.");
+      setVoiceOrderControlsDisabled(false);
+      return;
+    }
+
+    const blob = new Blob(audioChunks, { type: "audio/webm" });
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      handleVoiceOrderMessage(reader.result);
+    };
+    reader.readAsDataURL(blob);
+  });
+
+  mediaRecorder.start();
 }
 
 function getCartTotal() {
