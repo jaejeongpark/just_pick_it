@@ -42,6 +42,13 @@ STOP_ROTATE_SPEED = 0.8        # [rad/s]
 STOP_ROTATE_TOL = 0.05         # [rad] 약 3도
 STOP_ROTATE_TIMEOUT = 8.0      # [s]
 
+# 최종 목적지 정지 자세 모드. state_manager 가 task_type 에 따라 지정한다.
+STOP_NEAREST_90 = "NEAREST_90"  # 도착 heading 기준 가장 가까운 90° (기본)
+STOP_NEAREST_Y = "NEAREST_Y"    # +y/-y(법선) 중 회전이 적은 쪽 (MOVE_TO_PRODUCT/DISPLAY)
+STOP_PLUS_Y = "PLUS_Y"          # 월드 +y 고정 (RETURN_HOME, standby)
+STOP_PLUS_X = "PLUS_X"          # 월드 +x 고정 (MOVE_TO_STOCK)
+STOP_MINUS_X = "MINUS_X"        # 월드 -x 고정 (MOVE_TO_PICKUP)
+
 # _nav2_navigate 가 비상 정지로 중단됐음을 알리는 sentinel.
 # True(성공) / False(실패) 와 구분하기 위해 별도 객체를 쓴다.
 NAV_PAUSED = object()
@@ -86,7 +93,9 @@ class MoveToGoal(Node):
     # 외부 인터페이스 (blocking, executor 스레드에서 호출)
     # ------------------------------------------------------------------ #
 
-    def move_to_goal(self, x: float, y: float, final: bool = True) -> bool:
+    def move_to_goal(
+        self, x: float, y: float, final: bool = True, final_mode: str = STOP_NEAREST_90
+    ) -> bool:
         """목표 (x, y) '위치'까지 이동(도착)만 한다. 정지 자세(회전)는 State Machine 담당.
 
         zone 의 theta 는 사용하지 않는다.
@@ -121,9 +130,9 @@ class MoveToGoal(Node):
         if not self._precision_approach(x, y):
             return False
 
-        # 최종 목적지(goal zone)에서만 가장 가까운 90°(축 정렬)로 정지 자세 회전.
-        # 중간 경유지(final=False)는 회전하지 않는다. zone theta 는 쓰지 않는다.
-        self._rotate_to_nearest_90()
+        # 최종 목적지(goal zone)에서만 정지 자세 회전(중간 경유지는 회전 안 함).
+        # final_mode 에 따라 정지 yaw 를 정한다(task_type 별 정책은 state_manager). zone theta 는 안 씀.
+        self._rotate_to_stop_pose(final_mode)
 
         self.get_logger().info("move_to_goal: 위치 도착")
         return True
@@ -290,15 +299,30 @@ class MoveToGoal(Node):
     def _stop_robot(self):
         self._cmd_pub.publish(Twist())
 
-    def _rotate_to_nearest_90(self) -> None:
-        """현재 heading 에서 가장 가까운 90°(0/90/180/270)로 제자리 회전한다.
+    def _rotate_to_stop_pose(self, mode: str = STOP_NEAREST_90) -> None:
+        """최종 목적지 정지 자세로 제자리 회전한다(중간 경유지 제외).
 
-        최종 목적지에서만 호출한다(중간 경유지 제외). zone theta 대신 도착 heading 에서
-        회전이 최소가 되는 축 정렬 방향을 정지 자세로 삼는다. cmd_vel 로 직접 회전한다.
+        mode 에 따라 목표 yaw(월드 프레임)를 정한다. cmd_vel 로 직접 회전한다.
+        - STOP_PLUS_Y / STOP_PLUS_X / STOP_MINUS_X: 해당 축 방향으로 고정.
+        - STOP_NEAREST_Y: +y/-y(법선) 중 도착 heading 에서 회전이 적은 쪽.
+        - STOP_NEAREST_90(기본): 가장 가까운 90°(축 정렬) 스냅.
         """
+        half_pi = math.pi / 2.0
         with self._lock:
             cur = self._cur_yaw
-        target = normalize_angle(round(cur / (math.pi / 2.0)) * (math.pi / 2.0))
+        if mode == STOP_PLUS_Y:
+            target = half_pi
+        elif mode == STOP_PLUS_X:
+            target = 0.0
+        elif mode == STOP_MINUS_X:
+            target = math.pi
+        elif mode == STOP_NEAREST_Y:
+            target = half_pi if abs(normalize_angle(half_pi - cur)) <= abs(
+                normalize_angle(-half_pi - cur)
+            ) else -half_pi
+        else:
+            target = round(cur / half_pi) * half_pi
+        target = normalize_angle(target)
         self.get_logger().info(f"move_to_goal: 정지 자세 회전 {cur:.2f} -> {target:.2f} rad")
         deadline = time.time() + STOP_ROTATE_TIMEOUT
         while time.time() < deadline:
