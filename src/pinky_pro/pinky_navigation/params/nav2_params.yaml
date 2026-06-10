@@ -115,7 +115,7 @@ controller_server:
       # 소형 아레나(2x1m) 코너 cut 방지: lookahead 를 줄여 RPP 가 경유지를 바짝 추종.
       # 실효 lookahead = clamp(속도*lookahead_time, min, max). 저속에서 min 이 지배적.
       lookahead_dist: 0.25
-      min_lookahead_dist: 0.15
+      min_lookahead_dist: 0.10
       max_lookahead_dist: 0.45
       lookahead_time: 1.5
       transform_tolerance: 0.2
