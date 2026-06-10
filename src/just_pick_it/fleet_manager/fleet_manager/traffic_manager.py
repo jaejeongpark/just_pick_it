@@ -108,8 +108,8 @@ DEFAULT_ZONE_COORDS: dict[str, tuple[float, float]] = {
     'CHARGING_DOCK_2':  (0.28, 0.07),
 
     # 좌측 대기 구역 (도킹 진입 위치, 각 도크 채널 바로 위)
-    'STANDBY_ZONE_1':   (0.11, 0.40),
-    'STANDBY_ZONE_2':   (0.28, 0.40),
+    'STANDBY_ZONE_1':   (0.11, 0.35),
+    'STANDBY_ZONE_2':   (0.28, 0.35),
 
     # 좌측 재고 구역
     'STOCK_ZONE':       (0.18, 0.85),

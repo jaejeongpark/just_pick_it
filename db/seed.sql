@@ -16,7 +16,7 @@ VALUES (
         'STANDBY_ZONE_1',
         'STANDBY',
         0.11,
-        0.40,
+        0.35,
         0.00,
         1.5708
     ),
@@ -24,7 +24,7 @@ VALUES (
         'STANDBY_ZONE_2',
         'STANDBY',
         0.28,
-        0.40,
+        0.35,
         0.00,
         1.5708
     ),
