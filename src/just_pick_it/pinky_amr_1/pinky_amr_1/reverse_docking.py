@@ -356,6 +356,7 @@ class ReverseDocking(Node):
         """
         deadline = time.time() + self._insert_to
         lost = 0
+        last_log = 0.0
 
         while time.time() < deadline:
             if self._emergency.is_stopped():
@@ -370,11 +371,31 @@ class ReverseDocking(Node):
 
             marker = self._detect_aruco(frame, marker_id)
             if marker is None:
-                # 마커는 상시 가시 전제. 잠깐 놓치면 저속 직진 후진 유지, 길면 실패.
+                # 정렬하느라 회전하면 마커가 화각을 잠깐 벗어나는 건 정상이다(실패 아님).
+                # 라인이 보이면(채널 안) 라인 yaw 로 +y(법선=라인 채널)에 정렬하며 천천히
+                # 후진한다 → 헤딩이 법선으로 돌아오면서 마커가 다시 보인다.
+                lane = self._detect_lane(frame)
+                if lane is not None and lane.conf > 0.0:
+                    lane_omega = -(self._lane_lat_pid.compute(lane.lateral_px)
+                                   + self._lane_yaw_pid.compute(lane.yaw_rad))
+                    twist = Twist()
+                    twist.linear.x = -self._reverse_speed * 0.5
+                    twist.angular.z = self._clamp(lane_omega)
+                    self._cmd_pub.publish(twist)
+                    if time.time() - last_log > 0.5:
+                        self.get_logger().info(
+                            f"Insert: 마커 일시 상실 — 라인으로 법선 복귀 "
+                            f"(conf={lane.conf:.2f} yaw={lane.yaw_rad:.3f})"
+                        )
+                        last_log = time.time()
+                    lost = 0
+                    time.sleep(0.05)
+                    continue
+                # 마커도 라인도 안 보이면 진짜 상실 → 저속 직진 유지, 길어지면 실패.
                 lost += 1
                 if lost > 40:   # 약 2s
                     self._stop()
-                    self.get_logger().warn("Insert: 마커 장기 미검출")
+                    self.get_logger().warn("Insert: 마커·라인 모두 미검출 → 실패")
                     return False
                 twist = Twist()
                 twist.linear.x = -self._reverse_speed * 0.5
@@ -406,6 +427,20 @@ class ReverseDocking(Node):
                 omega = w * lane_omega + (1.0 - w) * marker_omega
             else:
                 omega = marker_omega
+
+            # 디버그(0.5s): 깊이 진행 + 마커 pose + 라인 + 최종 omega (부호/게인 진단용).
+            # omega 가 크고 마커가 화각 밖으로 도는지, 깊이(robot_y)가 dock_y 로 수렴하는지 확인.
+            if time.time() - last_log > 0.5:
+                lane_s = (
+                    f"conf={lane.conf:.2f} lat={lane.lateral_px:.0f}px yaw={lane.yaw_rad:.3f}"
+                    if lane is not None else "none"
+                )
+                self.get_logger().info(
+                    f"Insert: dist={marker_dist:.3f} robot_y={robot_y:.3f}/dock={dock_y:.3f} "
+                    f"tvec_x={float(tvec[0]):.3f} rvec_y={float(rvec[1]):.3f} "
+                    f"marker_w={marker_omega:.3f} lane[{lane_s}] omega={omega:.3f}"
+                )
+                last_log = time.time()
 
             twist = Twist()
             twist.linear.x = -self._reverse_speed
