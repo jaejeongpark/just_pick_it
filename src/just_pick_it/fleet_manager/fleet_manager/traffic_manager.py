@@ -114,15 +114,15 @@ DEFAULT_ZONE_COORDS: dict[str, tuple[float, float]] = {
     # 좌측 재고 구역
     'STOCK_ZONE':       (0.18, 0.85),
 
-    # 상단 복도 (y 약 0.85)
-    'TRAFFIC_T1':       (0.70, 0.85),
-    'TRAFFIC_T2':       (1.05, 0.85),
-    'TRAFFIC_T3':       (1.40, 0.85),
+    # 상단 복도 (y 약 0.85). x 는 같은 열 PRODUCT_ZONE 과 수직 정렬(0.64/1.06/1.48).
+    'TRAFFIC_T1':       (0.64, 0.85),
+    'TRAFFIC_T2':       (1.06, 0.85),
+    'TRAFFIC_T3':       (1.48, 0.85),
 
-    # 하단 복도 (y 약 0.15)
-    'TRAFFIC_B1':       (0.70, 0.15),
-    'TRAFFIC_B2':       (1.05, 0.15),
-    'TRAFFIC_B3':       (1.40, 0.15),
+    # 하단 복도 (y 약 0.15). x 는 같은 열 PRODUCT_ZONE 과 수직 정렬(0.64/1.06/1.48).
+    'TRAFFIC_B1':       (0.64, 0.15),
+    'TRAFFIC_B2':       (1.06, 0.15),
+    'TRAFFIC_B3':       (1.48, 0.15),
 
     # 상품 구역 (열별로 위/아래 2개)
     'PRODUCT_ZONE_1':   (0.70, 0.60),
