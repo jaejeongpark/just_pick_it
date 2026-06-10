@@ -20,6 +20,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SelectTarget.srv"
   "action/DockCommand.action"
   "action/MoveCommand.action"
+  "action/ExecuteTask.action"
   DEPENDENCIES std_msgs geometry_msgs
 )
 

@@ -30,7 +30,7 @@ setup(
             'camera_info_publisher = jetcobot_bringup.camera_info_publisher:main',
             'jetcobot_joint_subscriber = jetcobot_bringup.jetcobot_joint_subscriber:main',
             'local_joint_slider_publisher = jetcobot_bringup.local_joint_slider_publisher:main',
-            "jetcobot_camera_udp_sender = jetcobot_bringup.jetcobot_camera_udp_sender:main",
+            'jetcobot_camera_udp_sender = jetcobot_bringup.jetcobot_camera_udp_sender:main',
         ],
     },
 )
