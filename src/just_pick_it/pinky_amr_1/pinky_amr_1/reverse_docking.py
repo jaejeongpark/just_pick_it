@@ -87,7 +87,8 @@ class ReverseDocking(Node):
         self._emergency = emergency_latch
 
         # ── ArUco ────────────────────────────────────────────────────────
-        self.declare_parameter("aruco_marker_dict", 0)        # DICT_4X4_50
+        # cv2.aruco dictionary 이름. 팀 perception 표준은 AprilTag 36h11.
+        self.declare_parameter("aruco_marker_dict", "DICT_APRILTAG_36h11")
         self.declare_parameter("marker_size_m", 0.10)
 
         # 마커 월드 좌표 (marker_id 별 병렬 배열). 가로벽에 도크를 바라보게 부착.
@@ -144,7 +145,12 @@ class ReverseDocking(Node):
         self.declare_parameter("camera_topic", "camera/image_raw")
 
         # ── 파라미터 로드 ───────────────────────────────────────────────
-        dict_id = self.get_parameter("aruco_marker_dict").value
+        # dictionary 이름(예: DICT_APRILTAG_36h11) 또는 정수 enum 둘 다 허용.
+        _dict_param = self.get_parameter("aruco_marker_dict").value
+        dict_id = (
+            getattr(cv2.aruco, _dict_param)
+            if isinstance(_dict_param, str) else int(_dict_param)
+        )
         self._marker_size = self.get_parameter("marker_size_m").value
 
         ids = list(self.get_parameter("marker_ids").value)
@@ -289,6 +295,7 @@ class ReverseDocking(Node):
     def _acquire_marker(self, marker_id: int) -> bool:
         """마커가 검출될 때까지 제자리 탐색 회전. 검출되면 True."""
         deadline = time.time() + self._acquire_to
+        last_log = 0.0
         while time.time() < deadline:
             if self._emergency.is_stopped():
                 self._stop()
@@ -297,6 +304,9 @@ class ReverseDocking(Node):
 
             frame = self._get_latest_frame()
             if frame is None:
+                if time.time() - last_log > 2.0:
+                    self.get_logger().warn("Acquire: 프레임 없음 (카메라 확인)")
+                    last_log = time.time()
                 time.sleep(0.05)
                 continue
 
@@ -304,6 +314,17 @@ class ReverseDocking(Node):
                 self._stop()
                 self.get_logger().info("Acquire: 마커 검출")
                 return True
+
+            # 디버그(2s): 검출된 id 목록으로 dict/id/FOV 원인을 구분한다.
+            # 빈 목록=dict 불일치/FOV밖/너무 멀음, 다른 id=id 불일치.
+            if time.time() - last_log > 2.0:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                _, dbg_ids, _ = self._detector.detectMarkers(gray)
+                seen = [] if dbg_ids is None else dbg_ids.flatten().tolist()
+                self.get_logger().info(
+                    f"Acquire: 탐색 중 — 검출 id={seen}, 목표 id={marker_id}"
+                )
+                last_log = time.time()
 
             twist = Twist()
             twist.angular.z = self._acquire_rot
