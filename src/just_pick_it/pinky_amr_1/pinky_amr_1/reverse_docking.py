@@ -89,7 +89,7 @@ class ReverseDocking(Node):
         # ── ArUco ────────────────────────────────────────────────────────
         # cv2.aruco dictionary 이름. 팀 perception 표준은 AprilTag 36h11.
         self.declare_parameter("aruco_marker_dict", "DICT_APRILTAG_36h11")
-        self.declare_parameter("marker_size_m", 0.10)
+        self.declare_parameter("marker_size_m", 0.05)
 
         # 마커 월드 좌표 (marker_id 별 병렬 배열). 가로벽에 도크를 바라보게 부착.
         # 법선은 -y(원점 쪽) 고정이라 yaw 따로 안 받는다.

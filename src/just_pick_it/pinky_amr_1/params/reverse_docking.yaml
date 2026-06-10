@@ -5,7 +5,7 @@
     # ArUco 마커
     # ------------------------------------------------------------------ #
     aruco_marker_dict: "DICT_APRILTAG_36h11"   # 팀 perception 표준 (도크 마커)
-    marker_size_m: 0.10           # 마커 실측 한 변 길이 (m)
+    marker_size_m: 0.05           # 마커 실측 한 변 길이 (m)
 
     # 마커 월드 좌표 (marker_id 별 병렬 배열, map=zone 절대 프레임 좌하단 원점).
     # 가로벽(y≈0.655)에 도크를 바라보게(법선 -y) 부착. depth 정지/coarse 정렬에 사용.
