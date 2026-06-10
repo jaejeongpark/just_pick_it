@@ -116,6 +116,9 @@ class ReverseDocking(Node):
         self.declare_parameter("camera_source", "picamera2")
         self.declare_parameter("camera_width", 1280)
         self.declare_parameter("camera_height", 720)
+        # 카메라가 물리적으로 거꾸로(180°) 장착됨 + 캘리브레이션도 flip 된 이미지 기준
+        # (just_pick_it_perception/apriltag_detector_real 와 동일). 검출 전 cv2.flip(-1) 필요.
+        self.declare_parameter("flip_camera_180", True)
         # base_link(중심) 에서 카메라가 전방(+x_body=+y_world)으로 떨어진 거리(m).
         # 마커 거리로 로봇 base 의 world y 를 추정할 때 보정에 쓴다(URDF 기준 근사).
         self.declare_parameter("camera_forward_offset_m", 0.05)
@@ -180,6 +183,7 @@ class ReverseDocking(Node):
         self._camera_source = self.get_parameter("camera_source").value
         self._cam_w = int(self.get_parameter("camera_width").value)
         self._cam_h = int(self.get_parameter("camera_height").value)
+        self._flip_180 = bool(self.get_parameter("flip_camera_180").value)
 
         self._acquire_rot   = self.get_parameter("acquire_rotate_speed").value
         self._marker_lat_kp = self.get_parameter("marker_lat_kp").value
@@ -618,12 +622,20 @@ class ReverseDocking(Node):
                 return None
             try:
                 # RGB888 배열은 BGR 바이트 순서 → 마커/HSV 검출(bgr8 기준)과 일치.
-                return self._picam2.capture_array()
+                frame = self._picam2.capture_array()
             except Exception as e:
                 self.get_logger().warn(f"Picamera2 capture error: {e}")
                 return None
-        with self._lock:
-            return self._latest_frame.copy() if self._latest_frame is not None else None
+        else:
+            with self._lock:
+                frame = self._latest_frame.copy() if self._latest_frame is not None else None
+        if frame is None:
+            return None
+        # 카메라가 거꾸로(180°) 장착됨 + 캘리브레이션도 flip 된 이미지 기준이므로, 검출 전
+        # 180° flip 으로 상하좌우를 바로잡는다. 없으면 마커 횡/yaw·라인 좌우가 전부 반전된다.
+        if self._flip_180:
+            frame = cv2.flip(frame, -1)
+        return frame
 
     def _open_camera(self) -> None:
         """picamera2 모드: 도킹 시작 시 카메라를 직접 연다(워밍업 포함)."""
