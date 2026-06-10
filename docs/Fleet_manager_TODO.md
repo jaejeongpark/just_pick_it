@@ -1,6 +1,6 @@
 # Fleet Manager 작업 현황 (담당 · 결정 · TODO)
 
-갱신: 2026-06-01. 설계·동작은 `docs/Fleet_manager.md`, 인터페이스 계약은 `docs/Fleet_manager_interface.md`.
+갱신: 2026-06-10. 설계·동작은 `docs/Fleet_manager.md`, 인터페이스 계약은 `docs/Fleet_manager_interface.md`.
 
 심각도: **S**(기능 결함) / **R**(견고성) / **C**(문서·정합) / **Q**(테스트).
 
@@ -73,6 +73,37 @@
    06-01 주행 중 확인된 항목: `/picky1/amcl_pose` namespaced 발행 + 텔레메트리가 들어와도
    `robot_status` 가 task 전이로만 바뀌고 IDLE 유지, battery 게이팅(30% 임계) 실측.
    (E2E 완주·R1 reconcile 실검증은 배터리 충전 후로 잔존 — §3-D)
+8. **실로봇 주행 정밀도 튜닝 + 도착 정지 자세 정책 (2026-06-09~10, picky1 단독)** — ✅ 완료 (박서우)
+   반복 주행 테스트로 발견·수정. 각 변경의 근거와 성과를 함께 남긴다.
+
+   1. **맵 프레임 정합(origin)** — "목적지 도착 전 도착 오판 + 벽 충돌"의 근본 원인이 `map.yaml`
+      `origin=[0,0,0]`. origin 은 SLAM 시작 오프셋을 반영하는 고정 기하값인데 [0,0,0]으로 둬 맵
+      전체가 약 (0.06,0.12) 밀려 map 프레임이 arena 절대좌표와 어긋남(실측: (0.28,0.40)에 둔 로봇이
+      amcl (0.352,0.505)). → **origin [-0.08,-0.12] 복원**. 성과: 조기 도착·벽 충돌 해소.
+      (odom 은 1m=1m 로 정상임을 실측해 odom 스케일 가설을 배제 → 원인을 map 프레임으로 한정)
+   2. **RPP 코너 cut** — 좁은 아레나(2x1m)에 lookahead 과대(저속 실효 0.3m)로 코너를 질러 벽 충돌.
+      → **lookahead_dist 0.6→0.25, min 0.3→0.15, max 0.9→0.45**. 성과: 코너 cut 제거(경유지 추종 강화).
+   3. **TRAFFIC 노드 수직 정합** — TRAFFIC_T/B x 가 같은 열 PRODUCT_ZONE 과 어긋나(0.70/1.05/1.40)
+      복도→상품존 진입에 횡성분 발생 → 진입 heading 기욺. → **0.64/1.06/1.48 정렬**(이후 column-2 는
+      매대 간섭 여유로 1.05). 성과: 순수 수직 진입 → 도착 자세 정확.
+   4. **정밀접근 정지거리** — 매대 정중앙보다 5cm 짧게 정지. 원인은 `move_to_goal` 자체
+      `xy_goal_tolerance`(0.05, Nav2 의 0.01 과 별개). → **0.02 로 축소 + 근거리(<3cm) 조향 가드**
+      (`atan2(dy,dx)` 노이즈로 인한 목표 직전 wobble 방지). 성과: 5cm→2cm 접근, 떨림 없음.
+   5. **Nav2 abort 완화 + CPU 절감** — `compute_path_to_pose` ack 타임아웃으로 navigation abort.
+      원인은 보드 CPU 과부하(load avg 20+)로 planner_server 가 20ms 안에 goal 응답 못 함. →
+      **default_server_timeout 20→100ms** + (origin 정합으로 불필요해진) **amcl update_min_d
+      0.05→0.10**(amcl 갱신 빈도↓ = CPU 절반). 성과: abort 완화 + 보드 부하 경감.
+   6. **도착 정지 자세 task별 정책** — 수평 진입(standby→product) 시 nearest-90 스냅이 매대를
+      바라보고 정지하던 문제. → **task_type 별 고정**: MOVE_TO_PRODUCT/DISPLAY=법선(±y 중 회전 적은
+      쪽), MOVE_TO_PICKUP=-x, MOVE_TO_STOCK=+x, RETURN_HOME(standby)=+y, 그 외 nearest-90. 정책은
+      `state_manager`(STOP_MODE_BY_TASK), 회전 계산은 `move_to_goal`(_rotate_to_stop_pose)가 도착
+      heading 으로 수행. 성과: 진입 방향과 무관하게 올바른 사이드 주차 자세.
+   7. **AMR/COBOT 분리 테스트 지원** — `scripts/demo/fake_robot_servers.py` 에 `DEMO_MOCK_PICKY` /
+      `DEMO_MOCK_COBOT` 플래그 추가. 실 AMR 주행 중 cobot 작업만 자동 처리(`DEMO_MOCK_PICKY=0`),
+      반대로 실 cobot 테스트는 AMR 만 mock(`DEMO_MOCK_COBOT=0`). 성과: 한쪽 실로봇+한쪽 자동 혼합 테스트.
+
+   같은 기간 반영: 콜드 스타트 시 양 충전 도크 점유 초기화, battery 텔레메트리 20s+ 미수신 시 0%로
+   처리해 offline 로봇 배정 제외(RobotStateMonitor).
 
 > 박서우 미완(다음 기동·배터리 충전 후): 주문 E2E 실주행 완주, R1 재시작 복구 실동작, `_at_dock` 부팅 가정 견고화(낮음). 상세는 §3-D.
 
