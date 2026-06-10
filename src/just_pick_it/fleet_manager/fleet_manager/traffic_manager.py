@@ -603,9 +603,13 @@ class TrafficManager:
             prev = self._robot_states.get(robot_id)
             self._robot_states[robot_id] = state
 
-            # 이동/점유 상태가 모두 아닐 때만 경로/예약 해제.
+            # 이동/점유에서 '빠져나올 때만' 경로/예약을 해제한다(release_path 누락 안전망).
+            # prev 조건이 없으면, 갓 예약한 직후 로봇이 아직 STANDBY 텔레메트리를 보내는
+            # 사이 그 신선한 예약까지 지워져(예약 task=None) 이후 흐름이 꼬인다.
             # OCCUPYING_STATES(WAITING_FOR_COBOT 등)는 마지막 노드 차단이 필요하므로 path 유지.
-            if state not in MOVING_STATES and state not in OCCUPYING_STATES:
+            idle_now = state not in MOVING_STATES and state not in OCCUPYING_STATES
+            was_active = prev in MOVING_STATES or prev in OCCUPYING_STATES
+            if idle_now and was_active:
                 self._robot_paths[robot_id] = []
                 self._robot_reservations[robot_id] = None
 

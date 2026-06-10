@@ -449,11 +449,20 @@ class TestRaceWindowClosed:
 
 
 class TestNotifyState:
-    def test_idle_state_clears_path_and_reservation(self, traffic):
+    def test_idle_after_active_clears_path_and_reservation(self, traffic):
+        # 이동/점유에서 idle 로 빠져나올 때만 안전망으로 경로/예약을 해제한다.
         traffic.reserve_path('PICKY1', 1, 'TRAFFIC_T1', 'TRAFFIC_T3')
-        traffic.notify_state('PICKY1', 'STANDBY')
+        traffic.notify_state('PICKY1', 'MOVING_TO_PRODUCT')   # active
+        traffic.notify_state('PICKY1', 'STANDBY')             # active -> idle
         assert traffic._robot_paths['PICKY1'] == []
         assert traffic._robot_reservations['PICKY1'] is None
+
+    def test_fresh_reservation_kept_during_idle_telemetry(self, traffic):
+        # 갓 예약한 직후 로봇이 아직 idle(STANDBY) 텔레메트리를 보내도 예약은 유지돼야 한다.
+        # prev 도 idle 이라 안전망이 신선한 예약을 지우면 안 됨('예약 task=None' 레이스 방지).
+        traffic.reserve_path('PICKY1', 1, 'TRAFFIC_T1', 'TRAFFIC_T3')
+        traffic.notify_state('PICKY1', 'STANDBY')
+        assert traffic._robot_reservations['PICKY1'] == 1
 
     def test_moving_state_keeps_reservation(self, traffic):
         traffic.reserve_path('PICKY1', 1, 'TRAFFIC_T1', 'TRAFFIC_T3')
