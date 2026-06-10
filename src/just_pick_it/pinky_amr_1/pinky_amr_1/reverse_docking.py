@@ -22,11 +22,13 @@ reverse_dock(marker_id, dock_map_x, dock_map_y, dock_map_yaw) 를 state_manager 
 """
 
 import math
+import os
 import time
 import threading
 
 import cv2
 import numpy as np
+import yaml
 
 import rclpy
 from rclpy.node import Node
@@ -101,6 +103,18 @@ class ReverseDocking(Node):
             0.0, 0.0, 1.0,
         ])
         self.declare_parameter("dist_coeffs", [0.0, 0.0, 0.0, 0.0, 0.0])
+        # ROS camera_info yaml 경로. 지정되면 camera_matrix/dist_coeffs 대신 이 파일에서
+        # 직접 읽는다(캘리브레이션 단일 출처). package:// URI 도 지원(install share 로 해석).
+        # 비어 있거나 읽기 실패면 위 camera_matrix/dist_coeffs 파라미터를 fallback 으로 쓴다.
+        self.declare_parameter(
+            "calibration_yaml",
+            "package://just_pick_it_perception/result/camera_calibration.yaml",
+        )
+        # 카메라 소스: 'picamera2'(보드 직접, 기본) 또는 'ros_topic'(sim/테스트 폴백).
+        # 직접 모드는 도킹 중에만 카메라를 열어 ROS Image pub/sub 오버헤드를 없앤다.
+        self.declare_parameter("camera_source", "picamera2")
+        self.declare_parameter("camera_width", 1280)
+        self.declare_parameter("camera_height", 720)
         # base_link(중심) 에서 카메라가 전방(+x_body=+y_world)으로 떨어진 거리(m).
         # 마커 거리로 로봇 base 의 world y 를 추정할 때 보정에 쓴다(URDF 기준 근사).
         self.declare_parameter("camera_forward_offset_m", 0.05)
@@ -140,12 +154,22 @@ class ReverseDocking(Node):
         self._marker_world = {int(i): (float(x), float(y))
                               for i, x, y in zip(ids, mwx, mwy)}
 
-        cam = self.get_parameter("camera_matrix").value
-        self._cam_matrix = np.array(cam, dtype=np.float64).reshape(3, 3)
-        self._dist_coeffs = np.array(
-            self.get_parameter("dist_coeffs").value, dtype=np.float64
-        )
+        # 캘리브레이션: yaml 경로가 주어지면 거기서 직접 읽고, 아니면 파라미터 fallback.
+        calib = self._load_calibration(self.get_parameter("calibration_yaml").value)
+        if calib is not None:
+            self._cam_matrix, self._dist_coeffs = calib
+        else:
+            self._cam_matrix = np.array(
+                self.get_parameter("camera_matrix").value, dtype=np.float64
+            ).reshape(3, 3)
+            self._dist_coeffs = np.array(
+                self.get_parameter("dist_coeffs").value, dtype=np.float64
+            )
         self._cam_fwd = self.get_parameter("camera_forward_offset_m").value
+
+        self._camera_source = self.get_parameter("camera_source").value
+        self._cam_w = int(self.get_parameter("camera_width").value)
+        self._cam_h = int(self.get_parameter("camera_height").value)
 
         self._acquire_rot   = self.get_parameter("acquire_rotate_speed").value
         self._marker_lat_kp = self.get_parameter("marker_lat_kp").value
@@ -188,16 +212,21 @@ class ReverseDocking(Node):
         self._bridge = CvBridge()
         self._lock = threading.Lock()
         self._latest_frame = None
+        self._picam2 = None  # picamera2 모드: reverse_dock() 시작 시 lazy open
 
-        cam_topic = self.get_parameter("camera_topic").value
-        self.create_subscription(Image, cam_topic, self._image_cb, 10)
+        # picamera2(기본)는 도킹 중에만 직접 연다. ros_topic 폴백만 토픽을 구독한다.
+        if self._camera_source == "ros_topic":
+            cam_topic = self.get_parameter("camera_topic").value
+            self.create_subscription(Image, cam_topic, self._image_cb, 10)
 
         self._cmd_pub = self.create_publisher(Twist, "cmd_vel", 10)
         self._init_pose_pub = self.create_publisher(
             PoseWithCovarianceStamped, "initialpose", 10
         )
 
-        self.get_logger().info("ReverseDocking ready (marker-depth + yellow-lane).")
+        self.get_logger().info(
+            f"ReverseDocking ready (camera={self._camera_source}, fx={self._cam_matrix[0, 0]:.1f})."
+        )
 
     # ====================================================================== #
     # 외부 인터페이스
@@ -226,27 +255,32 @@ class ReverseDocking(Node):
         self._lane_lat_pid.reset()
         self._lane_yaw_pid.reset()
 
-        # 1) 마커 획득 (보일 때까지 탐색 회전)
-        if not self._acquire_marker(marker_id):
-            self._stop()
-            self.get_logger().error("reverse_dock: FAILED — 마커 미획득")
-            return False
+        # picamera2 모드는 도킹 동안만 카메라를 열고, 끝나면(성공/실패 무관) 반납한다.
+        self._open_camera()
+        try:
+            # 1) 마커 획득 (보일 때까지 탐색 회전)
+            if not self._acquire_marker(marker_id):
+                self._stop()
+                self.get_logger().error("reverse_dock: FAILED — 마커 미획득")
+                return False
 
-        # 2) 후진 삽입 (라인 정밀 정렬 블렌딩, 마커 깊이로 정지)
-        #    마커가 도크 바로 위가 아닐 수 있어(예: dock1 마커x 0.07 vs 도크x 0.11),
-        #    coarse 단계의 횡 목표는 (marker_x - dock_x) 만큼 오프셋을 준다.
-        lat_offset = marker_x - dock_map_x
-        if not self._reverse_insert(marker_id, marker_y, dock_map_y, lat_offset):
-            self._stop()
-            self.get_logger().error("reverse_dock: FAILED — 삽입 단계")
-            return False
+            # 2) 후진 삽입 (라인 정밀 정렬 블렌딩, 마커 깊이로 정지)
+            #    마커가 도크 바로 위가 아닐 수 있어(예: dock1 마커x 0.07 vs 도크x 0.11),
+            #    coarse 단계의 횡 목표는 (marker_x - dock_x) 만큼 오프셋을 준다.
+            lat_offset = marker_x - dock_map_x
+            if not self._reverse_insert(marker_id, marker_y, dock_map_y, lat_offset):
+                self._stop()
+                self.get_logger().error("reverse_dock: FAILED — 삽입 단계")
+                return False
 
-        # 3) 정지 + 안정화 + 위치 보정
-        self._stop()
-        time.sleep(self._settle)
-        self.get_logger().info("reverse_dock: SUCCESS")
-        self._publish_pose_correction(dock_map_x, dock_map_y, dock_map_yaw)
-        return True
+            # 3) 정지 + 안정화 + 위치 보정
+            self._stop()
+            time.sleep(self._settle)
+            self.get_logger().info("reverse_dock: SUCCESS")
+            self._publish_pose_correction(dock_map_x, dock_map_y, dock_map_yaw)
+            return True
+        finally:
+            self._close_camera()
 
     # ====================================================================== #
     # 단계 A: 마커 획득
@@ -488,8 +522,89 @@ class ReverseDocking(Node):
             self.get_logger().warn(f"Image conversion error: {e}")
 
     def _get_latest_frame(self):
+        if self._camera_source == "picamera2":
+            if self._picam2 is None:
+                return None
+            try:
+                # RGB888 배열은 BGR 바이트 순서 → 마커/HSV 검출(bgr8 기준)과 일치.
+                return self._picam2.capture_array()
+            except Exception as e:
+                self.get_logger().warn(f"Picamera2 capture error: {e}")
+                return None
         with self._lock:
             return self._latest_frame.copy() if self._latest_frame is not None else None
+
+    def _open_camera(self) -> None:
+        """picamera2 모드: 도킹 시작 시 카메라를 직접 연다(워밍업 포함)."""
+        if self._camera_source != "picamera2" or self._picam2 is not None:
+            return
+        try:
+            from picamera2 import Picamera2  # 보드 전용, 지연 import
+            picam = Picamera2()
+            picam.configure(picam.create_video_configuration(
+                main={"size": (self._cam_w, self._cam_h), "format": "RGB888"}
+            ))
+            picam.start()
+            time.sleep(0.5)  # 노출 워밍업
+            self._picam2 = picam
+            self.get_logger().info(
+                f"ReverseDocking: Picamera2 open ({self._cam_w}x{self._cam_h})"
+            )
+        except Exception as e:
+            self.get_logger().error(f"Picamera2 open 실패: {e}")
+            self._picam2 = None
+
+    def _close_camera(self) -> None:
+        """picamera2 모드: 도킹 종료 시 카메라를 반납한다(다음 도킹/뷰어가 쓰게)."""
+        if self._picam2 is None:
+            return
+        try:
+            self._picam2.stop()
+        except Exception:
+            pass
+        try:
+            self._picam2.close()
+        except Exception:
+            pass
+        self._picam2 = None
+        self.get_logger().info("ReverseDocking: Picamera2 close")
+
+    @staticmethod
+    def _resolve_pkg_path(path):
+        """package://<pkg>/<rel> URI 를 install share 절대경로로 변환한다."""
+        if path and path.startswith("package://"):
+            from ament_index_python.packages import get_package_share_directory
+            pkg, _, rel = path[len("package://"):].partition("/")
+            try:
+                return os.path.join(get_package_share_directory(pkg), rel)
+            except Exception:
+                return path
+        return path
+
+    def _load_calibration(self, path):
+        """ROS camera_info yaml 에서 camera_matrix(3x3)·dist(5) 를 직접 읽는다.
+
+        경로가 비었거나 읽기 실패면 None 을 반환해 파라미터 fallback 을 쓰게 한다.
+        """
+        path = self._resolve_pkg_path(path)
+        if not path or not os.path.exists(path):
+            if path:
+                self.get_logger().warn(
+                    f"캘리브레이션 yaml 없음: {path} → 파라미터 fallback"
+                )
+            return None
+        try:
+            with open(path) as f:
+                data = yaml.safe_load(f)
+            K = np.array(data["camera_matrix"]["data"], dtype=np.float64).reshape(3, 3)
+            dist = np.array(
+                data["distortion_coefficients"]["data"], dtype=np.float64
+            )
+            self.get_logger().info(f"캘리브레이션 로드: {path} (fx={K[0, 0]:.1f})")
+            return K, dist
+        except Exception as e:
+            self.get_logger().error(f"캘리브레이션 로드 실패({path}): {e} → fallback")
+            return None
 
     def _stop(self):
         self._cmd_pub.publish(Twist())
