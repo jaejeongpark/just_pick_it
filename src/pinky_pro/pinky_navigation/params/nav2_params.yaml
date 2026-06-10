@@ -120,9 +120,11 @@ controller_server:
       lookahead_time: 1.5
       transform_tolerance: 0.2
       use_velocity_scaled_lookahead_dist: true
-      # 소형 아레나(2x1m): 벽 충돌 검사로 인한 잦은 정지를 막는다. 경로는 global
-      # planner 가 충돌 회피하므로 RPP 는 그 경로를 따라가기만 한다.
-      use_collision_detection: false
+      # 소형 아레나: 평소엔 global planner 경로만 따르되, odom 누적/amcl 오차로 벽을
+      # 향할 때를 대비해 충돌검사를 켠다(local costmap=실시간 스캔이라 amcl 무관).
+      # 짧은 시간지평으로 '임박한' 충돌에만 멈춰 유연성을 최대한 유지한다.
+      use_collision_detection: true
+      max_allowed_time_to_collision_up_to_carrot: 1.0
       use_interpolation: true
 
       # ========= 회전 우선 관련 핵심 파라미터 =========

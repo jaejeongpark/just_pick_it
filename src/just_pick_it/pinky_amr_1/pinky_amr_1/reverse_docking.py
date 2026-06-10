@@ -132,6 +132,10 @@ class ReverseDocking(Node):
         self.declare_parameter("lane_yellow_upper", [35, 255, 255])
         self.declare_parameter("lane_min_pixels", 150)        # 한쪽 라인 최소 픽셀(conf 0)
         self.declare_parameter("lane_full_pixels", 1200)      # 이 이상이면 conf 1
+        # 노란선이 3줄(왼|중앙(공유)|오)이라 컬럼 히스토그램으로 라인을 분리한 뒤
+        # dock1=왼쪽 2줄, dock2=오른쪽 2줄을 채널로 쓴다. 컬럼이 라인인지 판정하는 임계
+        # (ROI 세로 대비 그 컬럼의 노란픽셀 비율).
+        self.declare_parameter("lane_col_active_ratio", 0.25)
 
         # ── 후진/정지 ───────────────────────────────────────────────────
         self.declare_parameter("reverse_speed", 0.04)         # 후진 속도(m/s)
@@ -187,6 +191,9 @@ class ReverseDocking(Node):
         self._yellow_hi = tuple(int(v) for v in self.get_parameter("lane_yellow_upper").value)
         self._lane_min_px  = int(self.get_parameter("lane_min_pixels").value)
         self._lane_full_px = int(self.get_parameter("lane_full_pixels").value)
+        self._lane_col_ratio = self.get_parameter("lane_col_active_ratio").value
+        self._dock_left = True       # reverse_dock 에서 marker_id 로 설정(dock1=좌/dock2=우)
+        self._dbg_line_xs: list[int] = []   # 디버그: 마지막 검출 라인 x 들
 
         self._reverse_speed = self.get_parameter("reverse_speed").value
         self._stop_tol      = self.get_parameter("stop_y_tolerance_m").value
@@ -252,6 +259,8 @@ class ReverseDocking(Node):
             )
             return False
         marker_x, marker_y = self._marker_world[marker_id]
+        # dock1(marker 0, world x 작음) = 왼쪽 채널(왼+중앙 라인), dock2 = 오른쪽(중앙+오).
+        self._dock_left = (marker_id == 0)
 
         self.get_logger().info(
             f"reverse_dock: marker={marker_id}@world({marker_x:.3f},{marker_y:.3f}), "
@@ -438,7 +447,8 @@ class ReverseDocking(Node):
                 self.get_logger().info(
                     f"Insert: dist={marker_dist:.3f} robot_y={robot_y:.3f}/dock={dock_y:.3f} "
                     f"tvec_x={float(tvec[0]):.3f} rvec_y={float(rvec[1]):.3f} "
-                    f"marker_w={marker_omega:.3f} lane[{lane_s}] omega={omega:.3f}"
+                    f"marker_w={marker_omega:.3f} lane[{lane_s}] lines={self._dbg_line_xs} "
+                    f"omega={omega:.3f}"
                 )
                 last_log = time.time()
 
@@ -492,10 +502,11 @@ class ReverseDocking(Node):
         return None
 
     def _detect_lane(self, frame) -> LaneResult | None:
-        """노란 주차라인 2개 → 채널 대칭선의 (lateral_px, yaw_rad, conf).
+        """노란 주차라인(3줄: 왼|중앙(공유)|오) 중 도크 채널 2줄의 대칭선을 낸다.
 
-        하단 ROI 에서 좌/우 절반의 노란 픽셀을 각각 직선 피팅해 두 라인을 얻고,
-        그 중심선(대칭선)의 이미지 중심 대비 수평 오프셋과 수직 대비 기울기를 낸다.
+        하단 ROI 에서 컬럼 히스토그램으로 라인 클러스터를 분리해 x 순 정렬한 뒤,
+        dock1(좌)은 가장 왼쪽 2줄(왼+중앙), dock2(우)는 가장 오른쪽 2줄(중앙+오)을
+        채널로 선택한다. 그 중심선(대칭선)의 수평 오프셋·기울기·신뢰도를 반환.
         """
         h, w = frame.shape[:2]
         roi = frame[h // 2:, :]              # 하단 절반(바닥)
@@ -503,26 +514,50 @@ class ReverseDocking(Node):
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         yellow = cv2.inRange(hsv, self._yellow_lo, self._yellow_hi)
 
-        left = self._fit_line(yellow[:, : w // 2], 0)
-        right = self._fit_line(yellow[:, w // 2:], w // 2)
-        if left is None or right is None:
+        lines = self._find_lines(yellow, rh)   # [(x_bottom, ang, px), ...] x 오름차순
+        self._dbg_line_xs = [round(x) for (x, _, _) in lines]
+        if len(lines) < 2:
             return None
-        (lx_bottom, l_ang, l_px) = left
-        (rx_bottom, r_ang, r_px) = right
+        # 중앙선은 dock1·dock2 공유. dock1=왼쪽 2줄, dock2=오른쪽 2줄을 채널로 선택.
+        (lx, l_ang, l_px), (rx, r_ang, r_px) = (
+            (lines[0], lines[1]) if self._dock_left else (lines[-2], lines[-1])
+        )
 
-        # 대칭선: 두 라인의 평균(중심선). 하단(로봇 가까운 쪽) 기준점 + 평균 각.
-        center_x_bottom = (lx_bottom + rx_bottom) / 2.0
+        center_x = (lx + rx) / 2.0
         center_ang = (l_ang + r_ang) / 2.0
-        lateral_px = center_x_bottom - w / 2.0   # +면 중심이 우측
+        lateral_px = center_x - w / 2.0          # +면 중심이 우측
         yaw_rad = center_ang                     # 수직 대비 기울기(우측+)
 
-        # 신뢰도: 양쪽 라인 픽셀 수가 충분할수록 1 에 가까움.
         m = min(l_px, r_px)
         conf = (m - self._lane_min_px) / max(self._lane_full_px - self._lane_min_px, 1)
         conf = float(max(0.0, min(1.0, conf)))
         if conf <= 0.0:
             return None
         return LaneResult(lateral_px, yaw_rad, conf)
+
+    def _find_lines(self, yellow, rh: int):
+        """노란 마스크에서 수직 라인 클러스터를 x 오름차순으로 반환한다.
+
+        컬럼별 노란 픽셀이 ROI 세로의 lane_col_active_ratio 이상이면 라인 컬럼으로 보고,
+        인접 라인 컬럼을 묶어 한 라인으로 피팅한다. 반환: [(x_bottom, ang, px), ...].
+        """
+        col_count = (yellow > 0).sum(axis=0)
+        active = col_count > (rh * self._lane_col_ratio)
+        w = yellow.shape[1]
+        lines = []
+        c = 0
+        while c < w:
+            if not active[c]:
+                c += 1
+                continue
+            c0 = c
+            while c < w and active[c]:
+                c += 1
+            fit = self._fit_line(yellow[:, c0:c], c0)
+            if fit is not None:
+                lines.append(fit)
+        lines.sort(key=lambda t: t[0])
+        return lines
 
     def _fit_line(self, mask, x_offset: int):
         """마스크 비영 픽셀을 직선 피팅. (하단 x, 수직대비각rad, 픽셀수) 또는 None."""
