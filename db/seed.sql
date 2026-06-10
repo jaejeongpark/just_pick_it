@@ -55,7 +55,7 @@ VALUES (
     (
         'PRODUCT_ZONE_2',
         'PRODUCT',
-        1.06,
+        1.05,
         0.60,
         0.00,
         0.00
@@ -79,7 +79,7 @@ VALUES (
     (
         'PRODUCT_ZONE_5',
         'PRODUCT',
-        1.06,
+        1.05,
         0.36,
         0.00,
         0.00
@@ -202,7 +202,7 @@ VALUES (
     (
         'TRAFFIC_T2',
         'TRAFFIC',
-        1.06,
+        1.05,
         0.85,
         0.00,
         0.00
@@ -226,7 +226,7 @@ VALUES (
     (
         'TRAFFIC_B2',
         'TRAFFIC',
-        1.06,
+        1.05,
         0.15,
         0.00,
         0.00
