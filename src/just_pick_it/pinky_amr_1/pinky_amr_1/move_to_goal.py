@@ -59,7 +59,7 @@ class MoveToGoal(Node):
         self._emergency = emergency_latch
 
         self.declare_parameter("precision_approach_distance", 0.3)
-        self.declare_parameter("xy_goal_tolerance", 0.05)
+        self.declare_parameter("xy_goal_tolerance", 0.02)
         self.declare_parameter("yaw_goal_tolerance", 0.05)
         self.declare_parameter("nav_timeout_sec", 120.0)
 
@@ -247,13 +247,17 @@ class MoveToGoal(Node):
                 self._stop_robot()
                 return True
 
-            # 현재 heading과 목표 방향의 각도 차이로 조향
-            target_heading = math.atan2(dy, dx)
-            angle_err = normalize_angle(target_heading - cur_yaw)
-
             twist = Twist()
             twist.linear.x = min(KP * dist, 0.12)
-            twist.angular.z = 1.0 * angle_err
+            # 목표에 가까우면 atan2(dy,dx)(목표 방향)가 노이즈에 민감해 헤딩이 요동친다(wobble).
+            # 진입 시 이미 정렬돼 있으므로 가까운 구간(<0.03m)에선 직진만 하고,
+            # 충분히 멀 때만 조향한다. angular.z 도 클램프해 급격한 스윙을 막는다.
+            if dist > 0.03:
+                target_heading = math.atan2(dy, dx)
+                angle_err = normalize_angle(target_heading - cur_yaw)
+                twist.angular.z = max(-0.6, min(0.6, 1.0 * angle_err))
+            else:
+                twist.angular.z = 0.0
             self._cmd_pub.publish(twist)
             time.sleep(0.05)
 
