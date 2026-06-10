@@ -104,8 +104,31 @@
 
    같은 기간 반영: 콜드 스타트 시 양 충전 도크 점유 초기화, battery 텔레메트리 20s+ 미수신 시 0%로
    처리해 offline 로봇 배정 제외(RobotStateMonitor).
+9. **Reverse Docking 실차 디버깅 + 견고화 (2026-06-10, picky1)** — 🔶 진행중 (박서우). 주행은 도킹 빼고 정상.
 
-> 박서우 미완(다음 기동·배터리 충전 후): 주문 E2E 실주행 완주, R1 재시작 복구 실동작, `_at_dock` 부팅 가정 견고화(낮음). 상세는 §3-D.
+   1. **카메라/캘리브레이션 직접화** — reverse_docking 이 ROS Image pub/sub 대신 Picamera2 를 직접
+      열고(도킹 중에만) `camera_calibration.yaml` 을 직접 로드. udp_image_sender 는 UDP 전용 원복.
+   2. **카메라 180° flip** — 카메라가 거꾸로 장착 + 캘리브레이션도 flip 기준이라, 검출 전 `cv2.flip(-1)`
+      적용(`apriltag_detector_real` 와 동일). 안 하면 마커 횡/yaw·라인 좌우가 반전.
+   3. **마커 dict/size 정정** — 도크 마커는 AprilTag `DICT_APRILTAG_36h11`, 한 변 `0.05m`(기존 ArUco
+      4x4_50·0.10 오설정 → acquire timeout/깊이 오차였음).
+   4. **3줄 주차선 대응** — 주차선이 3줄(왼\|중앙(공유)\|오)이라 dock1=왼+중앙, dock2=중앙+오. 컬럼
+      히스토그램으로 라인 분리→x순→도크별 채널 2줄 선택. 2줄(가까움)/3줄(멀어짐) 전환 일관.
+   5. **마커 상실 복구** — 정렬하느라 마커가 시야 벗어나는 건 정상 → 실패 처리 대신 라인으로 법선 복귀.
+   6. **정렬 게인 하향** — 후진 진동 완화(marker 0.6, lane_lat 0.002/yaw 0.6, max_angular_vel 0.25).
+
+   **미해결(다음):** ① 마커 정렬 부호(flip 후에도 거의 정렬됐는데 각을 확 틀어 벽으로, 양의 피드백
+   의심 — insert 로그로 부호 확정) ② 구조 변경 요구(라인검출 전 반드시 마커 향해 회전 정렬 먼저) ③
+   **보드 CPU 과부하**(도킹 비전이 부하 높은 Pi 포화 → 먹통, 비전 루프 경량화/주기↓ 필요).
+
+10. **주행 견고성 (2026-06-10)** — ✅ 완료 (박서우)
+    - **벽 충돌 안전망**: nav2 `use_collision_detection: true` + 짧은 시간지평(local costmap 기반,
+      amcl 무관). odom 누적으로 벽 향할 때 임박 충돌만 정지(유연성 유지).
+    - **예약 레이스 수정**: TrafficManager `notify_state` 가 갓 만든 경로 예약을 STANDBY 텔레메트리에
+      지워(`예약 task=None`) goal 이 cancel/abort 되고 주문이 빈 메시지로 실패하던 것 → '이동/점유에서
+      빠져나올 때(prev active)만' 해제하도록 수정. test 갱신+레이스 케이스 추가(62 pass).
+
+> 박서우 미완(다음 기동·배터리 충전 후): 주문 E2E 실주행 완주, **Reverse Docking 완성(§3-A 9 미해결)**, R1 재시작 복구 실동작, `_at_dock` 부팅 가정 견고화(낮음). 상세는 §3-D.
 
 ### 3-B. 이명제 완료 작업
 
