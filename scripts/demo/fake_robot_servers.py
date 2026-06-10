@@ -116,6 +116,11 @@ class FakeRobotServers(Node):
         self._battery_drain_per_flow = env_float("DEMO_PICKY_BATTERY_DRAIN_PER_FLOW", 30.0)
         self._charge_complete_seconds = env_float("DEMO_PICKY_CHARGE_COMPLETE_SECONDS", 5.0)
         self._cobot_auto_complete = env_bool("DEMO_COBOT_AUTO_COMPLETE", True)
+        # 실로봇 혼합 테스트용 선택 mock. 실제 AMR(picky1) 주행 테스트 중에는
+        # DEMO_MOCK_PICKY=0 으로 picky mock 을 꺼서 보드의 실제 action server 와
+        # 충돌하지 않게 하고, cobot 작업만 자동 처리(auto-complete)하게 한다.
+        self._mock_picky = env_bool("DEMO_MOCK_PICKY", True)
+        self._mock_cobot = env_bool("DEMO_MOCK_COBOT", True)
         self._state_publish_interval_sec = env_float(
             "DEMO_STATE_PUBLISH_INTERVAL_SECONDS",
             1.0,
@@ -131,7 +136,7 @@ class FakeRobotServers(Node):
         self._servers: list[object] = []
         self._services: list[object] = []
 
-        for name in PICKY_NAMES:
+        for name in (PICKY_NAMES if self._mock_picky else ()):
             ns = name.lower()
             x, y, theta = INITIAL_PICKY_POSES[name]
             runtime = PickyRuntime(name=name, x=x, y=y, theta=theta)
@@ -190,7 +195,7 @@ class FakeRobotServers(Node):
                 )
             )
 
-        for name in COBOT_NAMES:
+        for name in (COBOT_NAMES if self._mock_cobot else ()):
             ns = name.lower()
             runtime = CobotRuntime(name=name)
             self._cobots[name] = runtime
@@ -234,8 +239,9 @@ class FakeRobotServers(Node):
 
         self.get_logger().info(
             "fake robot servers ready: "
-            "/picky{1,2}/move_command, /picky{1,2}/dock_command, "
-            f"/cobot{{1,2}}/execute_task, cobot_auto_complete={self._cobot_auto_complete}"
+            f"mock_picky={self._mock_picky}(/picky*/move_command,dock_command), "
+            f"mock_cobot={self._mock_cobot}(/cobot*/execute_task), "
+            f"cobot_auto_complete={self._cobot_auto_complete}"
         )
 
     def request_shutdown(self) -> None:
