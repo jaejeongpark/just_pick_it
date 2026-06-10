@@ -66,11 +66,15 @@ class MoveToGoal(Node):
         self._emergency = emergency_latch
 
         self.declare_parameter("precision_approach_distance", 0.3)
+        # 중간 경유지 도달 판정 거리. 이 거리 안에 들면 다음 경유지로 넘어간다.
+        # 작을수록 경유지에 더 근접한 뒤 꺾는다(최종 목적지는 precision_approach_distance 사용).
+        self.declare_parameter("waypoint_reach_distance", 0.1)
         self.declare_parameter("xy_goal_tolerance", 0.02)
         self.declare_parameter("yaw_goal_tolerance", 0.05)
         self.declare_parameter("nav_timeout_sec", 120.0)
 
         self._prec_dist = self.get_parameter("precision_approach_distance").value
+        self._waypoint_reach = self.get_parameter("waypoint_reach_distance").value
         self._xy_tol = self.get_parameter("xy_goal_tolerance").value
         self._yaw_tol = self.get_parameter("yaw_goal_tolerance").value
         self._nav_timeout = self.get_parameter("nav_timeout_sec").value
@@ -107,15 +111,18 @@ class MoveToGoal(Node):
 
         # Nav2 phase: 비상 정지로 중단되면(NAV_PAUSED) 재개될 때까지 대기한 뒤,
         # 현재 위치 기준으로 bearing 을 다시 계산해 같은 목표로 재시도한다(pause-continue).
+        # 중간 경유지는 waypoint_reach_distance 까지 근접해야 다음으로 넘어가, 너무 멀리서
+        # 다음 경유지로 꺾는 것을 막는다. 최종 목적지는 precision_approach_distance 에서
+        # Nav2 를 끊고 정밀접근으로 마무리한다.
+        reach = self._prec_dist if final else self._waypoint_reach
         while True:
-            # Nav2 목표 헤딩을 "현재→목표 진행 방향" bearing 으로 준다. yaw=0(동쪽) 하드코딩 시
-            # use_rotate_to_heading 컨트롤러가 매 목표마다 로봇을 동쪽으로 돌려(불필요한 90°)
-            # 축이 틀어졌다. 최종 정지 자세는 도착 후 _rotate_to_nearest_90 이 따로 잡는다.
+            # Nav2 목표 헤딩을 "현재→목표 진행 방향" bearing 으로 준다. 도착 정지 자세는
+            # _rotate_to_stop_pose 가 따로 잡는다(여기선 위치만).
             with self._lock:
                 cur_x, cur_y = self._cur_x, self._cur_y
             bearing = math.atan2(y - cur_y, x - cur_x)
 
-            nav_result = self._nav2_navigate(x, y, bearing)
+            nav_result = self._nav2_navigate(x, y, bearing, reach)
             if nav_result is NAV_PAUSED:
                 self._wait_if_paused()
                 continue
@@ -170,7 +177,7 @@ class MoveToGoal(Node):
     # 내부 단계
     # ------------------------------------------------------------------ #
 
-    def _nav2_navigate(self, x: float, y: float, yaw: float) -> bool:
+    def _nav2_navigate(self, x: float, y: float, yaw: float, reach_dist: float) -> bool:
         if not self._nav_client.wait_for_server(timeout_sec=5.0):
             self.get_logger().error("navigate_to_pose action server unavailable")
             return False
@@ -214,7 +221,7 @@ class MoveToGoal(Node):
                 dy = y - self._cur_y
                 dist = math.hypot(dx, dy)
 
-            if dist <= self._prec_dist:
+            if dist <= reach_dist:
                 # 정밀 접근 전환: Nav2 취소
                 cancel_future = goal_handle.cancel_goal_async()
                 cancel_deadline = time.time() + 3.0
