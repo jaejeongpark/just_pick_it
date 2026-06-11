@@ -104,7 +104,7 @@
 
    같은 기간 반영: 콜드 스타트 시 양 충전 도크 점유 초기화, battery 텔레메트리 20s+ 미수신 시 0%로
    처리해 offline 로봇 배정 제외(RobotStateMonitor).
-9. **Reverse Docking 실차 디버깅 + 견고화 (2026-06-10, picky1)** — 🔶 진행중 (박서우). 주행은 도킹 빼고 정상.
+9. **Reverse Docking 실차 디버깅 + 견고화 (2026-06-10~11, picky1)** — ✅ **완성** (박서우). 1차 정렬에 안정적으로 잡혀 반복 거의 불필요, E2E 도킹 성공. 잔여는 보드 CPU 경량화·N회 정량화(낮음).
 
    1. **카메라/캘리브레이션 직접화** — reverse_docking 이 ROS Image pub/sub 대신 Picamera2 를 직접
       열고(도킹 중에만) `camera_calibration.yaml` 을 직접 로드. udp_image_sender 는 UDP 전용 원복.
