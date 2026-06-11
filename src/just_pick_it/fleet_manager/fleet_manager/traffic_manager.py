@@ -133,8 +133,8 @@ DEFAULT_ZONE_COORDS: dict[str, tuple[float, float]] = {
     'PRODUCT_ZONE_6':   (1.40, 0.35),
 
     # 우측 픽업 구역
-    'PICKUP_ZONE_1':    (1.80, 0.80),
-    'PICKUP_ZONE_2':    (1.80, 0.20),
+    'PICKUP_ZONE_1':    (1.80, 0.82),
+    'PICKUP_ZONE_2':    (1.80, 0.18),
 }
 
 
