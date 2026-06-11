@@ -123,10 +123,14 @@ class ReverseDocking(Node):
         # base_link(중심) 에서 카메라가 전방(+x_body=+y_world)으로 떨어진 거리(m).
         # 마커 거리로 로봇 base 의 world y 를 추정할 때 보정에 쓴다(URDF 기준 근사).
         self.declare_parameter("camera_forward_offset_m", 0.05)
-        # solvePnP 깊이(tvec[z])가 실측보다 일정 비율 짧게 나옴(캘리브 FOV/AprilTag 검출
-        # 코너 규약 추정). robot_y = marker_y - tvec[z]*depth_scale - cam_fwd 로 보정.
-        # 실측 1점: 카메라-마커 자=0.175 vs tvec[z]=0.118 → 0.175/0.118≈1.48.
-        self.declare_parameter("depth_scale", 1.48)
+        # solvePnP tvec 이 실측보다 짧게 나옴(캘리브/검출 규약). 그런데 그 비율이 거리에
+        # 따라 달라(가까움 ~1.48, 도크 원거리 ~1.36) 깊이정지(원거리)와 횡측정(가까움)을
+        # 분리한다. depth_scale: robot_y(도크 정지)용, lateral_scale: Δx(횡 측정)용.
+        self.declare_parameter("depth_scale", 1.36)
+        self.declare_parameter("lateral_scale", 1.48)
+        # 마커 좌표 횡 바이어스 보정(m). 정렬 후 x 가 일정하게 +쪽(동)으로 남으면 +값으로
+        # Δx 를 키워 더 서쪽으로 보낸다(실측 final_x - 0.11 만큼).
+        self.declare_parameter("marker_lat_offset_m", 0.0)
         # 마커 정면 정렬 시 rvec[1]≈π 인데, 마커 장착 미세 기울기 등으로 도크-정렬 헤딩과
         # 몇 도 어긋날 수 있다. yaw 목표를 이만큼 보정(도). +면 더 회전(rvec[1] 목표를 +방향).
         self.declare_parameter("marker_yaw_offset_deg", 0.0)
@@ -210,6 +214,8 @@ class ReverseDocking(Node):
             )
         self._cam_fwd = self.get_parameter("camera_forward_offset_m").value
         self._depth_scale = self.get_parameter("depth_scale").value
+        self._lateral_scale = self.get_parameter("lateral_scale").value
+        self._marker_lat_offset = self.get_parameter("marker_lat_offset_m").value
         self._marker_yaw_offset = math.radians(self.get_parameter("marker_yaw_offset_deg").value)
 
         self._camera_source = self.get_parameter("camera_source").value
@@ -656,10 +662,12 @@ class ReverseDocking(Node):
         psi = math.atan2(sum(nxs) / len(nxs), -sum(nzs) / len(nzs))
         # solvePnP tvec 이 실측보다 depth_scale 배 짧게 나오므로(깊이 보정과 동일 원인),
         # 횡오차에도 같은 스케일을 곱해야 실제 거리(m)가 된다. (안 곱하면 1.48배 과소)
-        dx = -(tx * math.cos(psi) + tz * math.sin(psi)) * self._depth_scale
+        dx = (-(tx * math.cos(psi) + tz * math.sin(psi)) * self._lateral_scale
+              + self._marker_lat_offset)
         self.get_logger().info(
             f"Measure: Δx={dx:+.3f}m (tx={tx:.3f} tz={tz:.3f} "
-            f"psi={math.degrees(psi):+.1f}deg, scale={self._depth_scale}, n={len(txs)})"
+            f"psi={math.degrees(psi):+.1f}deg, lat_scale={self._lateral_scale}, "
+            f"offset={self._marker_lat_offset}, n={len(txs)})"
         )
         return dx
 

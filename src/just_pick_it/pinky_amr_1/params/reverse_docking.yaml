@@ -27,7 +27,9 @@
     camera_topic: "camera/image_raw"
     # base_link 중심에서 카메라가 전방(+y_world)으로 떨어진 거리(URDF 근사). 깊이 정지 보정용.
     camera_forward_offset_m: 0.060   # robot(lidar)-marker 0.235 - camera-marker 0.175
-    depth_scale: 1.48                # solvePnP tvec[z] 가 실측보다 짧게(0.118 vs 0.175) → 보정
+    depth_scale: 1.36                # 도크(원거리) 정지용. 1.48이면 ~4cm 일찍 정지(원거리 과대)
+    lateral_scale: 1.48              # Δx(횡, 가까운 측정거리)용. 깊이와 분리
+    marker_lat_offset_m: 0.0         # 정렬 후 x가 일정하게 동쪽이면 +값(=final_x-0.11)으로 보정
 
     # ------------------------------------------------------------------ #
     # 단계 A: 마커 획득 + 시작 coarse 정렬 (마커 상대)
