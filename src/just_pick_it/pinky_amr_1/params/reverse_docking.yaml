@@ -26,7 +26,8 @@
     dist_coeffs: [-0.009886920170813706, 0.04109867043833388, -0.0012477127326946092, 0.00016340382023196295, -0.053581046132224315]   # [k1, k2, p1, p2, k3]
     camera_topic: "camera/image_raw"
     # base_link 중심에서 카메라가 전방(+y_world)으로 떨어진 거리(URDF 근사). 깊이 정지 보정용.
-    camera_forward_offset_m: 0.055
+    camera_forward_offset_m: 0.060   # robot(lidar)-marker 0.235 - camera-marker 0.175
+    depth_scale: 1.48                # solvePnP tvec[z] 가 실측보다 짧게(0.118 vs 0.175) → 보정
 
     # ------------------------------------------------------------------ #
     # 단계 A: 마커 획득 + 시작 coarse 정렬 (마커 상대)

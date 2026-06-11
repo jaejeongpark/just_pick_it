@@ -122,6 +122,10 @@ class ReverseDocking(Node):
         # base_link(중심) 에서 카메라가 전방(+x_body=+y_world)으로 떨어진 거리(m).
         # 마커 거리로 로봇 base 의 world y 를 추정할 때 보정에 쓴다(URDF 기준 근사).
         self.declare_parameter("camera_forward_offset_m", 0.05)
+        # solvePnP 깊이(tvec[z])가 실측보다 일정 비율 짧게 나옴(캘리브 FOV/AprilTag 검출
+        # 코너 규약 추정). robot_y = marker_y - tvec[z]*depth_scale - cam_fwd 로 보정.
+        # 실측 1점: 카메라-마커 자=0.175 vs tvec[z]=0.118 → 0.175/0.118≈1.48.
+        self.declare_parameter("depth_scale", 1.48)
 
         # ── 시작 coarse 정렬 (마커 상대) ────────────────────────────────
         self.declare_parameter("acquire_rotate_speed", 0.3)   # 마커 탐색 회전(rad/s)
@@ -179,6 +183,7 @@ class ReverseDocking(Node):
                 self.get_parameter("dist_coeffs").value, dtype=np.float64
             )
         self._cam_fwd = self.get_parameter("camera_forward_offset_m").value
+        self._depth_scale = self.get_parameter("depth_scale").value
 
         self._camera_source = self.get_parameter("camera_source").value
         self._cam_w = int(self.get_parameter("camera_width").value)
@@ -421,7 +426,7 @@ class ReverseDocking(Node):
             marker_dist = float(tvec[2])
 
             # 깊이 기반 정지: 로봇 base 의 world y 추정
-            robot_y = marker_world_y - marker_dist - self._cam_fwd
+            robot_y = marker_world_y - marker_dist * self._depth_scale - self._cam_fwd
             if robot_y <= dock_y + self._stop_tol:
                 self._stop()
                 self.get_logger().info(

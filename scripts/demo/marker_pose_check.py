@@ -22,7 +22,8 @@ import yaml
 
 # ── reverse_docking.yaml 과 동일한 값 ──────────────────────────────────
 MARKER_SIZE = 0.05                       # AprilTag 36h11 한 변 (m)
-CAM_FWD = 0.055                          # base_link 에서 카메라 전방 오프셋 (로봇0.40/카메라0.455)
+CAM_FWD = 0.060                          # robot(lidar)-marker 0.235 - camera-marker 0.175
+DEPTH_SCALE = 1.48                       # solvePnP tvec[z] 가 실측보다 짧게(0.118 vs 0.175) → 보정
 MARKER_WORLD = {0: (0.11, 0.635), 1: (0.28, 0.635)}  # dock1/standby1/마커 일직선 x=0.11, 마커y=0.635
 DOCK = {0: (0.11, 0.10), 1: (0.28, 0.10)}            # marker_id -> dock (x, y) 참고용
 FLIP_180 = True
@@ -91,7 +92,7 @@ def main():
                     )
                     if mid in MARKER_WORLD:
                         mwx, mwy = MARKER_WORLD[mid]
-                        robot_y = mwy - tz - CAM_FWD          # 현 코드 깊이 추정
+                        robot_y = mwy - tz * DEPTH_SCALE - CAM_FWD   # depth_scale 보정 포함
                         rxm = mwx - tx                         # 횡 부호 가설 A
                         rxp = mwx + tx                         # 횡 부호 가설 B
                         line += (
