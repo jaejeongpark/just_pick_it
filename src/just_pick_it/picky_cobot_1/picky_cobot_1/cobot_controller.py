@@ -26,9 +26,14 @@ class CobotController:
     각 phase 메서드는 (success: bool, detected_quantity: int) 를 반환한다.
     """
 
-    def __init__(self, node, port: str = '/dev/ttyJETCOBOT', baudrate: int = 1_000_000) -> None:
-        self._node = node
-        self._mc   = MyCobot280(port, baudrate, thread_lock=True)
+    def __init__(self, node, port: str = '/dev/ttyJETCOBOT', baudrate: int = 1_000_000, dry_run: bool = False) -> None:
+        self._node    = node
+        self._dry_run = dry_run
+        if dry_run:
+            self._mc = None
+            self._log('CobotController dry_run 모드 — 하드웨어 연결 생략')
+            return
+        self._mc = MyCobot280(port, baudrate, thread_lock=True)
         time.sleep(0.4)
         self._mc.set_fresh_mode(1)
         time.sleep(0.4)
@@ -39,6 +44,8 @@ class CobotController:
     def run_sorting(self, grasp_trajectory: list[list[float]]) -> tuple[bool, int]:
         """서버에서 받은 학습 파지 궤적으로 물체를 집는다."""
         self._log('SORTING 시작')
+        if self._dry_run:
+            return True, 1  # [구현 필요] grasp_trajectory 기반 실제 파지 동작으로 교체
         if not self.execute_grasp_trajectory(grasp_trajectory):
             return False, 0
         if not self.close_gripper():
@@ -51,12 +58,16 @@ class CobotController:
         place_trajectory: list[list[float]],
     ) -> tuple[bool, int]:
         self._log('LOADING 시작')
+        if self._dry_run:
+            return True, 1  # [구현 필요] pick_trajectory/place_trajectory 기반 실제 적재 동작으로 교체
         self.open_gripper()
         ok = self._execute_pick_and_place(pick_trajectory, place_trajectory)
         return ok, (1 if ok else 0)
 
     def run_inspecting(self, inspect_trajectory: list[list[float]]) -> tuple[bool, int]:
         self._log('INSPECTING 시작')
+        if self._dry_run:
+            return True, 0  # [구현 필요] inspect_trajectory 기반 실제 검사 동작으로 교체
         ok = self.execute_grasp_trajectory(inspect_trajectory)
         if not ok:
             return False, 0
@@ -69,6 +80,8 @@ class CobotController:
         place_trajectory: list[list[float]],
     ) -> tuple[bool, int]:
         self._log('UNLOADING 시작')
+        if self._dry_run:
+            return True, 1  # [구현 필요] pick_trajectory/place_trajectory 기반 실제 하역 동작으로 교체
         self.open_gripper()
         ok = self._execute_pick_and_place(pick_trajectory, place_trajectory)
         return ok, (1 if ok else 0)
@@ -79,12 +92,17 @@ class CobotController:
         place_trajectory: list[list[float]],
     ) -> tuple[bool, int]:
         self._log('PLACING 시작')
+        if self._dry_run:
+            return True, 1  # [구현 필요] pick_trajectory/place_trajectory 기반 실제 진열 동작으로 교체
         self.open_gripper()
         ok = self._execute_pick_and_place(pick_trajectory, place_trajectory)
         return ok, (1 if ok else 0)
 
     def stow_arm(self) -> bool:
         """팔을 안전 복귀 자세(home)로 이동한다."""
+        self._log('STOWING_ARM 시작')
+        if self._dry_run:
+            return True  # [구현 필요] _HOME 자세로 실제 복귀 동작으로 교체
         ok = self.move_to_angles(_HOME, speed=DEFAULT_SPEED)
         self.open_gripper()
         return ok
@@ -154,6 +172,8 @@ class CobotController:
     # ── 비상 정지 ────────────────────────────────────────────────────────
 
     def emergency_stop(self) -> None:
+        if self._dry_run:
+            return
         try:
             self._mc.stop()
         except Exception as e:

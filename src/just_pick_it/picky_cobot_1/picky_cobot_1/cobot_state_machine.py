@@ -58,6 +58,7 @@ class CobotStateManager(Node):
         self.declare_parameter('vision_service_timeout_sec', 30.0)
         self.declare_parameter('cobot_port', '/dev/ttyJETCOBOT')
         self.declare_parameter('cobot_baudrate', 1_000_000)
+        self.declare_parameter('dry_run', False)
 
         self._robot_id       = self.get_parameter('robot_id').value
         self._vision_timeout = self.get_parameter('vision_service_timeout_sec').value
@@ -109,6 +110,7 @@ class CobotStateManager(Node):
             self,
             port=self.get_parameter('cobot_port').value,
             baudrate=self.get_parameter('cobot_baudrate').value,
+            dry_run=self.get_parameter('dry_run').value,
         )
 
         # 주기 상태 publish 타이머 (late subscriber 를 위한 cobot_state heartbeat)
