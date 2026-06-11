@@ -243,6 +243,25 @@ class StateManager(Node):
         return CancelResponse.ACCEPT
 
     def _execute_move(self, goal_handle) -> MoveCommand.Result:
+        # 실행 콜백에서 예외가 나면 rclpy 가 goal 을 ABORTED(기본 Result=빈 메시지)로
+        # 처리해 "success=False, message=" 만 남고 원인이 사라진다. traceback 을 남기고
+        # 의미있는 메시지로 반환하도록 전체를 감싼다.
+        try:
+            return self._execute_move_inner(goal_handle)
+        except Exception as e:
+            import traceback
+            self.get_logger().error(
+                f'[StateManager] MOVE 콜백 예외: {e}\n{traceback.format_exc()}'
+            )
+            try:
+                if goal_handle.is_active:
+                    goal_handle.abort()
+            except Exception:
+                pass
+            self._set_state('ERROR_RECOVERY')
+            return MoveCommand.Result(success=False, message=f'exception: {e}')
+
+    def _execute_move_inner(self, goal_handle) -> MoveCommand.Result:
         task_type = goal_handle.request.task_type
         waypoints = goal_handle.request.waypoints
 
@@ -308,6 +327,15 @@ class StateManager(Node):
         # RETURN_HOME 도 여기서 STANDBY 로 종료한다. 도킹은 별도 DOCK_IN task 가 수행.
         self._set_state(ARRIVAL_STATE[task_type])
 
+        # 주행·정지자세를 다 마쳤어도, 실행 중 goal 이 취소됐으면 succeed() 가 예외를 던진다
+        # (취소된 goal 에 succeed 불가 → 빈 메시지 abort 의 유력 원인). goal 상태로 분기.
+        if goal_handle.is_cancel_requested:
+            goal_handle.canceled()
+            self.get_logger().warn('[StateManager] MOVE 완료했으나 goal 취소 요청됨 → canceled')
+            return MoveCommand.Result(success=False, message='canceled after arrival')
+        if not goal_handle.is_active:
+            self.get_logger().warn('[StateManager] MOVE 완료했으나 goal 비활성 → 결과만 반환')
+            return MoveCommand.Result(success=True, message='ok (goal inactive)')
         goal_handle.succeed()
         return MoveCommand.Result(success=True, message='ok')
 
