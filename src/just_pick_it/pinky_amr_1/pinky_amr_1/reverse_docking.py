@@ -337,29 +337,35 @@ class ReverseDocking(Node):
                 self.get_logger().error("reverse_dock: FAILED — 마커 미획득")
                 return False
 
-            # 2) [횡오차 측정 → arc 법선정렬 → 마커 재정렬] 을 align_passes 회 반복.
-            #    1차로 대략 맞추고, 2차에서 잔여오차를 다시 측정·보정해 수렴시킨다.
+            # 2) 정렬 반복. 핵심: 측정 전에 똑바로 세운다(psi≈0) → Δx 가 phantom 없이 깨끗.
+            #    순서: 초기 recenter → [똑바로세움 → 측정 → arc → recenter] × N.
+            if not self._recenter_on_marker(marker_id, 0.0):
+                self._stop()
+                self.get_logger().error("reverse_dock: FAILED — 초기 재정렬")
+                return False
             for p in range(self._align_passes):
+                # 측정 전 똑바로 세움(법선 정면) → 측정이 깨끗해짐.
+                self._align_yaw_to_normal(marker_id)
                 dx = self._measure_lateral_offset(marker_id)
                 if dx is None:
                     self._stop()
                     self.get_logger().error("reverse_dock: FAILED — 횡오차 측정 실패")
                     return False
+                self.get_logger().info(
+                    f"정렬 {p + 1}/{self._align_passes}차: Δx={dx:+.3f}m"
+                )
                 # 부드러운 후진 arc 로 법선 진입(open-loop, odom 으로 종료판단). dx>0 → 서쪽.
                 if not self._arc_into_line(dx):
                     self._stop()
                     self.get_logger().error("reverse_dock: FAILED — arc 진입")
                     return False
-                # 마커방향으로 회전해 카메라 중앙 재포착(dx 부호로 탐색방향 힌트).
+                # arc 회전 후 마커 다시 중앙으로(dx 부호로 탐색방향 힌트).
                 if not self._recenter_on_marker(marker_id, dx):
                     self._stop()
                     self.get_logger().error("reverse_dock: FAILED — 마커 재정렬")
                     return False
-                self.get_logger().info(
-                    f"정렬 {p + 1}/{self._align_passes}차 완료 (Δx={dx:+.3f}m)"
-                )
 
-            # 3) 최종 yaw 정렬: 마커가 fronto-parallel(법선 정면, rvec_y≈180°)이 되게 회전.
+            # 3) 후진 전 똑바로 세움(이 헤딩을 odom θ_ref 로 앵커링해 후진 내내 유지).
             self._align_yaw_to_normal(marker_id)
 
             # 4) 그대로 직진 후진 + 마커 깊이로 정지.
