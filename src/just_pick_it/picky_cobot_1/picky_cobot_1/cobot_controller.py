@@ -14,19 +14,8 @@ STREAM_SPEED         = 50   # 센터링 실시간 추종 속도
 MOTION_TIMEOUT_SEC   = 15.0
 POLL_INTERVAL_SEC    = 0.05
 
-# ── 임시 테스트용 고정 자세 (vision 서버 연동 후 실제 좌표로 교체 필요) ─────────
 # 단위: degree,  순서: [J1, J2, J3, J4, J5, J6]
-_HOME          = [  0.0,   0.0,   0.0,   0.0,   0.0,   0.0]
-
-_LOAD_PICK     = [  0.0, -20.0,  90.0, -70.0,   0.0,   0.0]
-_LOAD_PLACE    = [-90.0, -20.0,  90.0, -70.0,   0.0,   0.0]
-
-_INSPECT       = [  0.0,  30.0,  60.0, -90.0,   0.0,   0.0]
-
-_UNLOAD_PICK   = [-90.0, -20.0,  90.0, -70.0,   0.0,   0.0]
-_UNLOAD_PLACE  = [  0.0, -20.0,  90.0, -70.0,   0.0,   0.0]
-
-_PLACE_TEMP    = [ 45.0, -20.0,  90.0, -70.0,   0.0,   0.0]
+_HOME = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 
 class CobotController:
@@ -49,45 +38,49 @@ class CobotController:
 
     def run_sorting(self, grasp_trajectory: list[list[float]]) -> tuple[bool, int]:
         """서버에서 받은 학습 파지 궤적으로 물체를 집는다."""
-        self._log('SORTING 파지 실행')
+        self._log('SORTING 시작')
         if not self.execute_grasp_trajectory(grasp_trajectory):
             return False, 0
         if not self.close_gripper():
             return False, 0
         return True, 1
 
-    def run_loading(self, request) -> tuple[bool, int]:
+    def run_loading(
+        self,
+        pick_trajectory: list[list[float]],
+        place_trajectory: list[list[float]],
+    ) -> tuple[bool, int]:
         self._log('LOADING 시작')
         self.open_gripper()
-        ok = self._pick_and_place(_LOAD_PICK, _LOAD_PLACE)
+        ok = self._execute_pick_and_place(pick_trajectory, place_trajectory)
         return ok, (1 if ok else 0)
 
-    def run_inspecting(self, request) -> tuple[bool, int]:
+    def run_inspecting(self, inspect_trajectory: list[list[float]]) -> tuple[bool, int]:
         self._log('INSPECTING 시작')
-        ok = self.move_to_angles(_INSPECT)
+        ok = self.execute_grasp_trajectory(inspect_trajectory)
         if not ok:
             return False, 0
         time.sleep(1.0)
         return True, 0
 
-    def run_unloading(self, request) -> tuple[bool, int]:
+    def run_unloading(
+        self,
+        pick_trajectory: list[list[float]],
+        place_trajectory: list[list[float]],
+    ) -> tuple[bool, int]:
         self._log('UNLOADING 시작')
         self.open_gripper()
-        ok = self._pick_and_place(_UNLOAD_PICK, _UNLOAD_PLACE)
+        ok = self._execute_pick_and_place(pick_trajectory, place_trajectory)
         return ok, (1 if ok else 0)
 
-    def run_placing(self, scan_result, request) -> tuple[bool, int]:
-        """scan_result 가 None 이면 임시 고정 좌표(_PLACE_TEMP)로 진열한다."""
-        if scan_result is None:
-            self._log('PLACING: scan_result 없음 — 임시 고정 좌표 사용')
-            place_angles = _PLACE_TEMP
-        else:
-            # [구현 필요] scan_result 에서 실제 각도/좌표 추출
-            place_angles = _PLACE_TEMP
-
+    def run_placing(
+        self,
+        pick_trajectory: list[list[float]],
+        place_trajectory: list[list[float]],
+    ) -> tuple[bool, int]:
         self._log('PLACING 시작')
         self.open_gripper()
-        ok = self._pick_and_place(_LOAD_PICK, place_angles)
+        ok = self._execute_pick_and_place(pick_trajectory, place_trajectory)
         return ok, (1 if ok else 0)
 
     def stow_arm(self) -> bool:
@@ -168,21 +161,20 @@ class CobotController:
 
     # ── 내부 유틸 ────────────────────────────────────────────────────────
 
-    def _pick_and_place(
+    def _execute_pick_and_place(
         self,
-        pick_angles: list[float],
-        place_angles: list[float],
-        speed: int = DEFAULT_SPEED,
+        pick_trajectory: list[list[float]],
+        place_trajectory: list[list[float]],
     ) -> bool:
-        """pick 위치로 이동 후 파지하고, place 위치로 이동 후 내려놓는다."""
-        if not self.move_to_angles(pick_angles, speed):
-            self._log_err('pick 이동 실패')
+        """pick 궤적 실행 후 파지하고, place 궤적 실행 후 내려놓는다."""
+        if not self.execute_grasp_trajectory(pick_trajectory):
+            self._log_err('pick 궤적 실행 실패')
             return False
         if not self.close_gripper():
             self._log_err('그리퍼 닫기 실패')
             return False
-        if not self.move_to_angles(place_angles, speed):
-            self._log_err('place 이동 실패')
+        if not self.execute_grasp_trajectory(place_trajectory):
+            self._log_err('place 궤적 실행 실패')
             return False
         if not self.open_gripper():
             self._log_err('그리퍼 열기 실패')
