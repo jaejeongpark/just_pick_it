@@ -4,6 +4,7 @@
   "features_per_step": 10,
   "input_dim": 53,
   "max_delta_deg": 5.0,
+  "target_control_hz": 3.0,
   "joint_limits": [
     [
       -168.0,

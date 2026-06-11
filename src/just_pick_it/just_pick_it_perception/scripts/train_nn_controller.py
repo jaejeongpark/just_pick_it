@@ -396,11 +396,23 @@ def train_policy(X, Yd, args, device):
                         shuffle=True, drop_last=len(ds_train) >= args.batch_size)
 
     model = PolicyNet(args.max_delta_deg).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+    opt = torch.optim.Adam(model.parameters(), lr=args.lr,
+                           weight_decay=args.weight_decay)
     mse = nn.MSELoss()
 
     print(f"[policy] samples={n} (train={len(train_idx)}, val={len(val_idx)}), "
-          f"input_dim={INPUT_DIM}")
+          f"input_dim={INPUT_DIM}, weight_decay={args.weight_decay}, "
+          f"patience={args.patience}")
+
+    has_val = len(val_idx) > 0
+    Xv = X[val_idx].to(device) if has_val else None
+    Yv = Yd[val_idx].to(device) if has_val else None
+
+    best_val = float("inf")
+    best_state = None
+    best_epoch = -1
+    no_improve = 0
+    print_every = max(1, args.epochs // 20)
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -414,15 +426,39 @@ def train_policy(X, Yd, args, device):
             opt.step()
             tot += float(loss.item())
             nb += 1
-        if epoch % max(1, args.epochs // 10) == 0 or epoch == 1:
-            msg = f"[policy] epoch {epoch:4d}  train_loss={tot / max(nb,1):.5f}"
-            if val_idx:
-                model.eval()
-                with torch.no_grad():
-                    vloss = float(mse(model(X[val_idx].to(device)),
-                                      Yd[val_idx].to(device)))
-                msg += f"  val_loss={vloss:.5f}"
+
+        vloss = None
+        if has_val:
+            model.eval()
+            with torch.no_grad():
+                vloss = float(mse(model(Xv), Yv))
+            # 과적합 방지: val 최저 모델을 보존(마지막 epoch 모델이 아니라 best를 저장).
+            if vloss < best_val - 1e-6:
+                best_val = vloss
+                best_epoch = epoch
+                best_state = {k: v.detach().cpu().clone()
+                              for k, v in model.state_dict().items()}
+                no_improve = 0
+            else:
+                no_improve += 1
+
+        if epoch % print_every == 0 or epoch == 1:
+            msg = f"[policy] epoch {epoch:5d}  train_loss={tot / max(nb,1):.5f}"
+            if vloss is not None:
+                msg += f"  val_loss={vloss:.5f}  best={best_val:.5f}@{best_epoch}"
             print(msg)
+
+        # early stopping: val 개선이 patience epoch 동안 없으면 중단.
+        if args.patience > 0 and has_val and no_improve >= args.patience:
+            print(f"[policy] early stop at epoch {epoch} "
+                  f"(no val improvement for {args.patience} epochs). "
+                  f"best val_loss={best_val:.5f} @ epoch {best_epoch}")
+            break
+
+    # 과적합 직전(val 최저) 모델로 복원.
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        print(f"[policy] restored best model: val_loss={best_val:.5f} @ epoch {best_epoch}")
 
     # sanity: 출력 delta 분포
     model.eval()
@@ -456,7 +492,8 @@ def train_grip_predictor(Xg, Yg, args, device):
                         shuffle=True)
 
     model = GripSuccessNet().to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+    opt = torch.optim.Adam(model.parameters(), lr=args.lr,
+                           weight_decay=args.weight_decay)
     crit = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     print(f"[grip] samples={n} (success={int(n_pos)}, fail={int(n_neg)}), "
@@ -540,6 +577,10 @@ def main():
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=1e-4,
+                        help="L2 정규화(과적합 완화). 데이터 적을수록 키워볼 것(예: 1e-3)")
+    parser.add_argument("--patience", type=int, default=1000,
+                        help="val 개선 없이 이 epoch 지나면 early stop(best 모델 저장). 0=비활성")
     parser.add_argument("--val-ratio", type=float, default=0.15)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")

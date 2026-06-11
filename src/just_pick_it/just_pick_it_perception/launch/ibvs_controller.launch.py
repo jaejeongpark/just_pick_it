@@ -104,6 +104,11 @@ def generate_launch_description():
         DeclareLaunchArgument("hard_stop_below_center_error", default_value="-1.0"),
         DeclareLaunchArgument("filter_alpha", default_value="0.5"),
         DeclareLaunchArgument("use_sim_time", default_value="false"),
+
+        # J6 grip align (DONE 후 OBB 장축으로 J6 정렬). 카메라/그리퍼 장착에 맞춰 보정.
+        DeclareLaunchArgument("enable_j6_grip_align", default_value="true"),
+        DeclareLaunchArgument("j6_angle_sign", default_value="1.0"),
+        DeclareLaunchArgument("j6_angle_offset_deg", default_value="0.0"),
     ]
 
     node = Node(
@@ -182,6 +187,10 @@ def generate_launch_description():
                 "hard_stop_below_center_error": LaunchConfiguration("hard_stop_below_center_error"),
                 "filter_alpha": LaunchConfiguration("filter_alpha"),
                 "use_sim_time": LaunchConfiguration("use_sim_time"),
+
+                "enable_j6_grip_align": LaunchConfiguration("enable_j6_grip_align"),
+                "j6_angle_sign": LaunchConfiguration("j6_angle_sign"),
+                "j6_angle_offset_deg": LaunchConfiguration("j6_angle_offset_deg"),
             }
         ],
     )
