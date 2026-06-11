@@ -465,7 +465,8 @@ class ReverseDocking(Node):
                 if time.time() - last_log > 0.5:
                     self.get_logger().info(
                         f"Insert[S1]: dist={marker_dist:.3f} robot_y={robot_y:.3f} "
-                        f"x_err={x_err:+.3f} tvec_x={float(tvec[0]):.3f} omega={omega:.3f}"
+                        f"x_err={x_err:+.3f} tvec_x={float(tvec[0]):.3f} "
+                        f"rvec_y={float(rvec[1]):.3f} omega={omega:.3f}"
                     )
                     last_log = time.time()
                 twist = Twist()
@@ -577,9 +578,11 @@ class ReverseDocking(Node):
         # (안 빼면 정렬됐는데도 π 만큼 틀렸다고 보고 ω 최대로 계속 회전 → 벽 충돌.)
         ry = float(rvec[1]) - math.pi - self._marker_yaw_offset
         yaw_err = math.atan2(math.sin(ry), math.cos(ry))   # [-π,π] 정규화
-        # 횡: 마커 우측(lat_err>0=로봇 좌측)이면 좌회전(CCW,+). yaw: CW로 틀어졌으면(yaw_err<0) CCW(+).
-        # 실측 부호 검증(marker_pose_check) 결과에 맞춘 부호.
-        return self._marker_lat_kp * lat_err - self._marker_yaw_kp * yaw_err
+        # 횡 부호: 실주행 로그로 plant 부호 확정. 후진 중 omega<0(CW) 를 주면 tvec[0] 가
+        # 감소(절댓값 증가)했다 → d(tvec[0])/dt 와 omega 가 같은 부호(P>0). 따라서 안정
+        # (음성 피드백)을 위해 lat_err 항은 음(-)이어야 한다(+ 이면 발산해 법선을 지나쳐
+        # 계속 아크로 멀어짐). 정적 추정 부호와 별개로 제어 루프 부호가 이걸로 검증됨.
+        return -self._marker_lat_kp * lat_err - self._marker_yaw_kp * yaw_err
 
     # ====================================================================== #
     # 검출
