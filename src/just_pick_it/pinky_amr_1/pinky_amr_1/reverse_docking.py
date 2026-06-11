@@ -569,10 +569,12 @@ class ReverseDocking(Node):
         tx = sum(txs) / len(txs)
         tz = sum(tzs) / len(tzs)
         psi = math.atan2(sum(nxs) / len(nxs), -sum(nzs) / len(nzs))
-        dx = -(tx * math.cos(psi) + tz * math.sin(psi))
+        # solvePnP tvec 이 실측보다 depth_scale 배 짧게 나오므로(깊이 보정과 동일 원인),
+        # 횡오차에도 같은 스케일을 곱해야 실제 거리(m)가 된다. (안 곱하면 1.48배 과소)
+        dx = -(tx * math.cos(psi) + tz * math.sin(psi)) * self._depth_scale
         self.get_logger().info(
             f"Measure: Δx={dx:+.3f}m (tx={tx:.3f} tz={tz:.3f} "
-            f"psi={math.degrees(psi):+.1f}deg, n={len(txs)})"
+            f"psi={math.degrees(psi):+.1f}deg, scale={self._depth_scale}, n={len(txs)})"
         )
         return dx
 
