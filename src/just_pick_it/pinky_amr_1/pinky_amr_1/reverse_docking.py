@@ -134,6 +134,13 @@ class ReverseDocking(Node):
         self.declare_parameter("acquire_rotate_speed", 0.3)   # 마커 탐색 회전(rad/s)
         self.declare_parameter("marker_lat_kp", 1.0)          # tvec[0] coarse 횡 게인
         self.declare_parameter("marker_yaw_kp", 0.8)          # rvec[1] coarse yaw 게인
+        # 채널 안에서 마커 상실 시: 후진을 멈추고 제자리 회전으로 마커를 카메라 중앙에
+        # 되돌리는 재중심 단계. kp=중심 정렬 회전 게인, tol=중앙 허용 bearing(rad).
+        self.declare_parameter("recenter_kp", 0.8)
+        self.declare_parameter("recenter_tol_rad", 0.05)
+        self.declare_parameter("recenter_timeout_sec", 6.0)
+        # 시퀀스1(법선라인 x=dock_x 정렬) 완료 판정 횡오차 허용치(m).
+        self.declare_parameter("line_x_tol_m", 0.02)
 
         # ── 정밀 정렬 (노란 라인) ───────────────────────────────────────
         self.declare_parameter("lane_lat_kp", 0.004)          # lateral_px 게인
@@ -197,6 +204,10 @@ class ReverseDocking(Node):
         self._acquire_rot   = self.get_parameter("acquire_rotate_speed").value
         self._marker_lat_kp = self.get_parameter("marker_lat_kp").value
         self._marker_yaw_kp = self.get_parameter("marker_yaw_kp").value
+        self._recenter_kp  = self.get_parameter("recenter_kp").value
+        self._recenter_tol = self.get_parameter("recenter_tol_rad").value
+        self._recenter_to  = self.get_parameter("recenter_timeout_sec").value
+        self._line_x_tol   = self.get_parameter("line_x_tol_m").value
 
         self._lane_lat_kp = self.get_parameter("lane_lat_kp").value
         self._lane_yaw_kp = self.get_parameter("lane_yaw_kp").value
@@ -368,16 +379,22 @@ class ReverseDocking(Node):
         dock_y: float,
         lat_offset: float,
     ) -> bool:
-        """노란 라인으로 lateral+yaw 정밀 정렬하며 후진. 마커 깊이가 dock_y 도달 시 정지.
+        """두 시퀀스로 후진 도킹. 마커 깊이가 dock_y 도달 시 정지.
 
-        ω = conf·(라인 PID) + (1-conf)·(마커 coarse 정렬)
-          - conf 0(라인 부족, 시작): 마커 tvec[0]/rvec[1] coarse
-          - conf 1(라인 충분, 삽입): 라인 대칭선 lateral+yaw 정밀
+        시퀀스1 (on_line=False): 마커 coarse 로 로봇을 법선라인 x=dock_x 로 후진 정렬.
+          이 구간에선 각을 틀며 후진하므로 마커가 잠깐 벗어나도 절대 회전으로 쫓지
+          않는다(라인 들어가기 전 회전 금지). 횡오차 |robot_x-dock_x|<tol 이면 완료.
+        시퀀스1 완료 시: 마커방향으로 제자리 회전해 카메라 중앙에 재포착(헤딩/포지션 확정).
+        시퀀스2 (on_line=True): 노란 라인 대칭선 정밀 + 마커 깊이로 후진. 이 구간에서
+          마커 상실 시에만 다시 재중심(_recenter_on_marker) 후 이어간다.
+
         v = -reverse_speed (느린 후진)
-        정지: 로봇 world y(= marker_y - 마커거리 - 카메라 전방오프셋) <= dock_y
+        정지: 로봇 world y(= marker_y - 마커거리·scale - 카메라 전방오프셋) <= dock_y
         """
         deadline = time.time() + self._insert_to
-        lost = 0
+        last_tx = 0.0     # 마지막으로 본 마커 tvec[0] (상실 시 재중심 탐색 방향 힌트)
+        on_line = False   # 시퀀스1(법선라인 도달) 완료 여부
+        lost = 0          # 시퀀스1 중 마커 일시 상실 카운터
         last_log = 0.0
 
         while time.time() < deadline:
@@ -393,31 +410,21 @@ class ReverseDocking(Node):
 
             marker = self._detect_aruco(frame, marker_id)
             if marker is None:
-                # 정렬하느라 회전하면 마커가 화각을 잠깐 벗어나는 건 정상이다(실패 아님).
-                # 라인이 보이면(채널 안) 라인 yaw 로 +y(법선=라인 채널)에 정렬하며 천천히
-                # 후진한다 → 헤딩이 법선으로 돌아오면서 마커가 다시 보인다.
-                lane = self._detect_lane(frame)
-                if lane is not None and lane.conf > 0.0:
-                    lane_omega = -(self._lane_lat_pid.compute(lane.lateral_px)
-                                   + self._lane_yaw_pid.compute(lane.yaw_rad))
-                    twist = Twist()
-                    twist.linear.x = -self._reverse_speed * 0.5
-                    twist.angular.z = self._clamp(lane_omega)
-                    self._cmd_pub.publish(twist)
-                    if time.time() - last_log > 0.5:
-                        self.get_logger().info(
-                            f"Insert: 마커 일시 상실 — 라인으로 법선 복귀 "
-                            f"(conf={lane.conf:.2f} yaw={lane.yaw_rad:.3f})"
-                        )
-                        last_log = time.time()
-                    lost = 0
-                    time.sleep(0.05)
-                    continue
-                # 마커도 라인도 안 보이면 진짜 상실 → 저속 직진 유지, 길어지면 실패.
+                if on_line:
+                    # 시퀀스2: 법선라인에 올라온 뒤 마커가 화각을 벗어나면, 라인검출로
+                    # 바로 넘어가면 헤딩이 틀어져 라인 선택이 꼬인다. 후진을 멈추고
+                    # 제자리 회전으로 마커를 다시 중앙에 잡은 뒤 라인 후진을 이어간다.
+                    self._stop()
+                    if self._recenter_on_marker(marker_id, last_tx):
+                        continue
+                    self.get_logger().warn("Insert: 마커 재중심 실패 → 도킹 실패")
+                    return False
+                # 시퀀스1: 각을 틀어 후진하다 마커가 잠깐 벗어나도 회전으로 쫓지 않는다.
+                # 짧게 직진 후진만 유지하고, 너무 길어지면 실패.
                 lost += 1
                 if lost > 40:   # 약 2s
                     self._stop()
-                    self.get_logger().warn("Insert: 마커·라인 모두 미검출 → 실패")
+                    self.get_logger().warn("Insert: 시퀀스1 마커 상실 지속 → 실패")
                     return False
                 twist = Twist()
                 twist.linear.x = -self._reverse_speed * 0.5
@@ -428,6 +435,7 @@ class ReverseDocking(Node):
 
             tvec, rvec = marker
             marker_dist = float(tvec[2])
+            last_tx = float(tvec[0])
 
             # 깊이 기반 정지: 로봇 base 의 world y 추정
             robot_y = marker_world_y - marker_dist * self._depth_scale - self._cam_fwd
@@ -438,7 +446,36 @@ class ReverseDocking(Node):
                 )
                 return True
 
-            # ── 정렬 ω 계산 (라인 신뢰도로 블렌딩) ──────────────────────
+            # 법선라인까지의 횡오차(m): robot_x - dock_x = lat_offset - tvec[0].
+            x_err = lat_offset - float(tvec[0])
+
+            if not on_line:
+                # ── 시퀀스1: 마커 coarse 로 법선라인 x=dock_x 로 후진 정렬 ──
+                if abs(x_err) < self._line_x_tol:
+                    on_line = True
+                    self._stop()
+                    self.get_logger().info(
+                        f"Insert: 시퀀스1 완료 — 법선라인 도달(x_err={x_err:+.3f}m) "
+                        f"→ 마커 재중심"
+                    )
+                    # 이동이 끝난 후 마커방향으로 회전해 중앙 재포착(포지션 확정).
+                    self._recenter_on_marker(marker_id, last_tx)
+                    continue
+                omega = self._marker_coarse_omega(tvec, rvec, lat_offset)
+                if time.time() - last_log > 0.5:
+                    self.get_logger().info(
+                        f"Insert[S1]: dist={marker_dist:.3f} robot_y={robot_y:.3f} "
+                        f"x_err={x_err:+.3f} tvec_x={float(tvec[0]):.3f} omega={omega:.3f}"
+                    )
+                    last_log = time.time()
+                twist = Twist()
+                twist.linear.x = -self._reverse_speed
+                twist.angular.z = self._clamp(omega)
+                self._cmd_pub.publish(twist)
+                time.sleep(0.05)
+                continue
+
+            # ── 시퀀스2: 노란 라인 대칭선 정밀 + 마커 깊이로 후진 ──────────
             lane = self._detect_lane(frame)
             marker_omega = self._marker_coarse_omega(tvec, rvec, lat_offset)
 
@@ -451,14 +488,13 @@ class ReverseDocking(Node):
                 omega = marker_omega
 
             # 디버그(0.5s): 깊이 진행 + 마커 pose + 라인 + 최종 omega (부호/게인 진단용).
-            # omega 가 크고 마커가 화각 밖으로 도는지, 깊이(robot_y)가 dock_y 로 수렴하는지 확인.
             if time.time() - last_log > 0.5:
                 lane_s = (
                     f"conf={lane.conf:.2f} lat={lane.lateral_px:.0f}px yaw={lane.yaw_rad:.3f}"
                     if lane is not None else "none"
                 )
                 self.get_logger().info(
-                    f"Insert: dist={marker_dist:.3f} robot_y={robot_y:.3f}/dock={dock_y:.3f} "
+                    f"Insert[S2]: dist={marker_dist:.3f} robot_y={robot_y:.3f}/dock={dock_y:.3f} "
                     f"tvec_x={float(tvec[0]):.3f} rvec_y={float(rvec[1]):.3f} "
                     f"marker_w={marker_omega:.3f} lane[{lane_s}] lines={self._dbg_line_xs} "
                     f"omega={omega:.3f}"
@@ -473,6 +509,58 @@ class ReverseDocking(Node):
 
         self._stop()
         self.get_logger().warn("Insert: timeout")
+        return False
+
+    def _recenter_on_marker(self, marker_id: int, last_tx: float) -> bool:
+        """마커 상실/시퀀스 전환 시: 후진을 멈추고 제자리 회전으로 마커를 카메라 중앙에
+        되돌린다(헤딩=법선 복귀, 포지션 확정). 중앙 정렬되면 True.
+
+        회전 부호(거꾸로 장착 flip 기준): 마커가 tvec[0]>0 이면 CCW(+)로 돌려야
+        bearing 이 0 으로 수렴한다(marker_pose_check 로 검증한 횡 부호와 동일).
+        마커가 안 보이면 마지막에 보이던 쪽(last_tx 부호)으로 천천히 탐색 회전한다.
+        """
+        deadline = time.time() + self._recenter_to
+        search_dir = 1.0 if last_tx >= 0.0 else -1.0
+        last_log = 0.0
+        while time.time() < deadline:
+            if self._emergency.is_stopped():
+                self._stop()
+                deadline += self._wait_if_paused()
+                continue
+
+            frame = self._get_latest_frame()
+            if frame is None:
+                time.sleep(0.05)
+                continue
+
+            marker = self._detect_aruco(frame, marker_id)
+            twist = Twist()   # 회전만(후진 정지)
+            if marker is not None:
+                tvec, _ = marker
+                dist = max(float(tvec[2]), 0.1)
+                bearing = float(tvec[0]) / dist     # 카메라 광축 대비 마커 횡(rad 근사)
+                search_dir = 1.0 if bearing >= 0.0 else -1.0
+                if abs(bearing) < self._recenter_tol:
+                    self._stop()
+                    self.get_logger().info(
+                        f"Recenter: 마커 중앙 복귀 완료 (bearing={bearing:.3f})"
+                    )
+                    return True
+                twist.angular.z = self._clamp(self._recenter_kp * bearing)
+            else:
+                twist.angular.z = self._clamp(search_dir * self._acquire_rot)
+
+            self._cmd_pub.publish(twist)
+            if time.time() - last_log > 0.5:
+                seen = "detect" if marker is not None else "search"
+                self.get_logger().info(
+                    f"Recenter: 마커 중앙 정렬 중 ({seen}, dir={search_dir:+.0f})"
+                )
+                last_log = time.time()
+            time.sleep(0.05)
+
+        self._stop()
+        self.get_logger().warn("Recenter: timeout — 마커 재중심 실패")
         return False
 
     def _marker_coarse_omega(self, tvec, rvec, lat_offset: float) -> float:
