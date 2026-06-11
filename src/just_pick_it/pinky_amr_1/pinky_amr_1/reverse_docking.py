@@ -332,7 +332,9 @@ class ReverseDocking(Node):
                 return False
 
             # 4) 마커방향으로 회전해 카메라 중앙 재포착(헤딩 재정렬).
-            if not self._recenter_on_marker(marker_id, 0.0):
+            #    arc 가 dx>0 이면 CW 로 돌아 마커가 왼쪽으로 빠졌으니 CCW 로 탐색해야 →
+            #    dx 부호를 탐색 방향 힌트로 넘긴다(dx>0 → CCW 탐색).
+            if not self._recenter_on_marker(marker_id, dx):
                 self._stop()
                 self.get_logger().error("reverse_dock: FAILED — 마커 재정렬")
                 return False
@@ -509,14 +511,16 @@ class ReverseDocking(Node):
                 tvec, _ = marker
                 dist = max(float(tvec[2]), 0.1)
                 bearing = float(tvec[0]) / dist     # 카메라 광축 대비 마커 횡(rad 근사)
-                search_dir = 1.0 if bearing >= 0.0 else -1.0
+                # 마커가 왼쪽(bearing<0)이면 CCW 로 탐색해야 하므로 다음 상실 시 방향힌트.
+                search_dir = -1.0 if bearing >= 0.0 else 1.0
                 if abs(bearing) < self._recenter_tol:
                     self._stop()
                     self.get_logger().info(
                         f"Recenter: 마커 중앙 복귀 완료 (bearing={bearing:.3f})"
                     )
                     return True
-                twist.angular.z = self._clamp(self._recenter_kp * bearing)
+                # 마커 왼쪽(bearing<0) → CCW(ω>0) 로 돌려야 중앙(정적검증 테스트3). 부호 -.
+                twist.angular.z = self._clamp(-self._recenter_kp * bearing)
             else:
                 twist.angular.z = self._clamp(search_dir * self._acquire_rot)
 
