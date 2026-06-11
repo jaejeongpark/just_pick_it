@@ -1,15 +1,19 @@
 """
-Roboflow API로 데이터셋을 내려받아 YOLOv8-seg 모델을 학습한다.
+Roboflow API로 데이터셋을 내려받거나, 로컬 데이터셋으로 YOLOv8-seg 모델을 학습한다.
 
-사용법:
+사용법 (Roboflow 다운로드):
     ros2 run just_pick_it_perception yolo_seg_trainer \\
         --api-key YOUR_KEY \\
         --workspace YOUR_WORKSPACE \\
         --project YOUR_PROJECT \\
         --version 1
 
+사용법 (이미 받아둔 로컬 데이터셋):
+    ros2 run just_pick_it_perception yolo_seg_trainer \\
+        --data-yaml /path/to/dataset/data.yaml
+
     또는 직접 실행:
-    python yolo_seg_trainer.py --api-key KEY --workspace WS --project PROJ
+    python yolo_seg_trainer.py --data-yaml /path/to/dataset/data.yaml
 
 주요 옵션:
     --base-model   베이스 가중치 (기본: yolov8n-seg.pt)
@@ -33,10 +37,17 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
+    local = parser.add_argument_group('로컬 데이터셋')
+    local.add_argument(
+        '--data-yaml',
+        default=None,
+        help='로컬 data.yaml 경로. 지정하면 Roboflow 다운로드를 건너뛴다.',
+    )
+
     roboflow = parser.add_argument_group('Roboflow')
-    roboflow.add_argument('--api-key', required=True, help='Roboflow API 키')
-    roboflow.add_argument('--workspace', required=True, help='Roboflow 워크스페이스 이름')
-    roboflow.add_argument('--project', required=True, help='Roboflow 프로젝트 이름')
+    roboflow.add_argument('--api-key', help='Roboflow API 키')
+    roboflow.add_argument('--workspace', help='Roboflow 워크스페이스 이름')
+    roboflow.add_argument('--project', help='Roboflow 프로젝트 이름')
     roboflow.add_argument('--version', type=int, default=1, help='데이터셋 버전 번호')
     roboflow.add_argument(
         '--dataset-dir',
@@ -113,7 +124,32 @@ def train(args: argparse.Namespace, data_yaml: str):
 
 def main():
     args = parse_args()
-    data_yaml = download_dataset(args)
+
+    if args.data_yaml:
+        data_yaml = os.path.abspath(os.path.expanduser(args.data_yaml))
+        if not os.path.isfile(data_yaml):
+            print(f'[ERROR] data.yaml을 찾을 수 없습니다: {data_yaml}')
+            sys.exit(1)
+        print(f'[INFO] 로컬 데이터셋 사용: {data_yaml}')
+    else:
+        missing = [
+            name
+            for name, value in (
+                ('--api-key', args.api_key),
+                ('--workspace', args.workspace),
+                ('--project', args.project),
+            )
+            if not value
+        ]
+        if missing:
+            print(
+                '[ERROR] Roboflow 다운로드에는 다음 인자가 필요합니다: '
+                + ', '.join(missing)
+                + '\n        로컬 데이터셋을 쓰려면 --data-yaml 을 지정하세요.'
+            )
+            sys.exit(1)
+        data_yaml = download_dataset(args)
+
     train(args, data_yaml)
 
 

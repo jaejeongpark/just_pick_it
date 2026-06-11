@@ -53,6 +53,9 @@ setup(
             'yolo_seg_infer = just_pick_it_perception.yolo_seg_infer_node:main',
             'ibvs_controller = just_pick_it_perception.ibvs_controller_node:main',
             'visual_servo_bag_recorder = just_pick_it_perception.visual_servo_bag_recorder_node:main',
+            'human_interaction_recorder = just_pick_it_perception.human_interaction_recorder_node:main',
+            'episode_replay_tester = just_pick_it_perception.episode_replay_tester_node:main',
+            'nn_controller = just_pick_it_perception.nn_controller_node:main',
         ],
     },
 )

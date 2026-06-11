@@ -2,6 +2,8 @@
 
 import math
 import os
+import queue
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
@@ -12,8 +14,9 @@ from rclpy.serialization import serialize_message
 
 import rosbag2_py
 
-from std_msgs.msg import Empty
-from std_msgs.msg import Float64MultiArray
+from rclpy.qos import QoSProfile, QoSDurabilityPolicy
+
+from std_msgs.msg import Empty, Float64, Float64MultiArray, Int32, String
 
 from just_pick_it_interfaces.msg import TrackedObjectArray
 from just_pick_it_interfaces.msg import VisualServoSample
@@ -152,6 +155,11 @@ class VisualServoBagRecorderNode(Node):
         self.declare_parameter("shutdown_on_stop", True)
 
         # ============================================================
+        # Episode / NN data collection
+        # ============================================================
+        self.declare_parameter("episode_id", "")
+
+        # ============================================================
         # Load parameters
         # ============================================================
         self.robot_name = str(self.get_parameter("robot_name").value)
@@ -252,6 +260,8 @@ class VisualServoBagRecorderNode(Node):
             self.get_parameter("shutdown_on_stop").value
         )
 
+        self.episode_id = str(self.get_parameter("episode_id").value)
+
         if self.gripper_close_mode not in ["le", "ge"]:
             self.get_logger().warn(
                 f"Invalid gripper_close_mode={self.gripper_close_mode}. Use le."
@@ -298,6 +308,15 @@ class VisualServoBagRecorderNode(Node):
         self.recording = True
         self.sample_index = 0
 
+        # NN data collection state
+        self.latest_commanded_angles = [0.0] * 6
+        self.prev_commanded_angles = None
+        self.latest_controller_phase = -1
+        self.latest_grasp_orientation_anchor = math.nan
+        self._current_has_command = False
+        self._write_queue: queue.Queue = queue.Queue()
+        self._write_thread: Optional[threading.Thread] = None
+
         # ============================================================
         # ROS interfaces
         # ============================================================
@@ -315,17 +334,48 @@ class VisualServoBagRecorderNode(Node):
             10,
         )
 
-        self.request_status_pub = self.create_publisher(
-            Empty,
-            self.request_status_topic,
-            10,
-        )
+        # snatch-only: ibvs_controller가 발행하는 status를 구독만 한다.
+        # request_status는 발행하지 않아 IBVS 제어의 시리얼 큐에 부하를 주지 않는다.
 
         self.manual_stop_sub = self.create_subscription(
             Empty,
             self.manual_stop_topic,
             self.manual_stop_callback,
             10,
+        )
+
+        self.command_sub = self.create_subscription(
+            Float64MultiArray,
+            f"/{self.robot_name}/target_pose",
+            self.command_callback,
+            10,
+        )
+        self.ibvs_phase_sub = self.create_subscription(
+            Int32,
+            f"/{self.robot_name}/ibvs_phase",
+            self.ibvs_phase_callback,
+            10,
+        )
+        self.ibvs_done_sub = self.create_subscription(
+            Empty,
+            f"/{self.robot_name}/ibvs_done",
+            self.ibvs_done_callback,
+            1,
+        )
+        # Grasp orientation anchor latched by ibvs_controller at search detection.
+        # transient_local to receive the last latched value even if we subscribe late.
+        self.grasp_orientation_sub = self.create_subscription(
+            Float64,
+            f"/{self.robot_name}/grasp_orientation_anchor",
+            self.grasp_orientation_callback,
+            QoSProfile(depth=1, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL),
+        )
+        # 연속 에피소드: human_recorder가 새 episode_id를 발행하면 새 bag으로 재오픈한다.
+        self.episode_sub = self.create_subscription(
+            String,
+            f"/{self.robot_name}/nn_episode",
+            self.episode_advance_callback,
+            QoSProfile(depth=1, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL),
         )
 
         # ============================================================
@@ -335,8 +385,10 @@ class VisualServoBagRecorderNode(Node):
         self.resolved_bag_uri = self.resolve_bag_uri()
         self.open_bag_writer()
 
-        period = 1.0 / self.sample_rate_hz
-        self.timer = self.create_timer(period, self.timer_callback)
+        self._write_thread = threading.Thread(
+            target=self._write_worker, daemon=True, name="bag_write_worker"
+        )
+        self._write_thread.start()
 
         self.get_logger().info("VisualServoBagRecorderNode started")
         self.get_logger().info(f"status_topic={self.status_topic}")
@@ -411,6 +463,13 @@ class VisualServoBagRecorderNode(Node):
     def resolve_bag_uri(self) -> str:
         if self.bag_uri:
             path = Path(os.path.expanduser(self.bag_uri))
+        elif self.episode_id:
+            path = (
+                Path(os.path.expanduser(self.bag_base_dir))
+                / "raw"
+                / f"episode_{self.episode_id}"
+                / "ibvs"
+            )
         else:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             path = Path(os.path.expanduser(self.bag_base_dir)) / (
@@ -460,12 +519,38 @@ class VisualServoBagRecorderNode(Node):
         self.writer.create_topic(topic_info)
 
     def close_bag_writer(self):
+        if self._write_thread is not None and self._write_thread.is_alive():
+            self._write_queue.put(None)
+            self._write_thread.join(timeout=5.0)
+            self._write_thread = None
         if self.writer is not None:
             self.get_logger().info(
                 f"Closing rosbag. samples={self.sample_index}, "
                 f"bag_uri={self.resolved_bag_uri}"
             )
             self.writer = None
+
+    def episode_advance_callback(self, msg: String):
+        # human_recorder가 새 episode를 시작했다. 현재 bag을 닫고 새 episode_id로 재오픈한다.
+        new_id = str(msg.data)
+        if not new_id or new_id == self.episode_id:
+            return
+        self.get_logger().info(
+            f"Episode advance: reopen IBVS bag '{self.episode_id}' -> '{new_id}'"
+        )
+        self.close_bag_writer()
+        self.episode_id = new_id
+        # 상태 리셋 후 새 bag 재오픈 + write thread 재시작.
+        self.sample_index = 0
+        self.prev_commanded_angles = None
+        self.resolved_bag_uri = self.resolve_bag_uri()
+        self.open_bag_writer()
+        self._write_thread = threading.Thread(
+            target=self._write_worker, daemon=True, name="bag_write_worker"
+        )
+        self._write_thread.start()
+        self.recording = True
+        self.get_logger().info(f"IBVS bag reopened at {self.resolved_bag_uri}")
 
     # ============================================================
     # Status callback
@@ -919,6 +1004,20 @@ class VisualServoBagRecorderNode(Node):
         sample.gripper_closed = bool(gripper_closed)
         sample.stop_signal = bool(stop_signal)
 
+        sample.episode_id = str(self.episode_id)
+        sample.controller_phase = int(self.latest_controller_phase)
+        sample.commanded_angles = [float(v) for v in self.latest_commanded_angles]
+        if self.prev_commanded_angles is not None:
+            sample.commanded_delta = [
+                float(self.latest_commanded_angles[i] - self.prev_commanded_angles[i])
+                for i in range(6)
+            ]
+        else:
+            sample.commanded_delta = [0.0] * 6
+        sample.has_command = bool(self._current_has_command)
+
+        sample.grasp_orientation_anchor = float(self.latest_grasp_orientation_anchor)
+
         return sample
 
     def write_sample(self, sample: VisualServoSample):
@@ -926,33 +1025,48 @@ class VisualServoBagRecorderNode(Node):
             return
 
         timestamp_ns = self.get_clock().now().nanoseconds
-        self.writer.write(self.bag_topic, serialize_message(sample), timestamp_ns)
+        self._write_queue.put((self.bag_topic, serialize_message(sample), timestamp_ns))
         self.sample_index += 1
 
+    def _write_worker(self):
+        while True:
+            item = self._write_queue.get()
+            if item is None:
+                self._write_queue.task_done()
+                break
+            topic, data, timestamp_ns = item
+            try:
+                if self.writer is not None:
+                    self.writer.write(topic, data, timestamp_ns)
+            except Exception as exc:
+                self.get_logger().error(f"write_worker error: {exc}")
+            self._write_queue.task_done()
+
     # ============================================================
-    # Main timer
+    # Event-driven command recording
     # ============================================================
-    def timer_callback(self):
+    def command_callback(self, msg: Float64MultiArray):
         if not self.recording:
             return
 
-        self.request_status_pub.publish(Empty())
-
-        if not self.has_fresh_status():
-            self.get_logger().warn("Waiting for fresh robot status...")
+        data = list(msg.data)
+        if len(data) < 7 or int(data[0]) != 0:
             return
+
+        # is_control=True 인 실제 제어 명령만 기록한다.
+        # jacobian 측정 wiggle / search 이동 / pregrasp 복귀(is_control=False)는 제외.
+        # data[9]가 is_control 플래그. 플래그가 없는(구버전) 명령은 기록하지 않는다.
+        is_control = len(data) >= 10 and float(data[9]) >= 0.5
+        if not is_control:
+            return
+
+        commanded = [float(v) for v in data[1:7]]
+        self._current_has_command = True
+        prev = self.latest_commanded_angles[:]
+        self.latest_commanded_angles = commanded
 
         detected = self.has_fresh_current_detection()
-
-        if self.phase == PHASE_WAIT_TARGET and self.has_seen_target:
-            self.phase = PHASE_VISUAL_SERVO
-            self.get_logger().info("First target detected. Start VISUAL_SERVO phase.")
-
-        if self.start_after_first_detection and not self.has_seen_target:
-            return
-
         terminal_ready_now = self.update_terminal_trigger(detected)
-
         gripper_closed = self.compute_gripper_closed()
         stop_signal = self.compute_stop_trigger(gripper_closed)
 
@@ -961,39 +1075,59 @@ class VisualServoBagRecorderNode(Node):
             terminal_ready_now=terminal_ready_now,
             stop_signal=stop_signal,
         )
-
         self.write_sample(sample)
+        self._current_has_command = False
+
+        if self.prev_commanded_angles is None:
+            self.prev_commanded_angles = commanded[:]
+        else:
+            self.prev_commanded_angles = prev
 
         self.get_logger().info(
-            f"sample={sample.sample_index}, "
-            f"phase={sample.phase}, "
-            f"detected={sample.detected}, "
-            f"class={sample.target_class_label}, "
-            f"cx={sample.cx:.1f}, cy={sample.cy:.1f}, "
-            f"area={sample.area_norm:.5f}, "
-            f"center_norm={sample.center_norm:.4f}, "
-            f"ready_count={sample.terminal_ready_count}, "
-            f"anchor={sample.terminal_anchor_valid}, "
-            f"terminal_step={sample.terminal_step_count}, "
-            f"gripper={sample.gripper_value:.1f}, "
-            f"closed={sample.gripper_closed}, "
-            f"stop={sample.stop_signal}"
+            f"CMD sample={sample.sample_index}, "
+            f"phase={self.latest_controller_phase}, "
+            f"angles={[round(v, 2) for v in commanded]}, "
+            f"delta={[round(v, 3) for v in sample.commanded_delta]}"
         )
 
-        if self.phase == PHASE_TERMINAL_APPROACH:
-            self.terminal_step_count += 1
+        self.prev_gripper_closed = gripper_closed
 
         if stop_signal:
-            self.get_logger().info("Stop signal detected. Closing rosbag.")
+            self.get_logger().info("Stop signal on command. Closing rosbag.")
             self.recording = False
             self.close_bag_writer()
-
             if self.shutdown_on_stop:
-                self.get_logger().info("shutdown_on_stop=true. Shutting down.")
                 rclpy.shutdown()
-                return
 
-        self.prev_gripper_closed = gripper_closed
+    def grasp_orientation_callback(self, msg: Float64):
+        self.latest_grasp_orientation_anchor = float(msg.data)
+
+    def ibvs_phase_callback(self, msg: Int32):
+        self.latest_controller_phase = int(msg.data)
+
+        if self.latest_controller_phase == 99 and self.recording:
+            self.get_logger().error(
+                "ibvs_phase ERROR (99) received. Aborting episode."
+            )
+            self.recording = False
+            self.close_bag_writer()
+            aborted_marker = Path(self.resolved_bag_uri).parent / "ABORTED"
+            try:
+                aborted_marker.parent.mkdir(parents=True, exist_ok=True)
+                aborted_marker.touch()
+            except Exception as exc:
+                self.get_logger().error(f"Failed to write ABORTED marker: {exc}")
+            if self.shutdown_on_stop:
+                rclpy.shutdown()
+
+    def ibvs_done_callback(self, _msg: Empty):
+        if not self.recording:
+            return
+        self.get_logger().info("ibvs_done received. Closing IBVS bag.")
+        self.recording = False
+        self.close_bag_writer()
+        if self.shutdown_on_stop:
+            rclpy.shutdown()
 
 
 def main(args=None):

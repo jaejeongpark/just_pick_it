@@ -79,7 +79,15 @@ class YoloSegInferNode(Node):
         self.get_logger().info(f'모델 로드 완료: {model_path}')
         self.get_logger().info(f'클래스 목록: {model.names}')
 
-        target_raw = [c for c in self.get_parameter('target_classes').value if c]
+        raw_param = self.get_parameter('target_classes').value
+        if isinstance(raw_param, str):
+            raw_param = [raw_param]
+        target_raw = [
+            name.strip()
+            for entry in raw_param
+            for name in entry.split(',')
+            if name.strip()
+        ]
         if target_raw:
             name_to_id = {v: k for k, v in model.names.items()}
             self._classes_filter = [name_to_id[c] for c in target_raw if c in name_to_id]

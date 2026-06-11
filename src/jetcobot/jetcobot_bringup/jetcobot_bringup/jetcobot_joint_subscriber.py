@@ -42,11 +42,16 @@ class JetcobotCommandSubscriber(Node):
         self.declare_parameter("port", "/dev/ttyJETCOBOT")
         self.declare_parameter("baudrate", 1000000)
         self.declare_parameter("default_speed", 20)
+        # status publish 시 거의 안 변하는 config(tool/world/reference/end_type)는 매번
+        # 시리얼로 읽지 않고 캐시한다. publish_status를 7 read -> 3 read로 줄여 status
+        # rate를 높이고 지연을 낮춘다(human 기록/NN 추론 피드백 충실도 향상).
+        self.declare_parameter("status_cache_config", True)
 
         self.robot_name = self.get_parameter("robot_name").value
         self.port = self.get_parameter("port").value
         self.baudrate = int(self.get_parameter("baudrate").value)
         self.default_speed = int(self.get_parameter("default_speed").value)
+        self.status_cache_config = bool(self.get_parameter("status_cache_config").value)
 
         self.ns = f"/{self.robot_name}"
 
@@ -105,6 +110,20 @@ class JetcobotCommandSubscriber(Node):
         self.get_logger().info(f"Sub: {self.ns}/set_arm")
         self.get_logger().info(f"Pub: {self.ns}/status")
 
+        # 거의 안 변하는 config는 시작 시 1회 읽어 캐시한다(set 시 갱신).
+        self._cfg_tool_reference = self.safe_read_6(
+            "get_tool_reference", [0.0] * 6, "tool_reference")
+        self._cfg_world_reference = self.safe_read_6(
+            "get_world_reference", [0.0] * 6, "world_reference")
+        self._cfg_reference_frame = self.safe_read_scalar(
+            "get_reference_frame", -1.0, "reference_frame")
+        self._cfg_end_type = self.safe_read_scalar(
+            "get_end_type", -1.0, "end_type")
+        self.get_logger().info(
+            f"status_cache_config={self.status_cache_config} "
+            f"(cached config: tool/world/reference/end_type)"
+        )
+
         self.publish_status()
 
     def safe_read_6(self, func_name, default, label):
@@ -141,29 +160,33 @@ class JetcobotCommandSubscriber(Node):
             return default
 
     def publish_status(self):
-        tool_reference = self.safe_read_6(
-            "get_tool_reference",
-            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            "tool_reference",
-        )
-
-        world_reference = self.safe_read_6(
-            "get_world_reference",
-            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            "world_reference",
-        )
-
-        reference_frame = self.safe_read_scalar(
-            "get_reference_frame",
-            -1.0,
-            "reference_frame",
-        )
-
-        end_type = self.safe_read_scalar(
-            "get_end_type",
-            -1.0,
-            "end_type",
-        )
+        if self.status_cache_config:
+            # 캐시된 config 사용(시리얼 read 생략). angles+coords+gripper만 live로 읽는다.
+            tool_reference = list(self._cfg_tool_reference)
+            world_reference = list(self._cfg_world_reference)
+            reference_frame = self._cfg_reference_frame
+            end_type = self._cfg_end_type
+        else:
+            tool_reference = self.safe_read_6(
+                "get_tool_reference",
+                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                "tool_reference",
+            )
+            world_reference = self.safe_read_6(
+                "get_world_reference",
+                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                "world_reference",
+            )
+            reference_frame = self.safe_read_scalar(
+                "get_reference_frame",
+                -1.0,
+                "reference_frame",
+            )
+            end_type = self.safe_read_scalar(
+                "get_end_type",
+                -1.0,
+                "end_type",
+            )
 
         angles = self.safe_read_6(
             "get_angles",
@@ -213,6 +236,8 @@ class JetcobotCommandSubscriber(Node):
         try:
             self.get_logger().info(f"set_tool_reference: {tool_reference}")
             self.mc.set_tool_reference(tool_reference)
+            # 캐시 갱신(set 값 반영).
+            self._cfg_tool_reference = [float(v) for v in tool_reference]
             self.publish_status()
         except Exception as e:
             self.get_logger().error(f"set_tool_reference failed: {e}")

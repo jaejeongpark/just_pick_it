@@ -77,3 +77,16 @@ int32 terminal_step_count
 float32 gripper_value
 bool gripper_closed
 bool stop_signal
+
+string episode_id
+int32 controller_phase
+
+float64[6] commanded_angles
+float64[6] commanded_delta
+bool has_command
+
+# Grasp orientation anchor. OBB rotation angle (deg) latched by ibvs_controller at
+# the SEARCH_WAIT detection moment (favorable top-down view). Held constant for the
+# rest of the episode. NaN until latched. Used as the NN policy orientation cue for J6
+# because the close-up grasp view cannot measure OBB rotation reliably.
+float32 grasp_orientation_anchor

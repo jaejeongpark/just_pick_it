@@ -30,15 +30,33 @@ def generate_launch_description():
             default_value="[107.75,29.17,-31.11,-71.63,2.90,-134.12]",
         ),
 
+        DeclareLaunchArgument(
+            "center_pregrasp_angles",
+            default_value="[114.78,-5.09,-9.05,-75.49,9.05,-107.31]",
+        ),
+        DeclareLaunchArgument(
+            "left_pregrasp_angles",
+            default_value="[147.48,-8.96,-24.08,-59.85,4.39,-73.12]",
+        ),
+        DeclareLaunchArgument(
+            "right_pregrasp_angles",
+            default_value="[94.39,1.31,-26.19,-62.84,3.51,-127.08]",
+        ),
+        DeclareLaunchArgument("search_timeout_sec", default_value="3.0"),
+
+        DeclareLaunchArgument("handoff_area_norm", default_value="-1.0"),
+        DeclareLaunchArgument("handoff_area_ratio", default_value="0.6"),
+        DeclareLaunchArgument("done_status_poll_rate_hz", default_value="5.0"),
+
         DeclareLaunchArgument("pregrasp_speed", default_value="15"),
-        DeclareLaunchArgument("command_speed", default_value="10"),
+        DeclareLaunchArgument("command_speed", default_value="20"),
         DeclareLaunchArgument("pregrasp_wait_sec", default_value="3.0"),
         DeclareLaunchArgument("use_status_for_q0", default_value="true"),
         DeclareLaunchArgument("status_timeout_sec", default_value="1.0"),
 
         # Align Jacobian measurement.
-        DeclareLaunchArgument("jacobian_delta_deg", default_value="2.0"),
-        DeclareLaunchArgument("jacobian_settle_sec", default_value="1.2"),
+        DeclareLaunchArgument("jacobian_delta_deg", default_value="1.0"),
+        DeclareLaunchArgument("jacobian_settle_sec", default_value="0.5"),
 
         # Align controller.
         DeclareLaunchArgument("lambda_gain", default_value="0.8"),
@@ -112,6 +130,14 @@ def generate_launch_description():
                 "align_joints": LaunchConfiguration("align_joints"),
                 "approach_joints": LaunchConfiguration("approach_joints"),
                 "pregrasp_angles": LaunchConfiguration("pregrasp_angles"),
+
+                "center_pregrasp_angles": LaunchConfiguration("center_pregrasp_angles"),
+                "left_pregrasp_angles": LaunchConfiguration("left_pregrasp_angles"),
+                "right_pregrasp_angles": LaunchConfiguration("right_pregrasp_angles"),
+                "search_timeout_sec": LaunchConfiguration("search_timeout_sec"),
+                "handoff_area_norm": LaunchConfiguration("handoff_area_norm"),
+                "handoff_area_ratio": LaunchConfiguration("handoff_area_ratio"),
+                "done_status_poll_rate_hz": LaunchConfiguration("done_status_poll_rate_hz"),
 
                 "pregrasp_speed": LaunchConfiguration("pregrasp_speed"),
                 "command_speed": LaunchConfiguration("command_speed"),

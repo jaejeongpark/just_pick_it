@@ -3,7 +3,7 @@ detection_tracker_node:
     model_path: "yolov8n-seg.pt"
     confidence: 0.5
     iou_threshold: 0.45
-    target_classes: ["watermelon", "fanta"]
+    target_classes: ["bread", "choco_pie", "cream_bread", "fanta", "water", "watermelon"]
     consistency_frames: 5
     image_topic: "/camera_head/color/image_raw"
 

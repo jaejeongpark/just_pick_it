@@ -1,0 +1,69 @@
+{
+  "window": 5,
+  "anchor_dim": 3,
+  "features_per_step": 10,
+  "input_dim": 53,
+  "max_delta_deg": 5.0,
+  "joint_limits": [
+    [
+      -168.0,
+      168.0
+    ],
+    [
+      -135.0,
+      135.0
+    ],
+    [
+      -150.0,
+      150.0
+    ],
+    [
+      -145.0,
+      145.0
+    ],
+    [
+      -155.0,
+      160.0
+    ],
+    [
+      -180.0,
+      180.0
+    ]
+  ],
+  "controlled_joints": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "gripper_max": 100.0,
+  "default_image_w": 640.0,
+  "default_image_h": 480.0,
+  "ibvs_keep_phases": [
+    20,
+    40,
+    90
+  ],
+  "anchor_layout": [
+    "anchor_cx_norm",
+    "anchor_cy_norm",
+    "anchor_area_norm"
+  ],
+  "step_layout": [
+    "q1n",
+    "q2n",
+    "q3n",
+    "q4n",
+    "q5n",
+    "dq1s",
+    "dq2s",
+    "dq3s",
+    "dq4s",
+    "dq5s"
+  ],
+  "policy_output": [
+    "dq1..dq5 (tanh, \u00d7max_delta_deg for degrees). J6 excluded."
+  ],
+  "grip_decision": "GripSuccessPredictor P(success) gate (policy has no gripper head)"
+}

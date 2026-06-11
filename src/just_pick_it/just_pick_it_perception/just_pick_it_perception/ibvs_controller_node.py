@@ -10,7 +10,9 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 
-from std_msgs.msg import Float64MultiArray, Empty
+from rclpy.qos import QoSProfile, QoSDurabilityPolicy
+
+from std_msgs.msg import Float64MultiArray, Empty, Int32, Float64, String
 
 from just_pick_it_interfaces.msg import TrackedObjectArray
 
@@ -20,8 +22,8 @@ CMD_JOINT = 0
 
 class Phase(Enum):
     INIT = 0
-    MOVE_PREGRASP = 1
-    WAIT_PREGRASP = 2
+    SEARCH_MOVE = 1
+    SEARCH_WAIT = 2
     WAIT_Q0_STATUS = 3
 
     ALIGN_JAC_PLUS_SEND = 10
@@ -41,6 +43,11 @@ class Phase(Enum):
     AREA_JAC_BACK_WAIT = 35
 
     APPROACH_WAIT = 40
+
+    # IBVS 수렴 후 grip 직전 J6를 OBB 장축으로 정렬하는 단계.
+    GRIP_J6_ALIGN_SEND = 50
+    GRIP_J6_ALIGN_WAIT = 51
+
     DONE = 90
     ERROR = 99
 
@@ -165,6 +172,58 @@ class AreaJacobianIBVSNode(Node):
         self.declare_parameter("max_total_steps", 500)
         self.declare_parameter("hard_stop_below_center_error", -1.0)
         self.declare_parameter("filter_alpha", 0.5)
+
+        # ============================================================
+        # Search scan parameters
+        # ============================================================
+        self.declare_parameter("center_pregrasp_angles", [146.60, 15.99, -23.90, -76.90, -3.95, -77.43]) # [114.78, -5.09, -9.05, -75.49, 9.05, -107.31]
+        self.declare_parameter("left_pregrasp_angles", [163.21, 15.11, -50.62, -54.14, -2.72, -60.38]) # [147.48, -8.96, -24.08, -59.85, 4.39, -73.12]
+        self.declare_parameter("right_pregrasp_angles", [93.07,7.03,2.90,-82.96,5.62,-130.42]) # [94.39, 1.31, -26.19, -62.84, 3.51, -127.08]
+        self.declare_parameter("search_timeout_sec", 3.0)
+
+        # 각 search position 자세에 status 기반으로 도달했는지 확인 후에만
+        # detection을 유효로 판정한다. 시작 시 초기 위치에서 잡힌 detection을
+        # center 도달 전에 사용하지 않도록 한다.
+        # 실제 로봇은 명령각에서 수 도(deg)의 정착 오차가 있어 2도는 너무 빡빡하다.
+        self.declare_parameter("arrival_threshold_deg", 5.0)
+        self.declare_parameter("arrival_settle_sec", 1.0)
+        # 도달 미확인 시 fallback 대기. 길면 시작이 느리므로 줄인다.
+        self.declare_parameter("search_move_timeout_sec", 4.0)
+        self.declare_parameter("search_status_poll_rate_hz", 5.0)
+        # 시작 직후 discovery 완료를 기다려 첫 이동 명령 유실을 막는다.
+        self.declare_parameter("startup_connect_settle_sec", 1.5)
+        # SEARCH 도달 전, 이동 명령을 주기적으로 재발행해 유실을 복구한다.
+        self.declare_parameter("search_move_republish_sec", 1.5)
+
+        # ============================================================
+        # J6 grip rotation alignment
+        # ============================================================
+        # align 정렬(center 수렴) 후 OBB 장축 각도로 gripper J6 회전 목표를 계산한다.
+        # 실제 J6 제어는 이후 정밀 보정 단계가 grip_j6_topic을 구독해 수행한다.
+        # 변환: j6_target = j6_pregrasp + j6_angle_sign * obb_angle + j6_angle_offset_deg
+        # j6_angle_sign / j6_angle_offset_deg 는 카메라 장착/그리퍼 방향에 맞춰 실험 보정.
+        self.declare_parameter("enable_j6_grip_align", True)
+        self.declare_parameter("j6_grip_index", 5)
+        self.declare_parameter("j6_angle_sign", 1.0)
+        self.declare_parameter("j6_angle_offset_deg", 0.0)
+        self.declare_parameter("j6_align_settle_sec", 2.0)
+        self.declare_parameter("grip_j6_topic", "")
+        # 연속 에피소드: human_recorder가 nn_episode를 발행하면 재시작한다.
+        self.declare_parameter("gripper_open_speed", 50)
+
+        # ============================================================
+        # Human handoff on detection loss
+        # ============================================================
+        # pick 시퀀스 중 detection이 끊겼을 때, 직전 area_norm이 충분히 크면
+        # 물체가 가까워져 끊긴 정상 상황으로 보고 SEARCH 복귀 대신 DONE으로
+        # 전환하여 human interaction phase에 인계한다.
+        # handoff_area_norm 이 음수이면 desired_area_norm * handoff_area_ratio 사용.
+        self.declare_parameter("handoff_area_norm", -1.0)
+        self.declare_parameter("handoff_area_ratio", 0.6)
+
+        # DONE(human interaction phase) 동안 arm release 상태의 status를
+        # 공급하기 위한 저주파 폴링. recorder는 이 status를 snatch만 한다.
+        self.declare_parameter("done_status_poll_rate_hz", 5.0)
 
         # ============================================================
         # Load parameters
@@ -321,6 +380,60 @@ class AreaJacobianIBVSNode(Node):
         self.filter_alpha = float(self.get_parameter("filter_alpha").value)
         self.filter_alpha = max(0.0, min(1.0, self.filter_alpha))
 
+        self.search_timeout_sec = float(self.get_parameter("search_timeout_sec").value)
+        self.arrival_threshold_deg = float(self.get_parameter("arrival_threshold_deg").value)
+        self.arrival_settle_sec = float(self.get_parameter("arrival_settle_sec").value)
+        self.search_move_timeout_sec = float(
+            self.get_parameter("search_move_timeout_sec").value
+        )
+        self.search_status_poll_rate_hz = max(
+            0.1, float(self.get_parameter("search_status_poll_rate_hz").value)
+        )
+        self.startup_connect_settle_sec = float(
+            self.get_parameter("startup_connect_settle_sec").value
+        )
+        self.search_move_republish_sec = max(
+            0.2, float(self.get_parameter("search_move_republish_sec").value)
+        )
+
+        self.enable_j6_grip_align = self.parse_bool_parameter(
+            self.get_parameter("enable_j6_grip_align").value
+        )
+        self.j6_grip_index = int(self.get_parameter("j6_grip_index").value)
+        self.j6_angle_sign = float(self.get_parameter("j6_angle_sign").value)
+        self.j6_angle_offset_deg = float(self.get_parameter("j6_angle_offset_deg").value)
+        self.j6_align_settle_sec = float(self.get_parameter("j6_align_settle_sec").value)
+        self.gripper_open_speed = int(self.get_parameter("gripper_open_speed").value)
+        grip_j6_topic = str(self.get_parameter("grip_j6_topic").value)
+        self.grip_j6_topic = (
+            grip_j6_topic if grip_j6_topic else f"{self.ns}/grip_j6_target"
+        )
+
+        self.handoff_area_norm = float(self.get_parameter("handoff_area_norm").value)
+        self.handoff_area_ratio = float(self.get_parameter("handoff_area_ratio").value)
+        self.done_status_poll_rate_hz = max(
+            0.1, float(self.get_parameter("done_status_poll_rate_hz").value)
+        )
+
+        self.search_positions = []
+        self.search_position_names = []
+
+        for param_name, pos_name in [
+            ("center_pregrasp_angles", "center"),
+            ("left_pregrasp_angles", "left"),
+            ("right_pregrasp_angles", "right"),
+        ]:
+            angles = self.parse_float_list_parameter(
+                self.get_parameter(param_name).value,
+                self.pregrasp_angles,
+            )
+            if len(angles) != 6:
+                raise ValueError(
+                    f"{param_name} must have 6 values, got {len(angles)}"
+                )
+            self.search_positions.append(angles)
+            self.search_position_names.append(pos_name)
+
         if self.desired_area_norm <= 0.0:
             raise ValueError("desired_area_norm must be > 0.0")
         if self.approach_step_deg <= 0.0:
@@ -345,6 +458,34 @@ class AreaJacobianIBVSNode(Node):
             f"{self.ns}/request_status",
             10,
         )
+        self.ibvs_done_pub = self.create_publisher(
+            Empty,
+            f"{self.ns}/ibvs_done",
+            1,
+        )
+        self.ibvs_phase_pub = self.create_publisher(
+            Int32,
+            f"{self.ns}/ibvs_phase",
+            10,
+        )
+        self.grip_j6_pub = self.create_publisher(
+            Float64MultiArray,
+            self.grip_j6_topic,
+            10,
+        )
+        # Grasp orientation anchor. Latched at SEARCH_WAIT detection (favorable view).
+        # transient_local so late subscribers (recorder, nn_controller) get the last value.
+        self.grasp_orientation_pub = self.create_publisher(
+            Float64,
+            f"{self.ns}/grasp_orientation_anchor",
+            QoSProfile(depth=1, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL),
+        )
+        # 연속 에피소드: 재시작 시 물체 드롭용 gripper open 발행.
+        self.set_gripper_pub = self.create_publisher(
+            Float64MultiArray,
+            f"{self.ns}/set_gripper",
+            10,
+        )
         self.status_sub = self.create_subscription(
             Float64MultiArray,
             f"{self.ns}/status",
@@ -356,6 +497,13 @@ class AreaJacobianIBVSNode(Node):
             self.detection_topic,
             self.detection_callback,
             10,
+        )
+        # human_recorder가 다음 episode를 시작하면 IBVS 사이클을 재시작한다.
+        self.episode_sub = self.create_subscription(
+            String,
+            f"{self.ns}/nn_episode",
+            self.episode_advance_callback,
+            QoSProfile(depth=1, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL),
         )
 
         # ============================================================
@@ -401,6 +549,19 @@ class AreaJacobianIBVSNode(Node):
         # ============================================================
         self.phase = Phase.INIT
         self.phase_start_time = self.get_clock().now()
+        self._ibvs_done_published = False
+        self._last_done_status_request_time = None
+
+        self.current_search_idx = 0
+        self._search_wait_skip_robot_wait = False
+        self._search_arrived = False
+        self._search_arrived_time = None
+        self._last_search_status_request_time = None
+        # SEARCH 이동 명령 재발행용.
+        self._search_target_angles = None
+        self._search_last_move_pub_time = None
+        # OBB orientation latched at search detection. None until first latch.
+        self.grasp_orientation_anchor = None
 
         self.q0 = None
         self.q_base = np.array(self.pregrasp_angles, dtype=np.float64)
@@ -474,6 +635,11 @@ class AreaJacobianIBVSNode(Node):
             f"reuse_steps={self.area_jacobian_reuse_steps}, "
             f"min_gain_for_reuse={self.area_min_gain_for_reuse}, "
             f"drop_tolerance={self.area_drop_tolerance}"
+        )
+        self.get_logger().info(
+            f"Search positions ({len(self.search_positions)}): "
+            f"{self.search_position_names}, "
+            f"search_timeout_sec={self.search_timeout_sec}"
         )
         self.get_logger().info(
             f"Align recovery: enabled={self.enable_align_stuck_recovery}, "
@@ -561,20 +727,27 @@ class AreaJacobianIBVSNode(Node):
     # ============================================================
     # Command publisher / status
     # ============================================================
-    def publish_joint_command(self, angles, speed):
+    def publish_joint_command(self, angles, speed, is_control=False):
+        # is_control=True 인 명령만 학습용 action으로 기록된다.
+        # jacobian 측정 wiggle / search 이동 / pregrasp 복귀는 is_control=False.
+        # data 레이아웃: [type, q1..q6, speed, coord_move_mode(0), is_control]
         if len(angles) != 6:
             self.get_logger().error(f"Invalid angles length: {len(angles)}")
             return
 
         speed = int(max(1, min(100, speed)))
         msg = Float64MultiArray()
-        msg.data = [float(CMD_JOINT)] + [float(v) for v in angles] + [float(speed)]
+        msg.data = (
+            [float(CMD_JOINT)]
+            + [float(v) for v in angles]
+            + [float(speed), 0.0, 1.0 if is_control else 0.0]
+        )
         self.target_pose_pub.publish(msg)
         self.q_last_cmd = np.array(angles, dtype=np.float64)
 
         self.get_logger().info(
             f"Publish joint command: angles={np.round(self.q_last_cmd, 3).tolist()}, "
-            f"speed={speed}"
+            f"speed={speed}, is_control={is_control}"
         )
 
     def compose_q_cmd(self):
@@ -609,6 +782,26 @@ class AreaJacobianIBVSNode(Node):
             return False
         age = (self.get_clock().now() - self.latest_status_time).nanoseconds * 1e-9
         return age <= self.status_timeout_sec
+
+    def episode_advance_callback(self, msg: String):
+        # human_recorder가 새 episode를 시작했다. 물체를 드롭하고 center부터 재탐색한다.
+        self.get_logger().warn(
+            f"Episode advance ('{msg.data}'). Open gripper, reset, restart search from center."
+        )
+        g = Float64MultiArray()
+        g.data = [100.0, float(self.gripper_open_speed)]
+        self.set_gripper_pub.publish(g)
+
+        # 재시작에 필요한 핵심 상태 리셋. 나머지(q0/offset/counts)는 detection 후
+        # initialize_controller_states에서 다시 초기화된다.
+        self._ibvs_done_published = False
+        self._last_done_status_request_time = None
+        self.grasp_orientation_anchor = None
+        self.current_search_idx = 0
+        self._search_wait_skip_robot_wait = False
+        self._search_arrived = False
+        self._search_arrived_time = None
+        self.set_phase(Phase.INIT)
 
     # ============================================================
     # Detection callback
@@ -802,7 +995,7 @@ class AreaJacobianIBVSNode(Node):
                 f"center_norm={center_norm:.5f} <= "
                 f"area_done_center_threshold={self.area_done_center_threshold:.5f}"
             )
-            self.set_phase(Phase.DONE)
+            self.begin_grip_finalize()
             return True
 
         if area_ok and not center_ok:
@@ -928,10 +1121,204 @@ class AreaJacobianIBVSNode(Node):
     def set_phase(self, new_phase):
         self.phase = new_phase
         self.phase_start_time = self.get_clock().now()
+        self.ibvs_phase_pub.publish(Int32(data=int(new_phase.value)))
         self.get_logger().info(f"Phase -> {self.phase.name}")
 
     def elapsed_in_phase(self):
         return (self.get_clock().now() - self.phase_start_time).nanoseconds * 1e-9
+
+    def _poll_status_for_human_phase(self):
+        # DONE 이후 arm release 상태에서 사람이 움직이는 관절 각도를
+        # recorder가 snatch할 수 있도록 status 갱신을 저주파로 트리거한다.
+        now = self.get_clock().now()
+        if self._last_done_status_request_time is not None:
+            dt = (now - self._last_done_status_request_time).nanoseconds * 1e-9
+            if dt < 1.0 / self.done_status_poll_rate_hz:
+                return
+        self._last_done_status_request_time = now
+        self.request_status()
+
+    def _resolve_handoff_area_norm(self):
+        if self.handoff_area_norm >= 0.0:
+            return self.handoff_area_norm
+        return self.desired_area_norm * self.handoff_area_ratio
+
+    # ============================================================
+    # Search arrival / detection validation
+    # ============================================================
+    def poll_search_status(self):
+        # SEARCH 중 자세 도달 확인을 위한 저주파 status 폴링.
+        now = self.get_clock().now()
+        if self._last_search_status_request_time is not None:
+            dt = (now - self._last_search_status_request_time).nanoseconds * 1e-9
+            if dt < 1.0 / self.search_status_poll_rate_hz:
+                return
+        self._last_search_status_request_time = now
+        self.request_status()
+
+    def arrived_at_search_target(self):
+        if not self.has_fresh_status() or self.latest_angles is None:
+            return False
+        target = np.array(
+            self.search_positions[self.current_search_idx], dtype=np.float64
+        )
+        max_err = float(np.max(np.abs(self.latest_angles - target)))
+        return max_err <= self.arrival_threshold_deg
+
+    def latch_grasp_orientation_anchor(self):
+        # search 시점(유리한 시야)에서 단 한 번만 latch한다. detection을 잃었다가
+        # 근접 자세에서 재검출되어 start_pick_sequence가 다시 호출될 때는, 이미 latch된
+        # 값을 유지한다(근접 시야 OBB 각도는 신뢰할 수 없으므로 덮어쓰지 않는다).
+        # 새 search 위치로 이동(SEARCH_MOVE)할 때만 None으로 리셋되어 재latch된다.
+        if self.grasp_orientation_anchor is not None:
+            return
+        self.grasp_orientation_anchor = float(self.latest_orientation_angle)
+        self.grasp_orientation_pub.publish(
+            Float64(data=self.grasp_orientation_anchor)
+        )
+        self.get_logger().info(
+            f"Latched grasp_orientation_anchor={self.grasp_orientation_anchor:.1f} deg "
+            f"at '{self.search_position_names[self.current_search_idx]}'"
+        )
+
+    def start_pick_sequence(self):
+        name = self.search_position_names[self.current_search_idx]
+        self.get_logger().info(
+            f"Detection valid at '{name}' (after arrival). Starting pick sequence."
+        )
+        self.latch_grasp_orientation_anchor()
+        if self.use_status_for_q0:
+            self.request_status()
+            self.set_phase(Phase.WAIT_Q0_STATUS)
+        else:
+            self.q0 = np.array(
+                self.search_positions[self.current_search_idx], dtype=np.float64
+            )
+            self.initialize_controller_states()
+            self.prepare_align_jacobian_estimation()
+
+    def advance_search_position(self):
+        self.current_search_idx = (
+            (self.current_search_idx + 1) % len(self.search_positions)
+        )
+        next_name = self.search_position_names[self.current_search_idx]
+        self.get_logger().info(
+            f"Search timeout. No detection. Moving to '{next_name}'."
+        )
+        self._search_wait_skip_robot_wait = False
+        self.set_phase(Phase.SEARCH_MOVE)
+
+    def run_search_wait_step(self):
+        # detection lost 후 재진입: 이미 그 자세에 있으므로 도달 확인 없이
+        # 즉시 detection 을 다시 기다린다.
+        if self._search_wait_skip_robot_wait:
+            if self.has_fresh_detection():
+                self.start_pick_sequence()
+                return
+            if self.elapsed_in_phase() >= self.search_timeout_sec:
+                self.advance_search_position()
+            return
+
+        # 신규 이동: 먼저 자세에 안정적으로 도달했는지 status로 확인한다.
+        self.poll_search_status()
+
+        if not self._search_arrived:
+            # 첫 이동 명령이 discovery race로 유실됐을 수 있으므로 도달 전까지
+            # 주기적으로 재발행한다(이미 도달했으면 동일 목표라 무해).
+            if (
+                self._search_target_angles is not None
+                and self._search_last_move_pub_time is not None
+            ):
+                since_pub = (
+                    self.get_clock().now() - self._search_last_move_pub_time
+                ).nanoseconds * 1e-9
+                if since_pub >= self.search_move_republish_sec:
+                    self.publish_joint_command(
+                        self._search_target_angles, self.pregrasp_speed
+                    )
+                    self._search_last_move_pub_time = self.get_clock().now()
+                    self.get_logger().info(
+                        "Re-publish search move command (recover dropped command)."
+                    )
+
+            if self.arrived_at_search_target():
+                self._search_arrived = True
+                self._search_arrived_time = self.get_clock().now()
+                name = self.search_position_names[self.current_search_idx]
+                self.get_logger().info(
+                    f"Arrived at '{name}'. Stabilizing for {self.arrival_settle_sec}s "
+                    f"before validating detection."
+                )
+            elif self.elapsed_in_phase() >= self.search_move_timeout_sec:
+                self.get_logger().warn(
+                    f"Arrival not confirmed within {self.search_move_timeout_sec}s "
+                    f"(no fresh status?). Proceeding anyway."
+                )
+                self._search_arrived = True
+                self._search_arrived_time = self.get_clock().now()
+            return
+
+        # 도달 후 안정화 시간 동안 대기. 이 구간의 detection 은 아직 유효로 보지 않는다.
+        settle_elapsed = (
+            self.get_clock().now() - self._search_arrived_time
+        ).nanoseconds * 1e-9
+        if settle_elapsed < self.arrival_settle_sec:
+            return
+
+        # 안정화 후에만 detection 을 유효로 판정한다.
+        if self.has_fresh_detection():
+            self.start_pick_sequence()
+            return
+
+        if settle_elapsed >= self.arrival_settle_sec + self.search_timeout_sec:
+            self.advance_search_position()
+
+    def begin_grip_finalize(self):
+        # IBVS 수렴/handoff 후 grip 직전 단계로 진입한다.
+        # J6 정렬이 활성화되어 있고 OBB 장축 각도가 있으면 J6를 정렬한 뒤 DONE으로,
+        # 아니면 곧장 DONE으로 간다.
+        idx = self.j6_grip_index
+        obb = self.grasp_orientation_anchor
+        if (
+            self.enable_j6_grip_align
+            and obb is not None
+            and math.isfinite(obb)
+            and 0 <= idx <= 5
+        ):
+            self.set_phase(Phase.GRIP_J6_ALIGN_SEND)
+        else:
+            if self.enable_j6_grip_align and (obb is None or not math.isfinite(obb)):
+                self.get_logger().warn(
+                    "J6 grip align enabled but no OBB orientation latched. Skipping."
+                )
+            self.set_phase(Phase.DONE)
+
+    def _on_detection_lost_during_pick(self, phase_name):
+        # 직전 유효 detection의 area_norm이 충분히 컸다면 물체가 가까워져
+        # 끊긴 정상 상황으로 보고 human interaction phase에 인계한다.
+        handoff_area = self._resolve_handoff_area_norm()
+        last_area = float(self.latest_area_norm)
+
+        if math.isfinite(last_area) and last_area >= handoff_area:
+            self.get_logger().info(
+                f"Detection lost at {phase_name} but last area_norm={last_area:.5f} "
+                f">= handoff_area={handoff_area:.5f}. "
+                f"Handing off to human phase (DONE)."
+            )
+            self.begin_grip_finalize()
+            return
+
+        self.get_logger().warn(
+            f"Detection lost at {phase_name} (last area_norm={last_area:.5f} < "
+            f"handoff_area={handoff_area:.5f}). "
+            f"Waiting for re-detection at current position "
+            f"(search_idx={self.current_search_idx}, "
+            f"pos='{self.search_position_names[self.current_search_idx]}')."
+        )
+        self.target_track_id = None
+        self.filtered_initialized = False
+        self._search_wait_skip_robot_wait = True
+        self.set_phase(Phase.SEARCH_WAIT)
 
     # ============================================================
     # Main timer state machine
@@ -939,29 +1326,34 @@ class AreaJacobianIBVSNode(Node):
     def timer_callback(self):
         try:
             if self.phase == Phase.INIT:
-                self.set_phase(Phase.MOVE_PREGRASP)
-
-            elif self.phase == Phase.MOVE_PREGRASP:
-                self.get_logger().info(f"Moving to pregrasp: {self.pregrasp_angles}")
-                self.publish_joint_command(self.pregrasp_angles, self.pregrasp_speed)
-                self.set_phase(Phase.WAIT_PREGRASP)
-
-            elif self.phase == Phase.WAIT_PREGRASP:
-                if self.elapsed_in_phase() < self.pregrasp_wait_sec:
+                # 시작 직후 discovery가 끝나기 전 첫 이동 명령이 유실되지 않도록 잠시 대기.
+                if self.elapsed_in_phase() < self.startup_connect_settle_sec:
                     return
-                if not self.has_fresh_detection():
-                    self.get_logger().warn(
-                        "Waiting for fresh detection before align Jacobian estimation..."
-                    )
-                    return
-                if self.use_status_for_q0:
-                    self.get_logger().info("Requesting status for q0...")
-                    self.request_status()
-                    self.set_phase(Phase.WAIT_Q0_STATUS)
-                else:
-                    self.q0 = np.array(self.pregrasp_angles, dtype=np.float64)
-                    self.initialize_controller_states()
-                    self.prepare_align_jacobian_estimation()
+                self.current_search_idx = 0
+                self._search_wait_skip_robot_wait = False
+                self.set_phase(Phase.SEARCH_MOVE)
+
+            elif self.phase == Phase.SEARCH_MOVE:
+                target_angles = self.search_positions[self.current_search_idx]
+                name = self.search_position_names[self.current_search_idx]
+                self.get_logger().info(
+                    f"Search: moving to '{name}': {target_angles}"
+                )
+                self.target_track_id = None
+                self.filtered_initialized = False
+                self.publish_joint_command(target_angles, self.pregrasp_speed)
+                self._search_target_angles = list(target_angles)
+                self._search_last_move_pub_time = self.get_clock().now()
+                self._search_wait_skip_robot_wait = False
+                self._search_arrived = False
+                self._search_arrived_time = None
+                self._last_search_status_request_time = None
+                # 새 search 위치(유리한 시야)로 이동하므로 orientation anchor를 재latch 허용.
+                self.grasp_orientation_anchor = None
+                self.set_phase(Phase.SEARCH_WAIT)
+
+            elif self.phase == Phase.SEARCH_WAIT:
+                self.run_search_wait_step()
 
             elif self.phase == Phase.WAIT_Q0_STATUS:
                 if self.has_fresh_status() and self.latest_angles is not None:
@@ -975,9 +1367,9 @@ class AreaJacobianIBVSNode(Node):
 
                 if self.elapsed_in_phase() > self.status_timeout_sec:
                     self.get_logger().warn(
-                        "Status timeout. Use pregrasp_angles as q0 fallback."
+                        "Status timeout. Using last commanded position as q0 fallback."
                     )
-                    self.q0 = np.array(self.pregrasp_angles, dtype=np.float64)
+                    self.q0 = self.q_last_cmd.copy()
                     self.initialize_controller_states()
                     self.prepare_align_jacobian_estimation()
                     return
@@ -996,8 +1388,7 @@ class AreaJacobianIBVSNode(Node):
                 if self.elapsed_in_phase() < self.jacobian_settle_sec:
                     return
                 if not self.has_fresh_detection():
-                    self.get_logger().error("Detection lost at ALIGN_JAC_PLUS_WAIT")
-                    self.set_phase(Phase.ERROR)
+                    self._on_detection_lost_during_pick("ALIGN_JAC_PLUS_WAIT")
                     return
                 self.align_f_plus = self.get_center_feature()
                 self.get_logger().info(
@@ -1019,8 +1410,7 @@ class AreaJacobianIBVSNode(Node):
                 if self.elapsed_in_phase() < self.jacobian_settle_sec:
                     return
                 if not self.has_fresh_detection():
-                    self.get_logger().error("Detection lost at ALIGN_JAC_MINUS_WAIT")
-                    self.set_phase(Phase.ERROR)
+                    self._on_detection_lost_during_pick("ALIGN_JAC_MINUS_WAIT")
                     return
                 self.align_f_minus = self.get_center_feature()
                 self.get_logger().info(
@@ -1076,8 +1466,7 @@ class AreaJacobianIBVSNode(Node):
                 if self.elapsed_in_phase() < self.area_jacobian_settle_sec:
                     return
                 if not self.has_fresh_detection():
-                    self.get_logger().error("Detection lost at AREA_JAC_PLUS_WAIT")
-                    self.set_phase(Phase.ERROR)
+                    self._on_detection_lost_during_pick("AREA_JAC_PLUS_WAIT")
                     return
                 self.area_f_plus = self.get_area_avg()
                 if self.area_f_plus is None:
@@ -1108,8 +1497,7 @@ class AreaJacobianIBVSNode(Node):
                 if self.elapsed_in_phase() < self.area_jacobian_settle_sec:
                     return
                 if not self.has_fresh_detection():
-                    self.get_logger().error("Detection lost at AREA_JAC_MINUS_WAIT")
-                    self.set_phase(Phase.ERROR)
+                    self._on_detection_lost_during_pick("AREA_JAC_MINUS_WAIT")
                     return
                 self.area_f_minus = self.get_area_avg()
                 if self.area_f_minus is None:
@@ -1170,7 +1558,44 @@ class AreaJacobianIBVSNode(Node):
                     self.last_control_time = None
                     self.set_phase(Phase.RUN)
 
+            elif self.phase == Phase.GRIP_J6_ALIGN_SEND:
+                idx = self.j6_grip_index
+                obb = float(self.grasp_orientation_anchor)
+                q_cmd = self.compose_q_cmd().copy()
+                j6_base = float(q_cmd[idx])
+                # OBB 장축과 그리퍼 grasp는 둘 다 180도 주기(축/대칭)다. 따라서 회전량을
+                # 180도로 접어 base에서 ±90도 이내의 "동일 grasp"로 만든다. 이렇게 하면
+                # obb가 0/180 경계에서 흔들려도(예: 5도 vs 175도) J6가 튀지 않고 일관되며,
+                # ±180 clamp로 인한 왜곡도 없다. (어느 축으로 잡을지는 offset이 결정)
+                delta = self.j6_angle_sign * obb + self.j6_angle_offset_deg
+                delta = ((delta + 90.0) % 180.0) - 90.0   # [-90, 90)
+                j6_target = j6_base + delta
+                # 관절 한계 내로: 180도 등가(grasp 동일)로 접는다.
+                while j6_target > 180.0:
+                    j6_target -= 180.0
+                while j6_target < -180.0:
+                    j6_target += 180.0
+                q_cmd[idx] = j6_target
+                self.get_logger().info(
+                    f"GRIP J6 align: obb={obb:.1f} deg, base={j6_base:.1f}, "
+                    f"folded_delta={delta:.1f} -> j6_target={j6_target:.1f} deg "
+                    f"(sign={self.j6_angle_sign}, offset={self.j6_angle_offset_deg})"
+                )
+                self.publish_joint_command(q_cmd.tolist(), self.command_speed)
+                # 정렬값을 q_base에 반영해 이후 상태와 일관성 유지.
+                self.q_base = q_cmd.copy()
+                self.q_align_offset = np.zeros(6, dtype=np.float64)
+                self.set_phase(Phase.GRIP_J6_ALIGN_WAIT)
+
+            elif self.phase == Phase.GRIP_J6_ALIGN_WAIT:
+                if self.elapsed_in_phase() >= self.j6_align_settle_sec:
+                    self.set_phase(Phase.DONE)
+
             elif self.phase == Phase.DONE:
+                if not self._ibvs_done_published:
+                    self.ibvs_done_pub.publish(Empty())
+                    self._ibvs_done_published = True
+                self._poll_status_for_human_phase()
                 return
 
             elif self.phase == Phase.ERROR:
@@ -1237,8 +1662,7 @@ class AreaJacobianIBVSNode(Node):
         self.last_control_time = now
 
         if not self.has_fresh_detection():
-            self.get_logger().error("Detection lost during RUN before area+center DONE.")
-            self.set_phase(Phase.ERROR)
+            self._on_detection_lost_during_pick("RUN")
             return
 
         center_feature = self.get_center_feature()
@@ -1380,7 +1804,7 @@ class AreaJacobianIBVSNode(Node):
             )
             return
 
-        self.publish_joint_command(q_cmd.tolist(), self.command_speed)
+        self.publish_joint_command(q_cmd.tolist(), self.command_speed, is_control=True)
         self.total_step_count += 1
 
     def get_saturated_align_joints(self):
@@ -1644,7 +2068,7 @@ class AreaJacobianIBVSNode(Node):
             f"q_cmd={np.round(q_cmd, 2).tolist()}"
         )
 
-        self.publish_joint_command(q_cmd.tolist(), self.command_speed)
+        self.publish_joint_command(q_cmd.tolist(), self.command_speed, is_control=True)
         self.approach_step_count += 1
         self.total_step_count += 1
         self.set_phase(Phase.APPROACH_WAIT)
