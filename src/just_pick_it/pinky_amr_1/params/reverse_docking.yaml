@@ -39,14 +39,12 @@
     # +면 법선에서 더 회전(rvec[1] 목표를 +방향). 도크가 반대로 틀어지면 부호 반전.
     marker_yaw_offset_deg: 4.0
 
-    # 시퀀스1(법선라인 x=dock_x 후진 정렬) 완료 판정: |x_err|<line_x_tol & |psi|<psi_tol.
-    line_x_tol_m: 0.02
-    # 시퀀스1 평행주차: x_err(m)->목표헤딩(park_kp), 헤딩상한(psi_max), 헤딩제어(head_kp), 완료헤딩(psi_tol)
-    seq1_park_kp: 3.0
-    seq1_psi_max_rad: 0.26
-    seq1_head_kp: 1.2
-    seq1_psi_tol_rad: 0.14
-    # 시퀀스2 마커 상실/전환 시 제자리 회전 재중심. kp=중심 정렬 게인, tol=중앙 허용 bearing(rad).
+    # 시퀀스1: 마커로 법선 횡오차 1회 측정 → 부드러운 후진 arc 로 진입(odom 으로 종료판단).
+    arc_omega: 0.25            # arc 회전율(rad/s). 작을수록 큰 반경(회전 적고 후진 많음).
+    arc_lat_tol_m: 0.005       # odom 횡이동 종료 허용오차(m)
+    arc_timeout_sec: 20.0
+    measure_frames: 10         # 법선 횡오차 1회 측정 평균 프레임수
+    # 마커 상실/재정렬 시 제자리 회전 재중심. kp=중심 정렬 게인, tol=중앙 허용 bearing(rad).
     recenter_kp: 0.8
     recenter_tol_rad: 0.05
     recenter_timeout_sec: 6.0

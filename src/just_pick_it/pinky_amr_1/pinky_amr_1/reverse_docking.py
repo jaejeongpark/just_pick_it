@@ -35,6 +35,7 @@ from rclpy.node import Node
 
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
+from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Image
 
 
@@ -139,13 +140,14 @@ class ReverseDocking(Node):
         self.declare_parameter("recenter_kp", 0.8)
         self.declare_parameter("recenter_tol_rad", 0.05)
         self.declare_parameter("recenter_timeout_sec", 6.0)
-        # 시퀀스1(법선라인 x=dock_x 정렬) 완료 판정 횡오차 허용치(m).
-        self.declare_parameter("line_x_tol_m", 0.02)
-        # 시퀀스1 평행주차 게인 (정적검증 부호 확정: x_err>0→CW(psi_des>0)).
-        self.declare_parameter("seq1_park_kp", 3.0)       # x_err(m) -> 목표 헤딩 바이어스(rad)
-        self.declare_parameter("seq1_psi_max_rad", 0.26)  # 헤딩 바이어스 상한(rad, ~15deg)
-        self.declare_parameter("seq1_head_kp", 1.2)       # (psi-psi_des) -> omega 게인
-        self.declare_parameter("seq1_psi_tol_rad", 0.14)  # 시퀀스1 완료 헤딩 허용(rad, ~8deg)
+        # 시퀀스1 = 마커로 법선 횡오차 1회 측정 → 부드러운 후진 arc 로 진입.
+        #   arc_omega: arc 회전율(rad/s, 작을수록 큰 반경=회전 적고 후진 많음)
+        #   arc_lat_tol_m: odom 횡이동 종료 허용오차, arc_timeout_sec: arc 최대 시간
+        #   measure_frames: 법선 횡오차 1회 측정 평균 프레임수
+        self.declare_parameter("arc_omega", 0.25)
+        self.declare_parameter("arc_lat_tol_m", 0.005)
+        self.declare_parameter("arc_timeout_sec", 20.0)
+        self.declare_parameter("measure_frames", 10)
 
         # ── 정밀 정렬 (노란 라인) ───────────────────────────────────────
         self.declare_parameter("lane_lat_kp", 0.004)          # lateral_px 게인
@@ -212,11 +214,10 @@ class ReverseDocking(Node):
         self._recenter_kp  = self.get_parameter("recenter_kp").value
         self._recenter_tol = self.get_parameter("recenter_tol_rad").value
         self._recenter_to  = self.get_parameter("recenter_timeout_sec").value
-        self._line_x_tol   = self.get_parameter("line_x_tol_m").value
-        self._seq1_park_kp = self.get_parameter("seq1_park_kp").value
-        self._seq1_psi_max = self.get_parameter("seq1_psi_max_rad").value
-        self._seq1_head_kp = self.get_parameter("seq1_head_kp").value
-        self._seq1_psi_tol = self.get_parameter("seq1_psi_tol_rad").value
+        self._arc_omega     = self.get_parameter("arc_omega").value
+        self._arc_lat_tol   = self.get_parameter("arc_lat_tol_m").value
+        self._arc_to        = self.get_parameter("arc_timeout_sec").value
+        self._measure_frames = int(self.get_parameter("measure_frames").value)
 
         self._lane_lat_kp = self.get_parameter("lane_lat_kp").value
         self._lane_yaw_kp = self.get_parameter("lane_yaw_kp").value
@@ -259,6 +260,11 @@ class ReverseDocking(Node):
         self._lock = threading.Lock()
         self._latest_frame = None
         self._picam2 = None  # picamera2 모드: reverse_dock() 시작 시 lazy open
+
+        # 오도메트리: open-loop arc 의 상대 횡이동량 측정용(전역 누적오차와 무관, 상대만 사용).
+        self._odom_lock = threading.Lock()
+        self._odom = None    # (x, y, yaw)
+        self.create_subscription(Odometry, "odom", self._odom_cb, 10)
 
         # picamera2(기본)는 도킹 중에만 직접 연다. ros_topic 폴백만 토픽을 구독한다.
         if self._camera_source == "ros_topic":
@@ -312,15 +318,32 @@ class ReverseDocking(Node):
                 self.get_logger().error("reverse_dock: FAILED — 마커 미획득")
                 return False
 
-            # 2) 후진 삽입 (시퀀스1 평행주차로 법선 도달 → 시퀀스2 라인 정밀, 마커 깊이로 정지)
-            if not self._reverse_insert(
-                marker_id, marker_x, marker_y, dock_map_x, dock_map_y
-            ):
+            # 2) 법선까지의 횡오차 Δx 1회 측정 (psi 는 여기서 딱 한 번, 프레임 평균).
+            dx = self._measure_lateral_offset(marker_id)
+            if dx is None:
                 self._stop()
-                self.get_logger().error("reverse_dock: FAILED — 삽입 단계")
+                self.get_logger().error("reverse_dock: FAILED — 횡오차 측정 실패")
                 return False
 
-            # 3) 정지 + 안정화 + 위치 보정
+            # 3) 부드러운 후진 arc 로 법선(마커 x선) 진입 (open-loop, odom 으로 종료판단만).
+            if not self._arc_into_line(dx):
+                self._stop()
+                self.get_logger().error("reverse_dock: FAILED — arc 진입")
+                return False
+
+            # 4) 마커방향으로 회전해 카메라 중앙 재포착(헤딩 재정렬).
+            if not self._recenter_on_marker(marker_id, 0.0):
+                self._stop()
+                self.get_logger().error("reverse_dock: FAILED — 마커 재정렬")
+                return False
+
+            # 5) 라인 정밀 후진 + 마커 깊이로 정지.
+            if not self._reverse_insert(marker_id, marker_y, dock_map_y):
+                self._stop()
+                self.get_logger().error("reverse_dock: FAILED — 라인 후진")
+                return False
+
+            # 6) 정지 + 안정화 + 위치 보정
             self._stop()
             time.sleep(self._settle)
             self.get_logger().info("reverse_dock: SUCCESS")
@@ -383,28 +406,17 @@ class ReverseDocking(Node):
     def _reverse_insert(
         self,
         marker_id: int,
-        marker_world_x: float,
         marker_world_y: float,
-        dock_x: float,
         dock_y: float,
     ) -> bool:
-        """두 시퀀스로 후진 도킹. 마커 깊이가 dock_y 도달 시 정지.
+        """라인 정밀 후진 + 마커 깊이 정지. 진입 시 로봇은 이미 법선 정렬·마커 정면 상태.
 
-        시퀀스1 (on_line=False): 마커 pose 로 진짜 robot_x·heading(psi) 을 풀어 평행주차
-          (x_err>0=동쪽이면 CW로 틀어 후진→서쪽 진입, psi→0 직진 복귀)로 법선라인
-          x=dock_x 에 정렬. |x_err|<tol & |psi|<psi_tol 이면 완료. 마커가 잠깐 벗어나도
-          회전으로 쫓지 않는다(라인 진입 전 회전 금지).
-        시퀀스1 완료 시: 마커 중앙 재포착(이미 직진·법선이라 보통 즉시 만족).
-        시퀀스2 (on_line=True): 노란 라인 대칭선 정밀 + 마커(평행주차) 폴백, 깊이로 정지.
-          마커 상실 시에만 재중심(_recenter_on_marker) 후 이어간다.
-
-        v = -reverse_speed (느린 후진)
-        정지: 로봇 world y(= marker_y - 마커거리·scale - 카메라 전방오프셋) <= dock_y (정렬됐을 때만)
+        라인이 보이면 대칭선 PID(횡+yaw)로 정밀 후진, 안 보이면 직진 후진(이미 정렬됨).
+        마커 상실 시 제자리 회전으로 재중심. 마커 깊이가 dock_y 도달 시 정지.
+        정지: 로봇 world y(= marker_y - 마커거리·scale - 카메라 전방오프셋) <= dock_y
         """
         deadline = time.time() + self._insert_to
-        last_tx = 0.0     # 마지막으로 본 마커 tvec[0] (상실 시 재중심 탐색 방향 힌트)
-        on_line = False   # 시퀀스1(법선라인 도달) 완료 여부
-        lost = 0          # 시퀀스1 중 마커 일시 상실 카운터
+        last_tx = 0.0
         last_log = 0.0
 
         while time.time() < deadline:
@@ -420,98 +432,41 @@ class ReverseDocking(Node):
 
             marker = self._detect_aruco(frame, marker_id)
             if marker is None:
-                if on_line:
-                    # 시퀀스2: 법선라인에 올라온 뒤 마커가 화각을 벗어나면, 라인검출로
-                    # 바로 넘어가면 헤딩이 틀어져 라인 선택이 꼬인다. 후진을 멈추고
-                    # 제자리 회전으로 마커를 다시 중앙에 잡은 뒤 라인 후진을 이어간다.
-                    self._stop()
-                    if self._recenter_on_marker(marker_id, last_tx):
-                        continue
-                    self.get_logger().warn("Insert: 마커 재중심 실패 → 도킹 실패")
-                    return False
-                # 시퀀스1: 각을 틀어 후진하다 마커가 잠깐 벗어나도 회전으로 쫓지 않는다.
-                # 짧게 직진 후진만 유지하고, 너무 길어지면 실패.
-                lost += 1
-                if lost > 40:   # 약 2s
-                    self._stop()
-                    self.get_logger().warn("Insert: 시퀀스1 마커 상실 지속 → 실패")
-                    return False
-                twist = Twist()
-                twist.linear.x = -self._reverse_speed * 0.5
-                self._cmd_pub.publish(twist)
-                time.sleep(0.05)
-                continue
-            lost = 0
+                # 마커가 화각을 벗어나면 후진 멈추고 제자리 회전으로 다시 중앙에 잡는다.
+                self._stop()
+                if self._recenter_on_marker(marker_id, last_tx):
+                    continue
+                self.get_logger().warn("Insert: 마커 재중심 실패 → 도킹 실패")
+                return False
 
             tvec, rvec = marker
             marker_dist = float(tvec[2])
             last_tx = float(tvec[0])
 
-            # 깊이 추정 + 마커 pose 로 진짜 robot_x·heading(psi) 풀기(평행주차 ω).
+            # 깊이 기반 정지
             robot_y = marker_world_y - marker_dist * self._depth_scale - self._cam_fwd
-            omega, robot_x, psi, x_err = self._park_omega(
-                tvec, rvec, marker_world_x, dock_x
-            )
-
-            # 깊이 도달 정지 — 단 법선에 정렬됐을 때만 성공. 미정렬로 깊이만 도달했으면
-            # 엉뚱한 x 에서 멈추는 것이므로 거짓 성공 대신 실패 처리.
             if robot_y <= dock_y + self._stop_tol:
                 self._stop()
-                if on_line or abs(x_err) < 2.0 * self._line_x_tol:
-                    self.get_logger().info(
-                        f"Insert: 정지 — robot_y≈{robot_y:.3f}<=dock {dock_y:.3f} "
-                        f"(robot_x={robot_x:.3f} x_err={x_err:+.3f})"
-                    )
-                    return True
-                self.get_logger().warn(
-                    f"Insert: 깊이 도달했으나 미정렬(robot_x={robot_x:.3f} "
-                    f"x_err={x_err:+.3f}) → 실패"
+                self.get_logger().info(
+                    f"Insert: 정지 — robot_y≈{robot_y:.3f} <= dock_y {dock_y:.3f}"
                 )
-                return False
+                return True
 
-            if not on_line:
-                # ── 시퀀스1: 평행주차로 법선라인 x=dock_x + 직진(psi≈0) 도달 ──
-                if abs(x_err) < self._line_x_tol and abs(psi) < self._seq1_psi_tol:
-                    on_line = True
-                    self._stop()
-                    self.get_logger().info(
-                        f"Insert: 시퀀스1 완료 — 법선 도달"
-                        f"(x_err={x_err:+.3f}m psi={math.degrees(psi):+.1f}deg)"
-                    )
-                    # 이동 끝난 후 마커 중앙 재포착(이미 직진·법선이라 보통 즉시 만족).
-                    self._recenter_on_marker(marker_id, last_tx)
-                    continue
-                if time.time() - last_log > 0.5:
-                    self.get_logger().info(
-                        f"Insert[S1]: dist={marker_dist:.3f} robot_y={robot_y:.3f} "
-                        f"robot_x={robot_x:.3f} x_err={x_err:+.3f} "
-                        f"psi={math.degrees(psi):+.1f}deg omega={omega:.3f}"
-                    )
-                    last_log = time.time()
-                twist = Twist()
-                twist.linear.x = -self._reverse_speed
-                twist.angular.z = self._clamp(omega)
-                self._cmd_pub.publish(twist)
-                time.sleep(0.05)
-                continue
-
-            # ── 시퀀스2: 노란 라인 대칭선 정밀 + 마커(평행주차) 폴백, 깊이로 정지 ──
+            # 라인 대칭선 정밀 정렬(없으면 직진 후진).
             lane = self._detect_lane(frame)
             if lane is not None and lane.conf > 0.0:
-                lane_omega = -(self._lane_lat_pid.compute(lane.lateral_px)
-                               + self._lane_yaw_pid.compute(lane.yaw_rad))
-                w = lane.conf
-                omega = w * lane_omega + (1.0 - w) * omega
+                omega = -(self._lane_lat_pid.compute(lane.lateral_px)
+                          + self._lane_yaw_pid.compute(lane.yaw_rad))
+            else:
+                omega = 0.0
 
-            # 디버그(0.5s): 깊이 진행 + robot_x/psi + 라인 + 최종 omega.
             if time.time() - last_log > 0.5:
                 lane_s = (
                     f"conf={lane.conf:.2f} lat={lane.lateral_px:.0f}px yaw={lane.yaw_rad:.3f}"
                     if lane is not None else "none"
                 )
                 self.get_logger().info(
-                    f"Insert[S2]: dist={marker_dist:.3f} robot_y={robot_y:.3f}/dock={dock_y:.3f} "
-                    f"robot_x={robot_x:.3f} x_err={x_err:+.3f} psi={math.degrees(psi):+.1f}deg "
+                    f"Insert: dist={marker_dist:.3f} robot_y={robot_y:.3f}/dock={dock_y:.3f} "
                     f"lane[{lane_s}] lines={self._dbg_line_xs} omega={omega:.3f}"
                 )
                 last_log = time.time()
@@ -530,9 +485,9 @@ class ReverseDocking(Node):
         """마커 상실/시퀀스 전환 시: 후진을 멈추고 제자리 회전으로 마커를 카메라 중앙에
         되돌린다(헤딩=법선 복귀, 포지션 확정). 중앙 정렬되면 True.
 
-        회전 부호(거꾸로 장착 flip 기준): 마커가 tvec[0]>0 이면 CCW(+)로 돌려야
-        bearing 이 0 으로 수렴한다(marker_pose_check 로 검증한 횡 부호와 동일).
-        마커가 안 보이면 마지막에 보이던 쪽(last_tx 부호)으로 천천히 탐색 회전한다.
+        회전 부호(정적검증 테스트3 기준): 마커가 왼쪽(tvec[0]<0)이면 CCW(ω>0)로 돌려야
+        중앙에 온다 → omega = -recenter_kp·bearing. 마커가 안 보이면 마지막에 보이던
+        쪽으로 탐색 회전(오른쪽이었으면 CW). last_tx 부호로 방향 결정.
         """
         deadline = time.time() + self._recenter_to
         search_dir = 1.0 if last_tx >= 0.0 else -1.0
@@ -578,28 +533,116 @@ class ReverseDocking(Node):
         self.get_logger().warn("Recenter: timeout — 마커 재중심 실패")
         return False
 
-    def _park_omega(self, tvec, rvec, marker_x: float, dock_x: float):
-        """마커 pose 로 진짜 robot_x·heading(psi) 을 풀어 법선라인 x=dock_x 로 후진
-        정렬하는 평행주차 ω 를 낸다.
+    def _measure_lateral_offset(self, marker_id: int):
+        """마커를 여러 프레임 평균내어 법선(마커 x선)까지의 횡오차 Δx 를 1회 계산.
 
-        정적검증(marker_pose_check)으로 확정:
-          psi = atan2(R[0,2], -R[2,2])  (헤딩 오차, 정면 정렬 시 ~0, psi<0 ⟺ 로봇 CCW)
-          robot_x = marker_x - tx·cos(psi) - tz·sin(psi)   (dec- 가 실측과 일치)
-        평행주차: x_err>0(도크보다 +x=동쪽) → CW(psi_des>0)로 틀어 후진하면 -x(서쪽)로
-        진입. d(psi)/d(omega)<0(CCW 명령이 psi 를 음으로) 이므로 psi→psi_des 안정화는
-        omega = head_kp·(psi - psi_des).
-
-        반환: (omega, robot_x, psi, x_err)
+        Δx = robot_x - marker_x = -(tx·cos(psi) + tz·sin(psi)).  (정적검증: dec-)
+        psi 는 정면(rvec_y≈±π)에서 ±부호 모호성이 있어, 프레임별 psi 대신 법선벡터
+        성분(R[0,2], R[2,2])을 평균해 한 번만 psi 를 구한다(노이즈·flip 완화).
+        Δx>0 이면 로봇이 법선보다 +x(동)쪽 → 서쪽으로 이동해야 함. 실패 시 None.
         """
-        tx, tz = float(tvec[0]), float(tvec[2])
-        R, _ = cv2.Rodrigues(np.asarray(rvec, dtype=np.float64).reshape(3, 1))
-        psi = math.atan2(float(R[0, 2]), -float(R[2, 2]))
-        robot_x = marker_x - tx * math.cos(psi) - tz * math.sin(psi)
-        x_err = robot_x - dock_x
-        psi_des = max(-self._seq1_psi_max,
-                      min(self._seq1_psi_max, self._seq1_park_kp * x_err))
-        omega = self._seq1_head_kp * (psi - psi_des)
-        return omega, robot_x, psi, x_err
+        txs, tzs, nxs, nzs = [], [], [], []
+        deadline = time.time() + 3.0
+        while len(txs) < self._measure_frames and time.time() < deadline:
+            frame = self._get_latest_frame()
+            if frame is None:
+                time.sleep(0.03)
+                continue
+            m = self._detect_aruco(frame, marker_id)
+            if m is None:
+                time.sleep(0.03)
+                continue
+            tvec, rvec = m
+            R, _ = cv2.Rodrigues(np.asarray(rvec, dtype=np.float64).reshape(3, 1))
+            txs.append(float(tvec[0]))
+            tzs.append(float(tvec[2]))
+            nxs.append(float(R[0, 2]))
+            nzs.append(float(R[2, 2]))
+            time.sleep(0.03)
+        if len(txs) < 3:
+            self.get_logger().warn("Measure: 마커 샘플 부족")
+            return None
+        tx = sum(txs) / len(txs)
+        tz = sum(tzs) / len(tzs)
+        psi = math.atan2(sum(nxs) / len(nxs), -sum(nzs) / len(nzs))
+        dx = -(tx * math.cos(psi) + tz * math.sin(psi))
+        self.get_logger().info(
+            f"Measure: Δx={dx:+.3f}m (tx={tx:.3f} tz={tz:.3f} "
+            f"psi={math.degrees(psi):+.1f}deg, n={len(txs)})"
+        )
+        return dx
+
+    def _arc_into_line(self, dx: float) -> bool:
+        """부드러운 후진 arc 로 법선(마커 x선)까지 횡이동 |Δx|. odom 상대 횡변위로 종료 판단.
+
+        Δx>0(로봇이 법선보다 +x=동쪽) → 서쪽(로봇 왼쪽)으로 이동해야 하므로 후진+CW(ω<0).
+        odom 으로 시작점 대비 '오른쪽 방향' 변위를 적분해 |Δx| 만큼 가면 정지(단일 매끄러운 호).
+        부호가 반대로 가면 odom 으로 감지해 ω 를 한 번 뒤집는다(부호 오류에 강건).
+        """
+        if abs(dx) < self._arc_lat_tol:
+            self.get_logger().info(f"Arc: 이미 법선 근처(Δx={dx:+.3f}m), 생략")
+            return True
+        odom0 = self._get_odom()
+        if odom0 is None:
+            self.get_logger().error("Arc: odom 없음 → 실패")
+            return False
+        ox0, oy0, oyaw0 = odom0
+        # 시작 시 로봇 오른쪽(≈world +x) 단위벡터. 변위를 여기 투영해 횡이동량 측정.
+        rdx, rdy = math.sin(oyaw0), -math.cos(oyaw0)
+        omega = -math.copysign(self._arc_omega, dx)   # Δx>0 → ω<0(CW)=왼쪽(서)
+        move_sign = -math.copysign(1.0, dx)           # 법선 쪽으로 가는 오른쪽-변위 부호
+        need = abs(dx)
+        deadline = time.time() + self._arc_to
+        start = time.time()
+        flipped = False
+        progress = 0.0
+        last_log = 0.0
+        while time.time() < deadline:
+            if self._emergency.is_stopped():
+                self._stop()
+                deadline += self._wait_if_paused()
+                continue
+            od = self._get_odom()
+            if od is None:
+                time.sleep(0.05)
+                continue
+            ox, oy, _ = od
+            lat = (ox - ox0) * rdx + (oy - oy0) * rdy   # 시작프레임 기준 오른쪽 변위
+            progress = move_sign * lat                  # 법선 쪽으로 간 거리(양수면 정방향)
+            if progress >= need:
+                self._stop()
+                self.get_logger().info(f"Arc: 법선 도달 (이동 {progress:.3f}/{need:.3f}m)")
+                return True
+            # 방향 반대 감지(1.5s 지나도 음의 진행) → ω 한 번 반전.
+            if not flipped and (time.time() - start) > 1.5 and progress < -self._arc_lat_tol:
+                omega = -omega
+                flipped = True
+                self.get_logger().warn("Arc: 방향 반대 감지 → omega 부호 반전")
+            if time.time() - last_log > 0.5:
+                self.get_logger().info(
+                    f"Arc: 진행 {progress:.3f}/{need:.3f}m (lat={lat:+.3f})"
+                )
+                last_log = time.time()
+            twist = Twist()
+            twist.linear.x = -self._reverse_speed
+            twist.angular.z = self._clamp(omega)
+            self._cmd_pub.publish(twist)
+            time.sleep(0.05)
+        self._stop()
+        self.get_logger().warn(f"Arc: timeout (이동 {progress:.3f}/{need:.3f}m)")
+        return False
+
+    def _odom_cb(self, msg: Odometry):
+        p = msg.pose.pose.position
+        q = msg.pose.pose.orientation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                         1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        with self._odom_lock:
+            self._odom = (p.x, p.y, yaw)
+
+    def _get_odom(self):
+        with self._odom_lock:
+            return self._odom
 
     # ====================================================================== #
     # 검출
