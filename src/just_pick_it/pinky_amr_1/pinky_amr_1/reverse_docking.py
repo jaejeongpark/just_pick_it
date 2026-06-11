@@ -94,7 +94,7 @@ class ReverseDocking(Node):
         # 마커 월드 좌표 (marker_id 별 병렬 배열). 가로벽에 도크를 바라보게 부착.
         # 법선은 -y(원점 쪽) 고정이라 yaw 따로 안 받는다.
         self.declare_parameter("marker_ids", [0, 1])
-        self.declare_parameter("marker_world_x", [0.07, 0.28])
+        self.declare_parameter("marker_world_x", [0.11, 0.28])
         self.declare_parameter("marker_world_y", [0.655, 0.655])
 
         # ── 카메라 (비전팀 캘리브레이션 실측값, 1280x720) ────────────────

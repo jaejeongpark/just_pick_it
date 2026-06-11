@@ -23,7 +23,7 @@ import yaml
 # ── reverse_docking.yaml 과 동일한 값 ──────────────────────────────────
 MARKER_SIZE = 0.05                       # AprilTag 36h11 한 변 (m)
 CAM_FWD = 0.055                          # base_link 에서 카메라 전방 오프셋 (로봇0.40/카메라0.455)
-MARKER_WORLD = {0: (0.07, 0.635), 1: (0.28, 0.635)}  # marker_id -> (world_x, world_y) 벽0.64/마커0.635
+MARKER_WORLD = {0: (0.11, 0.635), 1: (0.28, 0.635)}  # dock1/standby1/마커 일직선 x=0.11, 마커y=0.635
 DOCK = {0: (0.11, 0.10), 1: (0.28, 0.10)}            # marker_id -> dock (x, y) 참고용
 FLIP_180 = True
 CAM_W, CAM_H = 1280, 720
