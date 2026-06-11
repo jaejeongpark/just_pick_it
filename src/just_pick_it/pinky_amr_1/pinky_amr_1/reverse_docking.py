@@ -476,8 +476,13 @@ class ReverseDocking(Node):
         # 도크에 맞춰 정렬됐을 때 마커가 카메라 광축에서 떨어져 보여야 하는 횡(rad 근사).
         target_lat = lat_offset / dist
         lat_err = float(tvec[0]) / dist - target_lat   # 카메라 기준 횡 오차(rad 근사)
-        yaw_err = float(rvec[1])                        # 마커 평면 yaw
-        return -(self._marker_lat_kp * lat_err + self._marker_yaw_kp * yaw_err)
+        # 마커가 카메라를 정면으로 바라보면 rvec[1]≈±π(180°)다. 그 오프셋을 빼야 정렬 시 0.
+        # (안 빼면 정렬됐는데도 π 만큼 틀렸다고 보고 ω 최대로 계속 회전 → 벽 충돌.)
+        ry = float(rvec[1]) - math.pi
+        yaw_err = math.atan2(math.sin(ry), math.cos(ry))   # [-π,π] 정규화
+        # 횡: 마커 우측(lat_err>0=로봇 좌측)이면 좌회전(CCW,+). yaw: CW로 틀어졌으면(yaw_err<0) CCW(+).
+        # 실측 부호 검증(marker_pose_check) 결과에 맞춘 부호.
+        return self._marker_lat_kp * lat_err - self._marker_yaw_kp * yaw_err
 
     # ====================================================================== #
     # 검출
