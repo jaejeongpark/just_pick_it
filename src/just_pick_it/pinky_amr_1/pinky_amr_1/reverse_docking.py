@@ -148,6 +148,9 @@ class ReverseDocking(Node):
         self.declare_parameter("arc_lat_tol_m", 0.005)
         self.declare_parameter("arc_timeout_sec", 20.0)
         self.declare_parameter("measure_frames", 10)
+        # 시퀀스2 라인검출 횡조향 사용 여부. 기본 off → arc+recenter 정렬 믿고 직진 후진,
+        # 마커는 깊이 정지에만 사용. 라인검출이 이 거리에서 불안정해 끄는 것이 안전.
+        self.declare_parameter("use_lane_steering", False)
 
         # ── 정밀 정렬 (노란 라인) ───────────────────────────────────────
         self.declare_parameter("lane_lat_kp", 0.004)          # lateral_px 게인
@@ -218,6 +221,7 @@ class ReverseDocking(Node):
         self._arc_lat_tol   = self.get_parameter("arc_lat_tol_m").value
         self._arc_to        = self.get_parameter("arc_timeout_sec").value
         self._measure_frames = int(self.get_parameter("measure_frames").value)
+        self._use_lane      = bool(self.get_parameter("use_lane_steering").value)
 
         self._lane_lat_kp = self.get_parameter("lane_lat_kp").value
         self._lane_yaw_kp = self.get_parameter("lane_yaw_kp").value
@@ -454,9 +458,10 @@ class ReverseDocking(Node):
                 )
                 return True
 
-            # 라인 대칭선 정밀 정렬(없으면 직진 후진).
+            # 기본: 직진 후진(arc+recenter 정렬 신뢰). use_lane_steering=true 일 때만
+            # 라인 대칭선 PID 횡조향(라인검출 품질 좋아지면). 라인은 디버그 로그용으로 계속 검출.
             lane = self._detect_lane(frame)
-            if lane is not None and lane.conf > 0.0:
+            if self._use_lane and lane is not None and lane.conf > 0.0:
                 omega = -(self._lane_lat_pid.compute(lane.lateral_px)
                           + self._lane_yaw_pid.compute(lane.yaw_rad))
             else:

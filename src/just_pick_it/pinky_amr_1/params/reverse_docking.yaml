@@ -44,6 +44,9 @@
     arc_lat_tol_m: 0.005       # odom 횡이동 종료 허용오차(m)
     arc_timeout_sec: 20.0
     measure_frames: 10         # 법선 횡오차 1회 측정 평균 프레임수
+    # 시퀀스2 라인 횡조향 사용 여부. false=직진 후진(마커는 깊이 정지만). 라인검출이
+    # 이 거리에서 불안정해 기본 off. 라인 품질 개선되면 true.
+    use_lane_steering: false
     # 마커 상실/재정렬 시 제자리 회전 재중심. kp=중심 정렬 게인, tol=중앙 허용 bearing(rad).
     recenter_kp: 0.8
     recenter_tol_rad: 0.05
