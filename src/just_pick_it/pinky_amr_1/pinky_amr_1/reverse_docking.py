@@ -151,10 +151,12 @@ class ReverseDocking(Node):
         # 시퀀스2 라인검출 횡조향 사용 여부. 기본 off → arc+recenter 정렬 믿고 직진 후진,
         # 마커는 깊이 정지에만 사용. 라인검출이 이 거리에서 불안정해 끄는 것이 안전.
         self.declare_parameter("use_lane_steering", False)
-        # [측정→arc→재정렬] 반복 횟수(잔여오차 수렴). 2 권장.
+        # [측정→arc→재정렬] 반복 횟수(잔여 횡오차 수렴).
         self.declare_parameter("align_passes", 2)
-        # 최종 yaw 정렬 완료 허용오차(rad). 마커 fronto-parallel(법선 정면)까지 제자리 회전.
+        # yaw 정렬 완료 허용오차(rad). 마커 fronto-parallel(법선 정면)까지 제자리 회전.
         self.declare_parameter("yaw_align_tol_rad", 0.04)   # ~2.3deg
+        # 후진 중 odom yaw 헤딩 유지 P게인. θ_ref(법선)에서 벗어나면 되돌린다.
+        self.declare_parameter("yaw_hold_kp", 1.0)
 
         # ── 정밀 정렬 (노란 라인) ───────────────────────────────────────
         self.declare_parameter("lane_lat_kp", 0.004)          # lateral_px 게인
@@ -228,6 +230,7 @@ class ReverseDocking(Node):
         self._use_lane      = bool(self.get_parameter("use_lane_steering").value)
         self._align_passes  = int(self.get_parameter("align_passes").value)
         self._yaw_align_tol = self.get_parameter("yaw_align_tol_rad").value
+        self._yaw_hold_kp   = self.get_parameter("yaw_hold_kp").value
 
         self._lane_lat_kp = self.get_parameter("lane_lat_kp").value
         self._lane_yaw_kp = self.get_parameter("lane_yaw_kp").value
@@ -425,15 +428,22 @@ class ReverseDocking(Node):
         marker_world_y: float,
         dock_y: float,
     ) -> bool:
-        """라인 정밀 후진 + 마커 깊이 정지. 진입 시 로봇은 이미 법선 정렬·마커 정면 상태.
+        """후진 도킹 + 마커 깊이 정지. 진입 시 로봇은 이미 법선 정렬·마커 정면 상태.
 
-        라인이 보이면 대칭선 PID(횡+yaw)로 정밀 후진, 안 보이면 직진 후진(이미 정렬됨).
-        마커 상실 시 제자리 회전으로 재중심. 마커 깊이가 dock_y 도달 시 정지.
+        헤딩 유지: 진입 직후 odom yaw 를 θ_ref(=법선 헤딩)로 앵커링하고, 후진 내내
+        odom yaw=θ_ref 로 P제어해 헤딩을 정밀하게 고정한다(psi 노이즈 안 씀). 작은 yaw
+        오차도 후진하며 x 드리프트로 누적되므로, 흔들림 없이 일정 헤딩으로 곧게 내려간다.
+        라인은 use_lane_steering=true 일 때만 횡조향(기본 off). 마커 상실 시 재중심.
         정지: 로봇 world y(= marker_y - 마커거리·scale - 카메라 전방오프셋) <= dock_y
         """
         deadline = time.time() + self._insert_to
         last_tx = 0.0
         last_log = 0.0
+        # 후진 시작 헤딩(법선)을 odom 으로 앵커링 → 이 헤딩을 유지한다.
+        od0 = self._get_odom()
+        theta_ref = od0[2] if od0 is not None else None
+        if theta_ref is not None:
+            self.get_logger().info(f"Insert: odom 헤딩 앵커 θ_ref={math.degrees(theta_ref):+.1f}deg")
 
         while time.time() < deadline:
             if self._emergency.is_stopped():
@@ -468,12 +478,19 @@ class ReverseDocking(Node):
                 )
                 return True
 
-            # 기본: 직진 후진(arc+recenter 정렬 신뢰). use_lane_steering=true 일 때만
-            # 라인 대칭선 PID 횡조향(라인검출 품질 좋아지면). 라인은 디버그 로그용으로 계속 검출.
+            # 헤딩 유지: odom yaw 를 θ_ref 로 P제어(노이즈 없는 정밀 직진). odom yaw 증가=CCW
+            # 이므로 (yaw-θ_ref)>0 이면 CW(-)로 보정. use_lane_steering=true 면 라인 PID 우선.
             lane = self._detect_lane(frame)
+            yaw_drift = 0.0
             if self._use_lane and lane is not None and lane.conf > 0.0:
                 omega = -(self._lane_lat_pid.compute(lane.lateral_px)
                           + self._lane_yaw_pid.compute(lane.yaw_rad))
+            elif theta_ref is not None:
+                od = self._get_odom()
+                if od is not None:
+                    yaw_drift = math.atan2(math.sin(od[2] - theta_ref),
+                                           math.cos(od[2] - theta_ref))
+                omega = -self._yaw_hold_kp * yaw_drift
             else:
                 omega = 0.0
 
@@ -484,7 +501,8 @@ class ReverseDocking(Node):
                 )
                 self.get_logger().info(
                     f"Insert: dist={marker_dist:.3f} robot_y={robot_y:.3f}/dock={dock_y:.3f} "
-                    f"lane[{lane_s}] lines={self._dbg_line_xs} omega={omega:.3f}"
+                    f"yaw_drift={math.degrees(yaw_drift):+.1f}deg lane[{lane_s}] "
+                    f"lines={self._dbg_line_xs} omega={omega:.3f}"
                 )
                 last_log = time.time()
 
