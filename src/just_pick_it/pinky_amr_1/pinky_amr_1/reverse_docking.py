@@ -152,6 +152,11 @@ class ReverseDocking(Node):
         self.declare_parameter("arc_lat_tol_m", 0.005)
         self.declare_parameter("arc_timeout_sec", 20.0)
         self.declare_parameter("measure_frames", 10)
+        # 측정 Δx 가 이보다 작으면 이미 정렬된 것으로 보고 arc 생략·반복 종료(노이즈/phantom
+        # 추종 방지). rvec 잔여 yaw 로 인한 측정 phantom 바닥(~2~3cm)보다 약간 크게.
+        self.declare_parameter("align_conv_tol_m", 0.03)
+        # arc 1회 최대 횡이동(m). phantom 으로 큰 Δx 가 나와도 벽으로 돌진 못하게 캡.
+        self.declare_parameter("arc_max_travel_m", 0.06)
         # 시퀀스2 라인검출 횡조향 사용 여부. 기본 off → arc+recenter 정렬 믿고 직진 후진,
         # 마커는 깊이 정지에만 사용. 라인검출이 이 거리에서 불안정해 끄는 것이 안전.
         self.declare_parameter("use_lane_steering", False)
@@ -235,6 +240,8 @@ class ReverseDocking(Node):
         self._measure_frames = int(self.get_parameter("measure_frames").value)
         self._use_lane      = bool(self.get_parameter("use_lane_steering").value)
         self._align_passes  = int(self.get_parameter("align_passes").value)
+        self._align_conv_tol = self.get_parameter("align_conv_tol_m").value
+        self._arc_max_travel = self.get_parameter("arc_max_travel_m").value
         self._yaw_align_tol = self.get_parameter("yaw_align_tol_rad").value
         self._yaw_hold_kp   = self.get_parameter("yaw_hold_kp").value
 
@@ -354,6 +361,13 @@ class ReverseDocking(Node):
                 self.get_logger().info(
                     f"정렬 {p + 1}/{self._align_passes}차: Δx={dx:+.3f}m"
                 )
+                # 수렴 종료: Δx 가 작으면 이미 정렬된 것으로 보고 arc 생략·반복 중단.
+                # (정렬된 지점에선 측정 phantom(잔여 yaw)이 노이즈로 떠 다님 → 추종 금지)
+                if abs(dx) < self._align_conv_tol:
+                    self.get_logger().info(
+                        f"정렬 수렴 (|Δx|={abs(dx):.3f} < {self._align_conv_tol}) → 반복 종료"
+                    )
+                    break
                 # 부드러운 후진 arc 로 법선 진입(open-loop, odom 으로 종료판단). dx>0 → 서쪽.
                 if not self._arc_into_line(dx):
                     self._stop()
@@ -666,8 +680,8 @@ class ReverseDocking(Node):
         tx = sum(txs) / len(txs)
         tz = sum(tzs) / len(tzs)
         psi = math.atan2(sum(nxs) / len(nxs), -sum(nzs) / len(nzs))
-        # solvePnP tvec 이 실측보다 depth_scale 배 짧게 나오므로(깊이 보정과 동일 원인),
-        # 횡오차에도 같은 스케일을 곱해야 실제 거리(m)가 된다. (안 곱하면 1.48배 과소)
+        # solvePnP tvec 이 실측보다 짧게 나오므로 lateral_scale(측정거리 기준 ~1.48)을 곱해
+        # 실제 거리(m)로. 깊이정지(원거리)용 depth_scale 과 분리(측정·정지 거리가 달라 비율 다름).
         dx = (-(tx * math.cos(psi) + tz * math.sin(psi)) * self._lateral_scale
               + self._marker_lat_offset)
         self.get_logger().info(
@@ -696,7 +710,12 @@ class ReverseDocking(Node):
         rdx, rdy = math.sin(oyaw0), -math.cos(oyaw0)
         omega = -math.copysign(self._arc_omega, dx)   # Δx>0 → ω<0(CW)=왼쪽(서)
         move_sign = -math.copysign(1.0, dx)           # 법선 쪽으로 가는 오른쪽-변위 부호
-        need = abs(dx)
+        # phantom 으로 큰 Δx 가 나와도 벽으로 돌진 못하게 이동량 캡.
+        need = min(abs(dx), self._arc_max_travel)
+        if need < abs(dx):
+            self.get_logger().warn(
+                f"Arc: |Δx|={abs(dx):.3f} 가 상한 {self._arc_max_travel} 초과 → {need} 로 제한"
+            )
         deadline = time.time() + self._arc_to
         start = time.time()
         flipped = False
