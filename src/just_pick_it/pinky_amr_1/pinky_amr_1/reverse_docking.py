@@ -126,6 +126,9 @@ class ReverseDocking(Node):
         # 코너 규약 추정). robot_y = marker_y - tvec[z]*depth_scale - cam_fwd 로 보정.
         # 실측 1점: 카메라-마커 자=0.175 vs tvec[z]=0.118 → 0.175/0.118≈1.48.
         self.declare_parameter("depth_scale", 1.48)
+        # 마커 정면 정렬 시 rvec[1]≈π 인데, 마커 장착 미세 기울기 등으로 도크-정렬 헤딩과
+        # 몇 도 어긋날 수 있다. yaw 목표를 이만큼 보정(도). +면 더 회전(rvec[1] 목표를 +방향).
+        self.declare_parameter("marker_yaw_offset_deg", 0.0)
 
         # ── 시작 coarse 정렬 (마커 상대) ────────────────────────────────
         self.declare_parameter("acquire_rotate_speed", 0.3)   # 마커 탐색 회전(rad/s)
@@ -184,6 +187,7 @@ class ReverseDocking(Node):
             )
         self._cam_fwd = self.get_parameter("camera_forward_offset_m").value
         self._depth_scale = self.get_parameter("depth_scale").value
+        self._marker_yaw_offset = math.radians(self.get_parameter("marker_yaw_offset_deg").value)
 
         self._camera_source = self.get_parameter("camera_source").value
         self._cam_w = int(self.get_parameter("camera_width").value)
@@ -483,7 +487,7 @@ class ReverseDocking(Node):
         lat_err = float(tvec[0]) / dist - target_lat   # 카메라 기준 횡 오차(rad 근사)
         # 마커가 카메라를 정면으로 바라보면 rvec[1]≈±π(180°)다. 그 오프셋을 빼야 정렬 시 0.
         # (안 빼면 정렬됐는데도 π 만큼 틀렸다고 보고 ω 최대로 계속 회전 → 벽 충돌.)
-        ry = float(rvec[1]) - math.pi
+        ry = float(rvec[1]) - math.pi - self._marker_yaw_offset
         yaw_err = math.atan2(math.sin(ry), math.cos(ry))   # [-π,π] 정규화
         # 횡: 마커 우측(lat_err>0=로봇 좌측)이면 좌회전(CCW,+). yaw: CW로 틀어졌으면(yaw_err<0) CCW(+).
         # 실측 부호 검증(marker_pose_check) 결과에 맞춘 부호.
