@@ -92,13 +92,18 @@ def main():
                     )
                     if mid in MARKER_WORLD:
                         mwx, mwy = MARKER_WORLD[mid]
-                        robot_y = mwy - tz * DEPTH_SCALE - CAM_FWD   # depth_scale 보정 포함
-                        rxm = mwx - tx                         # 횡 부호 가설 A
-                        rxp = mwx + tx                         # 횡 부호 가설 B
+                        # 헤딩 오차 psi (마커 법선 기준 상대 yaw). 정면 정렬 시 ~0.
+                        Rm, _ = cv2.Rodrigues(rvec)
+                        psi = math.atan2(float(Rm[0, 2]), -float(Rm[2, 2]))
+                        robot_y = mwy - tz * DEPTH_SCALE - CAM_FWD
+                        rx_simple = mwx - tx                                  # psi=0 가정(현재 코드)
+                        rx_dec = mwx - tx * math.cos(psi) + tz * math.sin(psi)   # 헤딩보정 +sin
+                        rx_dec2 = mwx - tx * math.cos(psi) - tz * math.sin(psi)  # 헤딩보정 -sin
                         line += (
                             f"\n      robot_y_est={robot_y:.3f}(dock_y {DOCK.get(mid,('?','?'))[1]}) "
-                            f"robot_x_est: (mwx-tx)={rxm:.3f} / (mwx+tx)={rxp:.3f} "
-                            f"(dock_x {DOCK.get(mid,('?',))[0]}) yaw(rvec_y)={math.degrees(ry):+.1f}deg"
+                            f"psi={math.degrees(psi):+.1f}deg "
+                            f"robot_x: simple={rx_simple:.3f} dec+={rx_dec:.3f} dec-={rx_dec2:.3f} "
+                            f"(실제 dock_x {DOCK.get(mid,('?',))[0]})"
                         )
                     print("  " + line)
             print("-" * 70)
