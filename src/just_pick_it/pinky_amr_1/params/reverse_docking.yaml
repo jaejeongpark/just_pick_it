@@ -47,6 +47,9 @@
     # 시퀀스2 라인 횡조향 사용 여부. false=직진 후진(마커는 깊이 정지만). 라인검출이
     # 이 거리에서 불안정해 기본 off. 라인 품질 개선되면 true.
     use_lane_steering: false
+    # [측정→arc→재정렬] 반복 횟수(잔여오차 수렴). 직진 후진 전 최종 yaw 정렬 허용오차(rad).
+    align_passes: 2
+    yaw_align_tol_rad: 0.04
     # 마커 상실/재정렬 시 제자리 회전 재중심. kp=중심 정렬 게인, tol=중앙 허용 bearing(rad).
     recenter_kp: 0.8
     recenter_tol_rad: 0.05

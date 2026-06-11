@@ -151,6 +151,10 @@ class ReverseDocking(Node):
         # 시퀀스2 라인검출 횡조향 사용 여부. 기본 off → arc+recenter 정렬 믿고 직진 후진,
         # 마커는 깊이 정지에만 사용. 라인검출이 이 거리에서 불안정해 끄는 것이 안전.
         self.declare_parameter("use_lane_steering", False)
+        # [측정→arc→재정렬] 반복 횟수(잔여오차 수렴). 2 권장.
+        self.declare_parameter("align_passes", 2)
+        # 최종 yaw 정렬 완료 허용오차(rad). 마커 fronto-parallel(법선 정면)까지 제자리 회전.
+        self.declare_parameter("yaw_align_tol_rad", 0.04)   # ~2.3deg
 
         # ── 정밀 정렬 (노란 라인) ───────────────────────────────────────
         self.declare_parameter("lane_lat_kp", 0.004)          # lateral_px 게인
@@ -222,6 +226,8 @@ class ReverseDocking(Node):
         self._arc_to        = self.get_parameter("arc_timeout_sec").value
         self._measure_frames = int(self.get_parameter("measure_frames").value)
         self._use_lane      = bool(self.get_parameter("use_lane_steering").value)
+        self._align_passes  = int(self.get_parameter("align_passes").value)
+        self._yaw_align_tol = self.get_parameter("yaw_align_tol_rad").value
 
         self._lane_lat_kp = self.get_parameter("lane_lat_kp").value
         self._lane_yaw_kp = self.get_parameter("lane_yaw_kp").value
@@ -322,31 +328,35 @@ class ReverseDocking(Node):
                 self.get_logger().error("reverse_dock: FAILED — 마커 미획득")
                 return False
 
-            # 2) 법선까지의 횡오차 Δx 1회 측정 (psi 는 여기서 딱 한 번, 프레임 평균).
-            dx = self._measure_lateral_offset(marker_id)
-            if dx is None:
-                self._stop()
-                self.get_logger().error("reverse_dock: FAILED — 횡오차 측정 실패")
-                return False
+            # 2) [횡오차 측정 → arc 법선정렬 → 마커 재정렬] 을 align_passes 회 반복.
+            #    1차로 대략 맞추고, 2차에서 잔여오차를 다시 측정·보정해 수렴시킨다.
+            for p in range(self._align_passes):
+                dx = self._measure_lateral_offset(marker_id)
+                if dx is None:
+                    self._stop()
+                    self.get_logger().error("reverse_dock: FAILED — 횡오차 측정 실패")
+                    return False
+                # 부드러운 후진 arc 로 법선 진입(open-loop, odom 으로 종료판단). dx>0 → 서쪽.
+                if not self._arc_into_line(dx):
+                    self._stop()
+                    self.get_logger().error("reverse_dock: FAILED — arc 진입")
+                    return False
+                # 마커방향으로 회전해 카메라 중앙 재포착(dx 부호로 탐색방향 힌트).
+                if not self._recenter_on_marker(marker_id, dx):
+                    self._stop()
+                    self.get_logger().error("reverse_dock: FAILED — 마커 재정렬")
+                    return False
+                self.get_logger().info(
+                    f"정렬 {p + 1}/{self._align_passes}차 완료 (Δx={dx:+.3f}m)"
+                )
 
-            # 3) 부드러운 후진 arc 로 법선(마커 x선) 진입 (open-loop, odom 으로 종료판단만).
-            if not self._arc_into_line(dx):
-                self._stop()
-                self.get_logger().error("reverse_dock: FAILED — arc 진입")
-                return False
+            # 3) 최종 yaw 정렬: 마커가 fronto-parallel(법선 정면, rvec_y≈180°)이 되게 회전.
+            self._align_yaw_to_normal(marker_id)
 
-            # 4) 마커방향으로 회전해 카메라 중앙 재포착(헤딩 재정렬).
-            #    arc 가 dx>0 이면 CW 로 돌아 마커가 왼쪽으로 빠졌으니 CCW 로 탐색해야 →
-            #    dx 부호를 탐색 방향 힌트로 넘긴다(dx>0 → CCW 탐색).
-            if not self._recenter_on_marker(marker_id, dx):
-                self._stop()
-                self.get_logger().error("reverse_dock: FAILED — 마커 재정렬")
-                return False
-
-            # 5) 라인 정밀 후진 + 마커 깊이로 정지.
+            # 4) 그대로 직진 후진 + 마커 깊이로 정지.
             if not self._reverse_insert(marker_id, marker_y, dock_map_y):
                 self._stop()
-                self.get_logger().error("reverse_dock: FAILED — 라인 후진")
+                self.get_logger().error("reverse_dock: FAILED — 후진 도킹")
                 return False
 
             # 6) 정지 + 안정화 + 위치 보정
@@ -541,6 +551,58 @@ class ReverseDocking(Node):
         self._stop()
         self.get_logger().warn("Recenter: timeout — 마커 재중심 실패")
         return False
+
+    def _align_yaw_to_normal(self, marker_id: int) -> bool:
+        """마커가 fronto-parallel(법선 정면, psi≈0)이 되도록 제자리 yaw 정렬. best-effort.
+
+        psi = atan2(R[0,2], -R[2,2]) (정면 정렬 시 ~0). 정면 근처에서 psi 가 ±부호로
+        튀므로(rvec ±π 모호성) 매 판정마다 몇 프레임 평균낸다. d(psi)/d(omega)<0 이라
+        omega = recenter_kp·psi (psi<0→CW). |psi| 가 커지면 부호 자동 반전(오류 강건).
+        실패해도(마커 상실/timeout) 현재 정렬 유지하고 True(도킹 진행).
+        """
+        deadline = time.time() + self._recenter_to
+        omega_sign = 1.0
+        prev_abs = None
+        last_log = 0.0
+        while time.time() < deadline:
+            if self._emergency.is_stopped():
+                self._stop()
+                deadline += self._wait_if_paused()
+                continue
+            nxs, nzs = [], []
+            for _ in range(3):
+                f = self._get_latest_frame()
+                if f is not None:
+                    m = self._detect_aruco(f, marker_id)
+                    if m is not None:
+                        R, _ = cv2.Rodrigues(
+                            np.asarray(m[1], dtype=np.float64).reshape(3, 1))
+                        nxs.append(float(R[0, 2]))
+                        nzs.append(float(R[2, 2]))
+                time.sleep(0.02)
+            if not nxs:
+                self._stop()
+                self.get_logger().info("YawAlign: 마커 미검출 → 현 정렬 유지")
+                return True
+            psi = math.atan2(sum(nxs) / len(nxs), -sum(nzs) / len(nzs))
+            if abs(psi) < self._yaw_align_tol:
+                self._stop()
+                self.get_logger().info(f"YawAlign: 완료 (psi={math.degrees(psi):+.1f}deg)")
+                return True
+            if prev_abs is not None and abs(psi) > prev_abs + 0.03:
+                omega_sign = -omega_sign
+                self.get_logger().warn("YawAlign: 방향 반대 감지 → 부호 반전")
+            prev_abs = abs(psi)
+            twist = Twist()
+            twist.angular.z = self._clamp(omega_sign * self._recenter_kp * psi)
+            self._cmd_pub.publish(twist)
+            if time.time() - last_log > 0.5:
+                self.get_logger().info(f"YawAlign: psi={math.degrees(psi):+.1f}deg")
+                last_log = time.time()
+            time.sleep(0.05)
+        self._stop()
+        self.get_logger().info("YawAlign: timeout → 현 정렬 유지")
+        return True
 
     def _measure_lateral_offset(self, marker_id: int):
         """마커를 여러 프레임 평균내어 법선(마커 x선)까지의 횡오차 Δx 를 1회 계산.
