@@ -46,6 +46,14 @@ export DEMO_ROS_DOMAIN_ID=25
 나머지 값은 데모 기본값이므로 평소에는 수정하지 않는다.
 fake PICKY 속도나 COBOT 작업 시간을 조절하고 싶을 때만 같은 `.env` 안의 값을 수정해서 쓴다.
 
+`scripts/demo/fake_robot_servers.py`를 직접 실행해도 같은 폴더의
+`full_flow_demo.env`를 자동으로 읽는다. 이미 shell에 지정된 환경변수는 덮어쓰지
+않으므로, 임시 override가 필요하면 실행 앞에 붙여도 된다.
+
+```bash
+DEMO_MOCK_PICKY=true python3 scripts/demo/fake_robot_servers.py
+```
+
 COBOT 자동 완료 모드:
 
 - `DEMO_COBOT_AUTO_COMPLETE=true`: fake COBOT이 action goal을 받은 뒤 feedback/result를 자동 반환한다.

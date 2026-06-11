@@ -10,9 +10,7 @@
 set -e
 
 SESSION=picky2
-WS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SETUP_CMD="cd '$WS_ROOT'; source ~/venv/jazzy/bin/activate 2>/dev/null || true; source /opt/ros/jazzy/setup.bash; source install/setup.bash; export ROS_DOMAIN_ID=25"
-MAP_PATH="$WS_ROOT/src/pinky_pro/pinky_navigation/map/sync_map.yaml"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if ! command -v tmux >/dev/null 2>&1; then
     echo "tmux 가 설치돼 있지 않습니다. 설치: sudo apt install -y tmux" >&2
@@ -25,14 +23,9 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
     exit 0
 fi
 
-tmux new-session -d -s "$SESSION" -n bringup \
-    "bash -lc \"$SETUP_CMD; echo '=== [PICKY2] Bringup (/picky2) ==='; ros2 launch pinky_amr_2 picky2_bringup.launch.py; bash\""
-
-tmux new-window -t "$SESSION" -n nav \
-    "bash -lc \"$SETUP_CMD; echo '=== [PICKY2] Nav2 — waiting /picky2/scan, /picky2/odom ==='; until ros2 topic list 2>/dev/null | grep -q '/picky2/scan' && ros2 topic list 2>/dev/null | grep -q '/picky2/odom'; do sleep 2; done; echo 'map: $MAP_PATH'; ros2 launch pinky_amr_2 picky2_nav.launch.py namespace:=picky2 map:='$MAP_PATH' use_composition:=False; bash\""
-
-tmux new-window -t "$SESSION" -n state \
-    "bash -lc \"$SETUP_CMD; echo '=== [PICKY2] State Machine (/picky2) ==='; ros2 launch pinky_amr_2 picky2_state_machine.launch.py; bash\""
+tmux new-session -d -s "$SESSION" -n bringup "bash '$SCRIPT_DIR/headless_picky2_bringup.sh'"
+tmux new-window  -t "$SESSION"   -n nav      "bash '$SCRIPT_DIR/headless_picky2_nav.sh'"
+tmux new-window  -t "$SESSION"   -n state    "bash '$SCRIPT_DIR/headless_picky2_state.sh'"
 
 tmux set-option -t "$SESSION" remain-on-exit on
 tmux select-window -t "$SESSION:bringup"

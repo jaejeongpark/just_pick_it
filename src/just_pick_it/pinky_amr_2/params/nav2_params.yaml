@@ -16,9 +16,9 @@ amcl:
     laser_max_range: 100.0
     laser_min_range: -1.0
     laser_model_type: "likelihood_field"
-    max_beams: 60
-    max_particles: 2000
-    min_particles: 500
+    max_beams: 40
+    max_particles: 1000
+    min_particles: 300
     odom_frame_id: "odom"
     pf_err: 0.05
     pf_z: 0.99
@@ -51,9 +51,10 @@ bt_navigator:
     robot_base_frame: base_link
     odom_topic: odom
     bt_loop_duration: 10
-    default_server_timeout: 20
-    wait_for_service_timeout: 1000
+    default_server_timeout: 1000
+    wait_for_service_timeout: 2000
     action_server_result_timeout: 900.0
+    default_nav_to_pose_bt_xml: "$(find-pkg-share nav2_bt_navigator)/behavior_trees/navigate_w_recovery_and_replanning_only_if_path_becomes_invalid.xml"
     navigators: ["navigate_to_pose", "navigate_through_poses"]
     navigate_to_pose:
       plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
@@ -74,7 +75,7 @@ bt_navigator:
 
 controller_server:
   ros__parameters:
-    controller_frequency: 20.0
+    controller_frequency: 5.0
     costmap_update_timeout: 0.30
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.5
@@ -82,6 +83,8 @@ controller_server:
     failure_tolerance: 0.3
     progress_checker_plugins: ["progress_checker"]
     goal_checker_plugins: ["general_goal_checker"] # "precise_goal_checker"
+    current_progress_checker: "progress_checker"
+    current_goal_checker: "general_goal_checker"
 
     # 단일 컨트롤러
     controller_plugins: ["FollowPath"]
@@ -98,7 +101,7 @@ controller_server:
     general_goal_checker:
       stateful: True
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.03
+      xy_goal_tolerance: 0.01
       yaw_goal_tolerance: 0.10
 
     # ★ 여기부터: Regulated Pure Pursuit 컨트롤러 설정
@@ -112,15 +115,15 @@ controller_server:
       max_angular_vel: 0.5 # [rad/s]
 
       # 경로 추종 관련
-      lookahead_dist: 0.6
-      min_lookahead_dist: 0.3
-      max_lookahead_dist: 0.9
+      lookahead_dist: 0.25
+      min_lookahead_dist: 0.10
+      max_lookahead_dist: 0.45
       lookahead_time: 1.5
       transform_tolerance: 0.2
       use_velocity_scaled_lookahead_dist: true
       # 소형 아레나(2x1m): 벽 충돌 검사로 인한 잦은 정지를 막는다. 경로는 global
       # planner 가 충돌 회피하므로 RPP 는 그 경로를 따라가기만 한다.
-      use_collision_detection: false
+      use_collision_detection: true
       use_interpolation: true
 
       # ========= 회전 우선 관련 핵심 파라미터 =========
@@ -160,8 +163,8 @@ controller_server:
 local_costmap:
   local_costmap:
     ros__parameters:
-      update_frequency: 5.0
-      publish_frequency: 2.0
+      update_frequency: 2.0
+      publish_frequency: 1.0
       global_frame: odom
       robot_base_frame: base_footprint
       rolling_window: true
@@ -170,20 +173,15 @@ local_costmap:
       resolution: 0.03
       #robot_radius: 0.22
       footprint: "[[0.06, 0.06], [0.06, -0.06], [-0.06, -0.06], [-0.06, 0.06]]"
-      plugins: ["voxel_layer", "inflation_layer"]
+      plugins: ["obstacle_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
         inflation_radius: 0.06
-      voxel_layer:
-        plugin: "nav2_costmap_2d::VoxelLayer"
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
-        publish_voxel_map: True
-        origin_z: 0.0
-        z_resolution: 0.05
-        z_voxels: 16
         max_obstacle_height: 2.0
-        mark_threshold: 0
         observation_sources: scan
         scan:
           topic: scan
@@ -198,7 +196,7 @@ local_costmap:
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
-      always_send_full_costmap: True
+      always_send_full_costmap: False
 
 global_costmap:
   global_costmap:
@@ -234,7 +232,7 @@ global_costmap:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
         inflation_radius: 0.06
-      always_send_full_costmap: True
+      always_send_full_costmap: False
 
 # The yaml_filename does not need to be specified since it going to be set by defaults in launch.
 # If you'd rather set it in the yaml, remove the default "map" value in the tb3_simulation_launch.py
@@ -252,7 +250,7 @@ map_saver:
 
 planner_server:
   ros__parameters:
-    expected_planner_frequency: 20.0
+    expected_planner_frequency: 1.0
     planner_plugins: ["GridBased"]
     costmap_update_timeout: 1.0
     GridBased:

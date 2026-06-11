@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import math
 import os
+from pathlib import Path
+import shlex
 import threading
 import time
 
@@ -60,6 +62,38 @@ FLOW_COMPLETION_PHASE_BY_TASK = {
     "UNLOAD": "UNLOADING",
     "DISPLAY_PLACE": "PLACING",
 }
+
+DEMO_ENV_PATH = Path(__file__).with_name("full_flow_demo.env")
+
+
+def load_demo_env_defaults(env_path: Path = DEMO_ENV_PATH) -> None:
+    """Load demo defaults when fake servers are run directly.
+
+    Shell-provided environment variables win. This keeps explicit overrides such
+    as `DEMO_MOCK_PICKY=true python3 ...` working while making plain direct
+    execution honor scripts/demo/full_flow_demo.env.
+    """
+    if not env_path.is_file():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            parts = shlex.split(line, comments=True, posix=True)
+        except ValueError:
+            continue
+        if not parts:
+            continue
+        if parts[0] == "export":
+            parts = parts[1:]
+        if not parts or "=" not in parts[0]:
+            continue
+
+        key, value = parts[0].split("=", 1)
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
 @dataclass
@@ -821,6 +855,7 @@ class FakeRobotServers(Node):
 
 
 def main() -> None:
+    load_demo_env_defaults()
     rclpy.init()
     node = FakeRobotServers()
     executor = MultiThreadedExecutor(num_threads=8)

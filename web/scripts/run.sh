@@ -30,6 +30,12 @@ FLEET_API_BASE_URL="${FLEET_API_BASE_URL:-http://localhost:8100}"
 FLEET_API_WS_BASE_URL="${FLEET_API_WS_BASE_URL:-ws://localhost:8100}"
 export FLEET_API_BASE_URL FLEET_API_WS_BASE_URL
 
+detect_lan_ip() {
+  if command -v hostname >/dev/null 2>&1; then
+    hostname -I 2>/dev/null | awk '{print $1}'
+  fi
+}
+
 web_is_listening() {
   ss -ltn "sport = :${APP_PORT}" 2>/dev/null | grep -q LISTEN
 }
@@ -81,7 +87,12 @@ fi
 
 cd "$WEB_DIR"
 source "$WEB_DIR/.venv/bin/activate"
+LAN_IP="$(detect_lan_ip || true)"
 echo "[web-run] Customer: http://localhost:${APP_PORT}/customer"
 echo "[web-run] Admin   : http://localhost:${APP_PORT}/admin"
+if [ -n "$LAN_IP" ]; then
+  echo "[web-run] LAN Customer: http://${LAN_IP}:${APP_PORT}/customer"
+  echo "[web-run] LAN Admin   : http://${LAN_IP}:${APP_PORT}/admin"
+fi
 echo "[web-run] Fleet API: $FLEET_API_BASE_URL"
 exec uvicorn app.main:app --reload --host "$APP_HOST" --port "$APP_PORT"
