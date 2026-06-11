@@ -10,16 +10,13 @@ GRIPPER_SPEED  = 100
 GRIPPER_WAIT_SEC = 2.0  # 그리퍼 동작 완료 대기 시간
 
 DEFAULT_SPEED        = 20   # 관절 이동 속도 (1~100)
+STREAM_SPEED         = 50   # 센터링 실시간 추종 속도
 MOTION_TIMEOUT_SEC   = 15.0
 POLL_INTERVAL_SEC    = 0.05
 
 # ── 임시 테스트용 고정 자세 (vision 서버 연동 후 실제 좌표로 교체 필요) ─────────
 # 단위: degree,  순서: [J1, J2, J3, J4, J5, J6]
 _HOME          = [  0.0,   0.0,   0.0,   0.0,   0.0,   0.0]
-
-# SORTING: joint angles [J1, J2, J3, J4, J5, J6] (deg) — 서버 연동 후 실제값으로 교체
-_SORT_PICK  = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-_SORT_PLACE = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 _LOAD_PICK     = [  0.0, -20.0,  90.0, -70.0,   0.0,   0.0]
 _LOAD_PLACE    = [-90.0, -20.0,  90.0, -70.0,   0.0,   0.0]
@@ -50,15 +47,12 @@ class CobotController:
 
     # ── 공개 phase 메서드 ────────────────────────────────────────────────
 
-    def run_sorting(self, request) -> tuple[bool, int]:
-        self._log('SORTING 시작')
-        if not self.move_to_angles(_SORT_PICK):
+    def run_sorting(self, grasp_trajectory: list[list[float]]) -> tuple[bool, int]:
+        """서버에서 받은 학습 파지 궤적으로 물체를 집는다."""
+        self._log('SORTING 파지 실행')
+        if not self.execute_grasp_trajectory(grasp_trajectory):
             return False, 0
         if not self.close_gripper():
-            return False, 0
-        if not self.move_to_angles(_SORT_PLACE):
-            return False, 0
-        if not self.open_gripper():
             return False, 0
         return True, 1
 
@@ -101,6 +95,26 @@ class CobotController:
         ok = self.move_to_angles(_HOME, speed=DEFAULT_SPEED)
         self.open_gripper()
         return ok
+
+    # ── 서버 스트리밍 제어 메서드 ────────────────────────────────────────
+
+    def stream_joint_angles(self, angles: list[float]) -> bool:
+        """서버 스트리밍 관절각을 즉시 반영 (non-blocking). 센터링 추종 루프에서 사용."""
+        try:
+            self._mc.send_angles(angles, STREAM_SPEED)
+            return True
+        except Exception as e:
+            self._log_err(f'스트리밍 관절 제어 실패: {e}')
+            return False
+
+    def execute_grasp_trajectory(self, trajectory: list[list[float]]) -> bool:
+        """학습 알고리즘 기반 파지 궤적을 순차 실행 (blocking). 각 waypoint는 6축 관절각."""
+        self._log(f'파지 궤적 실행 — {len(trajectory)}개 waypoint')
+        for i, angles in enumerate(trajectory):
+            if not self.move_to_angles(angles):
+                self._log_err(f'파지 궤적 {i}번 waypoint 실패')
+                return False
+        return True
 
     # ── 저수준 이동 메서드 ───────────────────────────────────────────────
 
@@ -176,7 +190,7 @@ class CobotController:
         return True
 
     def _wait_for_stop(self, timeout: float = MOTION_TIMEOUT_SEC) -> bool:
-        # send_coords는 non-blocking이라 이동 시작 전 is_moving()==0 타이밍이 존재.
+        # send_angles/send_coords 모두 non-blocking이라 이동 시작 전 is_moving()==0 타이밍이 존재.
         # 충분히 대기 후 이동 시작을 확인한 뒤 정지를 기다린다.
         time.sleep(0.5)
 

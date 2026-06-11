@@ -7,7 +7,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
-from std_msgs.msg import String
+from std_msgs.msg import Bool, Float64MultiArray, String
 
 from just_pick_it_interfaces.action import ExecuteTask
 from just_pick_it_interfaces.srv import EmergencyControl
@@ -56,18 +56,26 @@ class CobotStateManager(Node):
         # 두 머신의 ROS_DOMAIN_ID 가 동일해야 한다.
         self.declare_parameter('vision_service_name', '/vision/scan_empty_slot')  # [확정 필요]
         self.declare_parameter('vision_service_timeout_sec', 30.0)
+        self.declare_parameter('centering_timeout_sec', 30.0)
+        self.declare_parameter('servo_joints_topic', '/vision/servo_joints')    # [확정 필요]
+        self.declare_parameter('centering_done_topic', '/vision/centering_done') # [확정 필요]
         self.declare_parameter('cobot_port', '/dev/ttyJETCOBOT')
         self.declare_parameter('cobot_baudrate', 1_000_000)
 
-        self._robot_id       = self.get_parameter('robot_id').value
-        self._vision_timeout = self.get_parameter('vision_service_timeout_sec').value
+        self._robot_id          = self.get_parameter('robot_id').value
+        self._vision_timeout    = self.get_parameter('vision_service_timeout_sec').value
+        self._centering_timeout = self.get_parameter('centering_timeout_sec').value
 
         self._lock = threading.Lock()
-        self._cobot_state  = 'STANDBY'
+        self._cobot_state    = 'STANDBY'
         self._emergency_stop = False
         # DISPLAY_SCAN 에서 받은 좌표를 DISPLAY_PLACE task 까지 보관한다.
         # 두 task 가 별도 Action goal 로 전달되므로 노드 내부에서 유지한다.
         self._scan_result = None
+
+        # 센터링 루프 제어
+        self._centering_active = False   # 센터링 구독 처리 활성 여부
+        self._centering_done   = threading.Event()
 
         # Action 과 서비스, 타이머를 동시에 처리하기 위해 ReentrantCallbackGroup 사용
         cb_group = ReentrantCallbackGroup()
@@ -103,6 +111,26 @@ class CobotStateManager(Node):
         #     vision_service_name,
         #     callback_group=cb_group,
         # )
+
+        # 센터링 관절각 스트리밍 구독 (서버 publish 토픽, [확정 필요])
+        servo_topic = self.get_parameter('servo_joints_topic').value
+        self.create_subscription(
+            Float64MultiArray,
+            servo_topic,
+            self._on_servo_joints,
+            10,
+            callback_group=cb_group,
+        )
+
+        # 센터링 완료 신호 구독 (서버 publish 토픽, [확정 필요])
+        centering_done_topic = self.get_parameter('centering_done_topic').value
+        self.create_subscription(
+            Bool,
+            centering_done_topic,
+            self._on_centering_done,
+            10,
+            callback_group=cb_group,
+        )
 
         # 코봇 하드웨어 제어기
         self._controller = CobotController(
@@ -290,6 +318,19 @@ class CobotStateManager(Node):
             stock_delta=0,  # [구현 필요] 실제 재고 반영 수량 반환
         )
 
+    # ── 센터링 스트리밍 콜백 ──────────────────────────────────────────────
+
+    def _on_servo_joints(self, msg: Float64MultiArray) -> None:
+        """서버 스트리밍 관절각 수신 — SORTING 센터링 활성 중에만 코봇에 반영."""
+        if not self._centering_active:
+            return
+        self._controller.stream_joint_angles(list(msg.data))
+
+    def _on_centering_done(self, msg: Bool) -> None:
+        """서버 센터링 완료 신호 수신."""
+        if msg.data:
+            self._centering_done.set()
+
     # ── phase별 코봇 제어 ─────────────────────────────────────────────
 
     def _run_phase(
@@ -303,7 +344,7 @@ class CobotStateManager(Node):
         반환값: (success, detected_quantity)
         """
         if phase == 'SORTING':
-            return self._controller.run_sorting(request)
+            return self._run_sorting_phase(request)
 
         elif phase == 'LOADING':
             return self._controller.run_loading(request)
@@ -335,6 +376,34 @@ class CobotStateManager(Node):
             return success, qty
 
         return True, 0
+
+    def _run_sorting_phase(self, request) -> tuple[bool, int]:
+        """
+        1단계: 서버 스트리밍 관절각으로 물체를 카메라 중앙에 정렬
+        2단계: 서버 학습 파지 궤적으로 파지 실행
+        """
+        self._centering_done.clear()
+        self._centering_active = True
+        self.get_logger().info('[CobotStateManager] SORTING: 센터링 대기 중...')
+
+        try:
+            centered = self._centering_done.wait(timeout=self._centering_timeout)
+        finally:
+            self._centering_active = False
+
+        if not centered:
+            self.get_logger().error(
+                f'[CobotStateManager] SORTING 센터링 타임아웃 ({self._centering_timeout}s)'
+            )
+            return False, 0
+
+        self.get_logger().info('[CobotStateManager] SORTING: 센터링 완료 — 파지 실행')
+
+        # [구현 필요] 서버에서 학습 파지 궤적(waypoint 목록) 수신
+        # 예: grasp_trajectory = self._call_grasp_service(request).trajectory
+        grasp_trajectory: list[list[float]] = []
+
+        return self._controller.run_sorting(grasp_trajectory)
 
     def _stow_arm(self) -> bool:
         """팔을 안전 복귀 자세로 이동한다."""
