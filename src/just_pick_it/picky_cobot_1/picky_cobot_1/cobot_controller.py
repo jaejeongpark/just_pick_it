@@ -17,9 +17,9 @@ POLL_INTERVAL_SEC    = 0.05
 # 단위: degree,  순서: [J1, J2, J3, J4, J5, J6]
 _HOME          = [  0.0,   0.0,   0.0,   0.0,   0.0,   0.0]
 
-# SORTING: Cartesian coords [x, y, z, rx, ry, rz] (mm / deg)
-_SORT_PICK_COORDS  = [-51.8, -46.8, 410.9,  83.87, -47.83,  21.17]
-_SORT_PLACE_COORDS = [-50.6, -87.4, 319.6,  87.04, -50.07,  20.56]
+# SORTING: joint angles [J1, J2, J3, J4, J5, J6] (deg) — 서버 연동 후 실제값으로 교체
+_SORT_PICK  = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+_SORT_PLACE = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 _LOAD_PICK     = [  0.0, -20.0,  90.0, -70.0,   0.0,   0.0]
 _LOAD_PLACE    = [-90.0, -20.0,  90.0, -70.0,   0.0,   0.0]
@@ -52,11 +52,11 @@ class CobotController:
 
     def run_sorting(self, request) -> tuple[bool, int]:
         self._log('SORTING 시작')
-        if not self.move_to_coords(_SORT_PICK_COORDS):
+        if not self.move_to_angles(_SORT_PICK):
             return False, 0
         if not self.close_gripper():
             return False, 0
-        if not self.move_to_coords(_SORT_PLACE_COORDS):
+        if not self.move_to_angles(_SORT_PLACE):
             return False, 0
         if not self.open_gripper():
             return False, 0
