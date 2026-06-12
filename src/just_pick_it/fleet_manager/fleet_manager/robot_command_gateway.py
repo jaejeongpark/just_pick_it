@@ -7,7 +7,7 @@ from geometry_msgs.msg import PoseStamped
 from rclpy.action import ActionClient
 from rclpy.node import Node
 
-from just_pick_it_interfaces.action import DockCommand, MoveCommand
+from just_pick_it_interfaces.action import DockCommand, ExecuteTask, MoveCommand
 from just_pick_it_interfaces.srv import EmergencyControl
 
 
@@ -47,9 +47,11 @@ class RobotCommandGateway:
         self._map_frame = map_frame
         self._move_clients: dict[str, ActionClient] = {}
         self._dock_clients: dict[str, ActionClient] = {}
+        self._cobot_clients: dict[str, ActionClient] = {}
         self._emergency_clients: dict[str, Any] = {}
         self._active_move_goals: dict[int, Any] = {}
         self._active_dock_goals: dict[int, Any] = {}
+        self._active_cobot_goals: dict[int, Any] = {}
 
     # ==================================================================
     # PICKY MoveCommand
@@ -376,16 +378,117 @@ class RobotCommandGateway:
         task: dict[str, Any],
         result_callback: ResultCallback | None = None,
     ) -> bool:
-        """COBOT task 전송 인터페이스 대기 함수.
+        """COBOT task를 ExecuteTask.action goal로 전송한다."""
+        task_id = int(task.get('task_id') or 0)
+        task_type = str(task.get('task_type') or '')
 
-        현재 저장소에는 ExecuteTask.action이 아직 정의되어 있지 않다.
-        COBOT 담당 인터페이스가 확정되면 이 함수에서 ActionClient를 붙인다.
-        """
-        self._node.get_logger().warn(
-            f"[RobotCommandGateway] {robot_name} COBOT ExecuteTask.action 정의 대기: "
-            f"task_id={task.get('task_id')}, task_type={task.get('task_type')}"
+        client = self._get_cobot_client(robot_name)
+        if not client.wait_for_server(timeout_sec=self._action_wait_timeout_sec):
+            self._node.get_logger().warn(
+                f"[RobotCommandGateway] {robot_name} ExecuteTask action server 없음"
+            )
+            return False
+
+        goal = ExecuteTask.Goal()
+        goal.task_id = task_id
+        goal.task_type = task_type
+        goal.product_name = str(task.get('product_name') or '')
+        goal.quantity = int(task.get('quantity') or 0)
+        goal.order_id = int(task.get('order_id') or 0)
+        goal.display_item_id = int(task.get('display_item_id') or 0)
+        goal.target_zone_name = str(task.get('target_zone_name') or '')
+
+        self._node.get_logger().info(
+            f"[RobotCommandGateway] {robot_name} task_id={task_id} {task_type} 전송"
         )
-        return False
+
+        send_future = client.send_goal_async(goal)
+        send_future.add_done_callback(
+            lambda future: self._on_cobot_goal_response(
+                robot_name,
+                task_id,
+                task_type,
+                future,
+                result_callback,
+            )
+        )
+        return True
+
+    def _get_cobot_client(self, robot_name: str) -> ActionClient:
+        """robot_name에 대응되는 ExecuteTask ActionClient를 lazy 생성한다."""
+        client = self._cobot_clients.get(robot_name)
+        if client is not None:
+            return client
+
+        action_name = f"/{robot_name}/execute_task"
+        client = ActionClient(self._node, ExecuteTask, action_name)
+        self._cobot_clients[robot_name] = client
+        return client
+
+    def _on_cobot_goal_response(
+        self,
+        robot_name: str,
+        task_id: int,
+        task_type: str,
+        future: Any,
+        result_callback: ResultCallback | None,
+    ) -> None:
+        """ExecuteTask goal accept/reject 결과를 처리한다."""
+        goal_handle = future.result()
+        if not goal_handle.accepted:
+            self._node.get_logger().warn(
+                f"[RobotCommandGateway] {robot_name} task_id={task_id} cobot goal rejected"
+            )
+            if result_callback is not None:
+                result_callback({
+                    "task_id": task_id,
+                    "robot_name": robot_name,
+                    "task_type": task_type,
+                    "success": False,
+                    "message": "cobot goal rejected",
+                })
+            return
+
+        self._active_cobot_goals[task_id] = goal_handle
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(
+            lambda done: self._on_cobot_result(
+                robot_name,
+                task_id,
+                task_type,
+                done,
+                result_callback,
+            )
+        )
+
+    def _on_cobot_result(
+        self,
+        robot_name: str,
+        task_id: int,
+        task_type: str,
+        future: Any,
+        result_callback: ResultCallback | None,
+    ) -> None:
+        """ExecuteTask result를 TaskManager가 이해하는 dict로 변환한다."""
+        self._active_cobot_goals.pop(task_id, None)
+
+        result_wrapper = future.result()
+        result = result_wrapper.result
+        payload = {
+            "task_id": task_id,
+            "robot_name": robot_name,
+            "task_type": task_type,
+            "success": bool(result.success),
+            "message": result.message,
+        }
+
+        self._node.get_logger().info(
+            f"[RobotCommandGateway] {robot_name} task_id={task_id} cobot result: "
+            f"success={payload['success']}, message={payload['message']}"
+        )
+
+        if result_callback is not None:
+            result_callback(payload)
 
     # ==================================================================
     # Emergency Stop Service

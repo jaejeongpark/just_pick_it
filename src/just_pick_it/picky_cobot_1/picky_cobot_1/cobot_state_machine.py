@@ -26,7 +26,7 @@ TASK_PHASE_STATES = {
     'INSPECTION':       ['INSPECTING'],
     'UNLOAD':           ['UNLOADING'],
     'DISPLAY_SCAN':     ['SCANNING'],
-    'DISPLAY_PLACE':    ['PLACING'],
+    'DISPLAY_PLACE':    ['PLACING']
 }
 
 
@@ -236,9 +236,9 @@ class CobotStateManager(Node):
                     )
 
             self._set_state(phase)
-            feedback.state             = phase
-            feedback.message           = f'{phase} in progress'
-            feedback.progress          = float(idx) / total_phases
+            feedback.state              = phase
+            feedback.message            = f'{phase} in progress'
+            feedback.progress           = float(idx) / total_phases
             feedback.processed_quantity = detected_qty
             goal_handle.publish_feedback(feedback)
 
@@ -255,7 +255,10 @@ class CobotStateManager(Node):
                     stock_delta=0,
                 )
 
-            # 중간 인식 수량 feedback 갱신
+            # 단계 완료 feedback — 다음 단계 진입 전 task manager에 성공 알림
+            feedback.state              = phase
+            feedback.message            = f'{phase} complete'
+            feedback.progress           = float(idx + 1) / total_phases
             feedback.processed_quantity = detected_qty
             goal_handle.publish_feedback(feedback)
 
@@ -303,10 +306,10 @@ class CobotStateManager(Node):
         반환값: (success, detected_quantity)
         """
         if phase == 'SORTING':
+
             # [구현 필요] Vision Server에서 grasp_trajectory 수신 후 교체
             grasp_trajectory: list[list[float]] = []
             return self._controller.run_sorting(grasp_trajectory)
-
         elif phase == 'LOADING':
             # [구현 필요] Vision Server에서 pick/place trajectory 수신 후 교체
             pick_trajectory:  list[list[float]] = []
@@ -323,10 +326,9 @@ class CobotStateManager(Node):
             pick_trajectory:  list[list[float]] = []
             place_trajectory: list[list[float]] = []
             return self._controller.run_unloading(pick_trajectory, place_trajectory)
+            # [구현 필요] Vision/학습 서버에서 받은 실제 grasp_trajectory로 교체
+            return self._controller.run_sorting([])
 
-        elif phase == 'SCANNING':
-            # [구현 필요] VisionScanService 인터페이스 확정 후 주석 해제
-            #
             # req = VisionScanService.Request()
             # req.task_id          = request.task_id
             # req.target_zone_name = request.target_zone_name
