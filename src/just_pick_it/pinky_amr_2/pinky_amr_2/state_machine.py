@@ -277,9 +277,43 @@ class Amr2StateMachine(Node):
 
         feedback = MoveCommand.Feedback()
         feedback.total_waypoints = len(waypoints)
+        last_passed_waypoint_index = -1
 
-        # waypoint 순차 이동
-        for i, wp in enumerate(waypoints):
+        def publish_source_release() -> None:
+            # Fleet TaskManager가 +1 보정 후 TrafficManager 현재 path의 첫 노드(source)를
+            # 해제한다. MoveCommand.waypoints에는 source가 빠져 있으므로 시작 시 1회 필요하다.
+            feedback.current_waypoint_index = 0
+            goal_handle.publish_feedback(feedback)
+            self.get_logger().info(
+                '[PATHTRACE][StateMachine] source waypoint released'
+            )
+
+        def publish_waypoint_progress(waypoint_index: int) -> None:
+            nonlocal last_passed_waypoint_index
+            if waypoint_index <= last_passed_waypoint_index:
+                return
+            if waypoint_index < 0 or waypoint_index >= len(waypoints):
+                self.get_logger().warn(
+                    f'[StateMachine] MOVE waypoint feedback index out of range: '
+                    f'{waypoint_index}/{len(waypoints)}'
+                )
+                return
+
+            # 현재 Fleet 계약에서는 TaskManager가 이 값을 +1 해서 TrafficManager의
+            # "현재 남은 path"를 trim한다. 실제 통과 waypoint index는 로그로 남기고,
+            # TrafficManager에는 한 칸 진행 신호(0 -> +1)를 보낸다.
+            feedback.current_waypoint_index = 0
+            goal_handle.publish_feedback(feedback)
+            last_passed_waypoint_index = waypoint_index
+            self.get_logger().info(
+                '[PATHTRACE][StateMachine] waypoint passed '
+                f'idx={waypoint_index}/{len(waypoints) - 1}'
+            )
+
+        # waypoint 개수와 관계없이 Nav2 NavigateThroughPoses 한 번으로 보내
+        # 코너에서의 cancel/restart를 피한다. PICKY2 전용 BT에서 지나간 goal 제거
+        # 반경을 작게 낮춰 TrafficManager waypoint가 시작 직후 삭제되지 않게 한다.
+        if waypoints:
             if goal_handle.is_cancel_requested:
                 self._move.cancel_navigation()
                 goal_handle.canceled()
@@ -291,25 +325,27 @@ class Amr2StateMachine(Node):
                 goal_handle.abort()
                 return MoveCommand.Result(success=False, message='emergency stopped')
 
-            feedback.current_waypoint_index = i
-            goal_handle.publish_feedback(feedback)
+            publish_source_release()
 
-            x = wp.pose.position.x
-            y = wp.pose.position.y
-            # zone 의 theta 는 쓰지 않는다. 중간 경유지는 통과만 하고, 마지막
-            # 목적지에서만 task_type 별 정책(STOP_MODE_BY_TASK)으로 정지 자세를 잡는다.
-            is_final = (i == len(waypoints) - 1)
-            final_mode = (
-                STOP_MODE_BY_TASK.get(task_type, STOP_NEAREST_90)
-                if is_final else STOP_NEAREST_90
-            )
+            final_mode = STOP_MODE_BY_TASK.get(task_type, STOP_NEAREST_90)
+            path_points = [
+                (wp.pose.position.x, wp.pose.position.y)
+                for wp in waypoints
+            ]
 
             self.get_logger().info(
-                f'[PATHTRACE][StateMachine->MoveToGoal] idx={i} 좌표=({x:.3f}, {y:.3f}) '
-                f'final={is_final} final_mode={final_mode}'
+                '[PATHTRACE][StateMachine->MoveThroughGoals] '
+                f'waypoints={[(round(x, 3), round(y, 3)) for x, y in path_points]} '
+                f'final_mode={final_mode}'
             )
+            move_ok = self._move.move_through_goals(
+                path_points,
+                final_mode=final_mode,
+                progress_callback=publish_waypoint_progress,
+            )
+            failure_message = 'navigation failed through poses'
 
-            if not self._move.move_to_goal(x, y, final=is_final, final_mode=final_mode):
+            if not move_ok:
                 if goal_handle.is_cancel_requested:
                     self._move.cancel_navigation()
                     goal_handle.canceled()
@@ -320,9 +356,7 @@ class Amr2StateMachine(Node):
                     return MoveCommand.Result(success=False, message='emergency stopped')
                 self._set_state('ERROR_RECOVERY')
                 goal_handle.abort()
-                return MoveCommand.Result(
-                    success=False, message=f'navigation failed at waypoint {i}'
-                )
+                return MoveCommand.Result(success=False, message=failure_message)
 
         # 전체 이동 완료. 정지 자세 회전(사방향 90° 스냅)은 move_to_goal 의 최종 목적지
         # (final=True) 처리로 옮겼다. 여기서는 추가 회전하지 않는다(중간 경유지도 회전 없음).

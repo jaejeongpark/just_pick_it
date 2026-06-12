@@ -59,10 +59,11 @@ bt_navigator:
       plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
     navigate_through_poses:
       plugin: "nav2_bt_navigator::NavigateThroughPosesNavigator"
-    # 'default_nav_through_poses_bt_xml' and 'default_nav_to_pose_bt_xml' are use defaults:
+    # PICKY2 map is only 2m x 1m. Nav2 default NavigateThroughPoses BT removes
+    # passed goals within 0.7m, which can erase TrafficManager waypoints at start.
+    default_nav_through_poses_bt_xml: "$(find-pkg-share pinky_amr_2)/behavior_trees/navigate_through_poses_picky2.xml"
+    # default_nav_to_pose_bt_xml is left on the Nav2 default:
     # nav2_bt_navigator/navigate_to_pose_w_replanning_and_recovery.xml
-    # nav2_bt_navigator/navigate_through_poses_w_replanning_and_recovery.xml
-    # They can be set here or via a RewrittenYaml remap from a parent launch file to Nav2.
 
     # plugin_lib_names is used to add custom BT plugins to the executor (vector of strings).
     # Built-in plugins are added automatically
@@ -93,7 +94,7 @@ controller_server:
     # Progress checker
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
-      required_movement_radius: 0.5
+      required_movement_radius: 0.05
       movement_time_allowance: 10.0
 
     # Goal checker
@@ -108,7 +109,7 @@ controller_server:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
 
       # 기본 속도들 (Pinky 상황 맞게 나중에 조정 가능)
-      desired_linear_vel: 0.15 # [m/s]
+      desired_linear_vel: 0.10 # [m/s]
       max_linear_accel: 0.5 # [m/s^2]
       max_linear_decel: 0.5 # [m/s^2]
       max_angular_vel: 0.7 # [rad/s]
@@ -132,7 +133,7 @@ controller_server:
 
       # 2) 이 각도(rad) 이상 헤딩 차이가 나면 회전 모드 진입
       #    0.785 ≒ 45도, 0.523 ≒ 30도, 0.35 ≒ 20도
-      rotate_to_heading_min_angle: 0.35
+      rotate_to_heading_min_angle: 0.785
 
       # 3) 회전 속도 (in-place 회전일 때 angular vel)
       rotate_to_heading_angular_vel: 0.6
@@ -178,7 +179,7 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.03
+        inflation_radius: 0.05
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True

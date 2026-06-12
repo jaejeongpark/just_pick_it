@@ -4,7 +4,7 @@
     precision_approach_distance: 0.03
 
     # 중간 waypoint는 정밀 접근 없이 이 거리 안에 들어오면 통과 처리한다.
-    waypoint_reach_distance: 0.15
+    waypoint_reach_distance: 0.10
 
     # 직접 정밀 접근 단계의 최종 위치/yaw 허용 오차.
     xy_goal_tolerance: 0.01
@@ -18,6 +18,8 @@
     precision_max_linear_vel: 0.10
     precision_max_angular_vel: 0.6
     precision_heading_deadband_distance: 0.03
+    # 이 각도까지는 정상 전진하고, 넘으면 전진을 끊지 않고 감속한다.
+    # 로봇이 목표 반대쪽을 볼 때는 안전하게 회전만 한다.
     precision_heading_gate_angle: 0.35
 
     # 한 waypoint에서 Nav2 단계가 이 시간 안에 끝나지 않으면 실패 처리한다.

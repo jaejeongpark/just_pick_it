@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
 Move to Goal
-- 1단계: Nav2 NavigateToPose로 목표 근처까지 이동
+- 1단계: MoveCommand waypoint는 Nav2 NavigateThroughPoses로 목표 근처까지 이동
 - 2단계: precision_approach_distance 이내 도달 시 Nav2 취소 후
          cmd_vel 직접 제어로 저속 정밀 접근
 - 3단계: TF 기반 최종 yaw 보정 후 완료 보고
 
-task_manager가 move_to_goal() 메서드를 직접 호출하는 방식으로 사용.
+state_machine이 move_through_goals()를 blocking 방식으로 호출한다.
+move_to_goal()은 단일 목표 수동 확인용 legacy 경로로 남겨둔다.
 """
 
 import math
 import time
 import threading
+from typing import Callable
 
 import rclpy
 from action_msgs.msg import GoalStatus
@@ -19,8 +21,8 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.time import Time
 
-from geometry_msgs.msg import Twist
-from nav2_msgs.action import NavigateToPose
+from geometry_msgs.msg import PoseStamped, Twist
+from nav2_msgs.action import NavigateThroughPoses, NavigateToPose
 from tf2_ros import Buffer, TransformListener
 
 
@@ -111,6 +113,9 @@ class MoveToGoal(Node):
         self.create_timer(0.05, self._update_pose)
 
         self._nav_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
+        self._nav_through_client = ActionClient(
+            self, NavigateThroughPoses, "navigate_through_poses"
+        )
         self._cmd_pub = self.create_publisher(Twist, "cmd_vel", 10)
 
         self.get_logger().info("MoveToGoal ready.")
@@ -160,6 +165,43 @@ class MoveToGoal(Node):
         self._rotate_to_stop_pose(final_mode)
 
         self.get_logger().info("move_to_goal: 위치 도착")
+        return True
+
+    def move_through_goals(
+        self,
+        points: list[tuple[float, float]],
+        final_mode: str = STOP_NEAREST_90,
+        progress_callback: Callable[[int], None] | None = None,
+    ) -> bool:
+        """MoveCommand waypoint를 Nav2 NavigateThroughPoses 한 번으로 통과한다."""
+        if not points:
+            self.get_logger().error("move_through_goals: empty waypoint list")
+            return False
+
+        self.get_logger().info(
+            "move_through_goals: waypoints="
+            + str([(round(x, 3), round(y, 3)) for x, y in points])
+            + f" final_mode={final_mode}"
+        )
+
+        tx, ty = points[-1]
+        nav_result = self._nav2_navigate_through(
+            points, self._prec_dist, progress_callback
+        )
+        if not nav_result:
+            return False
+
+        if nav_result == NAV_ACTION_SUCCEEDED and self._is_close_enough_to_arrive(tx, ty):
+            self.get_logger().info(
+                "move_through_goals: Nav2 근접 도착 인정, 정밀접근 생략"
+            )
+        elif not self._precision_approach(tx, ty):
+            return False
+
+        self._rotate_to_stop_pose(final_mode)
+        self._publish_waypoint_progress(progress_callback, len(points) - 1)
+
+        self.get_logger().info("move_through_goals: 위치 도착")
         return True
 
     def cancel_navigation(self):
@@ -249,18 +291,9 @@ class MoveToGoal(Node):
 
             if dist <= reach_dist:
                 # 정밀 접근 전환: Nav2 취소
-                cancel_future = goal_handle.cancel_goal_async()
-                cancel_deadline = time.time() + 3.0
-                while not cancel_future.done():
-                    if time.time() > cancel_deadline:
-                        break
-                    time.sleep(0.05)
-                self._stop_robot()
-                self.get_logger().info(
-                    f"Nav2 phase done — dist={dist:.3f}m, switching to precision"
+                return self._cancel_for_direct_reach(
+                    goal_handle, result_future, dist, "Nav2 phase"
                 )
-                self._clear_active_goal(goal_handle)
-                return NAV_DIRECT_REACH
 
             if result_future.done():
                 return self._handle_nav2_result(result_future, goal_handle, dist)
@@ -272,6 +305,105 @@ class MoveToGoal(Node):
         self._stop_robot()
         self._clear_active_goal(goal_handle)
         self.get_logger().warn("Nav2 navigation timeout")
+        return False
+
+    def _nav2_navigate_through(
+        self,
+        points: list[tuple[float, float]],
+        reach_dist: float,
+        progress_callback: Callable[[int], None] | None = None,
+    ):
+        if not self._nav_through_client.wait_for_server(timeout_sec=5.0):
+            self.get_logger().error("navigate_through_poses action server unavailable")
+            return False
+        if self._is_cancel_requested():
+            return False
+
+        goal = NavigateThroughPoses.Goal()
+        goal.poses = self._make_path_poses(points)
+
+        send_future = self._nav_through_client.send_goal_async(goal)
+        send_deadline = time.time() + 5.0
+        while not send_future.done():
+            if self._is_cancel_requested():
+                self._stop_robot()
+                return False
+            if time.time() > send_deadline:
+                self.get_logger().error("Nav2 through-poses goal send timeout")
+                return False
+            time.sleep(0.05)
+
+        try:
+            goal_handle = send_future.result()
+        except Exception as exc:
+            self.get_logger().error(f"Nav2 through-poses goal send failed: {exc}")
+            return False
+
+        if not goal_handle or not goal_handle.accepted:
+            self.get_logger().error("Nav2 through-poses goal rejected")
+            return False
+        with self._lock:
+            self._active_goal_handle = goal_handle
+
+        tx, ty = points[-1]
+        result_future = goal_handle.get_result_async()
+        self.get_logger().info(
+            f"Nav2 through-poses goal accepted — waypoints={len(points)}, "
+            f"final=({tx:.3f},{ty:.3f}), reach_dist={reach_dist:.3f}m"
+        )
+
+        next_waypoint_index = 0
+        deadline = time.time() + self._nav_timeout
+        while time.time() < deadline:
+            if self._is_cancel_requested():
+                goal_handle.cancel_goal_async()
+                self._stop_robot()
+                self._clear_active_goal(goal_handle)
+                return False
+
+            next_waypoint_index = self._advance_waypoint_progress(
+                points, next_waypoint_index, progress_callback
+            )
+            dist = self._distance_to_goal(tx, ty)
+            if dist <= reach_dist:
+                if next_waypoint_index < len(points) - 1:
+                    self.get_logger().error(
+                        "Traffic waypoint path violation: final target reached "
+                        f"before waypoint index {next_waypoint_index} "
+                        f"({points[next_waypoint_index][0]:.3f}, "
+                        f"{points[next_waypoint_index][1]:.3f}) was passed"
+                    )
+                    self._cancel_nav2_goal(
+                        goal_handle,
+                        result_future,
+                        "Nav2 through-poses path violation",
+                    )
+                    return False
+                return self._cancel_for_direct_reach(
+                    goal_handle, result_future, dist, "Nav2 through-poses phase"
+                )
+
+            if result_future.done():
+                nav_result = self._handle_nav2_result(result_future, goal_handle, dist)
+                if (
+                    nav_result == NAV_ACTION_SUCCEEDED
+                    and next_waypoint_index < len(points) - 1
+                ):
+                    self.get_logger().error(
+                        "Traffic waypoint path violation: Nav2 succeeded before "
+                        f"waypoint index {next_waypoint_index} "
+                        f"({points[next_waypoint_index][0]:.3f}, "
+                        f"{points[next_waypoint_index][1]:.3f}) was passed"
+                    )
+                    return False
+                return nav_result
+
+            time.sleep(0.1)
+
+        goal_handle.cancel_goal_async()
+        self._stop_robot()
+        self._clear_active_goal(goal_handle)
+        self.get_logger().warn("Nav2 through-poses navigation timeout")
         return False
 
     def _handle_nav2_result(self, result_future, goal_handle, dist: float):
@@ -305,14 +437,123 @@ class MoveToGoal(Node):
         self.get_logger().error(f"Nav2 result failed — {detail}")
         return False
 
+    def _cancel_nav2_goal(self, goal_handle, result_future, label: str) -> bool:
+        cancel_future = goal_handle.cancel_goal_async()
+        cancel_deadline = time.time() + 3.0
+        while not cancel_future.done():
+            if self._is_cancel_requested():
+                self._stop_robot()
+                self._clear_active_goal(goal_handle)
+                return False
+            if time.time() > cancel_deadline:
+                self.get_logger().warn(f"{label}: cancel response timeout")
+                break
+            time.sleep(0.05)
+
+        result_deadline = time.time() + 3.0
+        while not result_future.done():
+            if self._is_cancel_requested():
+                self._stop_robot()
+                self._clear_active_goal(goal_handle)
+                return False
+            if time.time() > result_deadline:
+                self.get_logger().warn(f"{label}: cancel result timeout")
+                break
+            time.sleep(0.05)
+
+        if result_future.done():
+            try:
+                response = result_future.result()
+                status_name = goal_status_name(response.status)
+                self.get_logger().info(f"{label}: cancel settled with status={status_name}")
+            except Exception as exc:
+                self.get_logger().warn(f"{label}: cancel result read failed: {exc}")
+
+        self._stop_robot()
+        self._clear_active_goal(goal_handle)
+        return True
+
+    def _cancel_for_direct_reach(self, goal_handle, result_future, dist: float, label: str):
+        """정밀 접근 전환을 위해 Nav2 goal을 취소하고 action 결과 정리까지 기다린다."""
+        if not self._cancel_nav2_goal(goal_handle, result_future, label):
+            return False
+        self.get_logger().info(
+            f"{label} done — dist={dist:.3f}m, switching to precision"
+        )
+        return NAV_DIRECT_REACH
+
     def _clear_active_goal(self, goal_handle) -> None:
         with self._lock:
             if self._active_goal_handle is goal_handle:
                 self._active_goal_handle = None
 
+    def _make_pose(self, x: float, y: float, yaw: float) -> PoseStamped:
+        pose = PoseStamped()
+        pose.header.frame_id = "map"
+        pose.header.stamp = self.get_clock().now().to_msg()
+        pose.pose.position.x = x
+        pose.pose.position.y = y
+        pose.pose.orientation.z = math.sin(yaw / 2.0)
+        pose.pose.orientation.w = math.cos(yaw / 2.0)
+        return pose
+
+    def _make_path_poses(self, points: list[tuple[float, float]]) -> list[PoseStamped]:
+        with self._lock:
+            prev_x, prev_y = self._cur_x, self._cur_y
+
+        poses = []
+        for x, y in points:
+            yaw = math.atan2(y - prev_y, x - prev_x)
+            poses.append(self._make_pose(x, y, yaw))
+            prev_x, prev_y = x, y
+        return poses
+
     def _distance_to_goal(self, tx: float, ty: float) -> float:
         with self._lock:
             return math.hypot(tx - self._cur_x, ty - self._cur_y)
+
+    def _advance_waypoint_progress(
+        self,
+        points: list[tuple[float, float]],
+        next_index: int,
+        progress_callback: Callable[[int], None] | None,
+    ) -> int:
+        """TrafficManager가 준 waypoint를 순서대로 실제 통과했는지 확인한다."""
+        last_intermediate_index = len(points) - 2
+        if next_index > last_intermediate_index:
+            return next_index
+
+        with self._lock:
+            cur_x, cur_y = self._cur_x, self._cur_y
+
+        while next_index <= last_intermediate_index:
+            wx, wy = points[next_index]
+            dist = math.hypot(wx - cur_x, wy - cur_y)
+            if dist > self._waypoint_reach:
+                break
+
+            self.get_logger().info(
+                f"Traffic waypoint passed — index={next_index}, "
+                f"target=({wx:.3f},{wy:.3f}), dist={dist:.3f}m"
+            )
+            self._publish_waypoint_progress(progress_callback, next_index)
+            next_index += 1
+
+        return next_index
+
+    def _publish_waypoint_progress(
+        self,
+        progress_callback: Callable[[int], None] | None,
+        waypoint_index: int,
+    ) -> None:
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(waypoint_index)
+        except Exception as exc:
+            self.get_logger().warn(
+                f"MoveCommand waypoint feedback publish failed: {exc}"
+            )
 
     def _is_close_enough_to_arrive(self, tx: float, ty: float) -> bool:
         dist = self._distance_to_goal(tx, ty)
@@ -356,8 +597,10 @@ class MoveToGoal(Node):
                     -self._precision_max_angular,
                     min(self._precision_max_angular, angle_err),
                 )
-                if abs(angle_err) <= self._precision_heading_gate:
-                    heading_scale = max(0.0, math.cos(angle_err))
+                heading_scale = math.cos(angle_err)
+                if heading_scale > 0.0:
+                    if abs(angle_err) > self._precision_heading_gate:
+                        heading_scale = max(0.2, heading_scale)
                     twist.linear.x = min(
                         KP * dist * heading_scale,
                         self._precision_max_linear,
