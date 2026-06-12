@@ -112,14 +112,26 @@ def main():
             else:
                 for i, mid in enumerate(ids.flatten()):
                     mid = int(mid)
-                    ok, rvec, tvec = cv2.solvePnP(
-                        obj, corners[i][0].astype(np.float64), K, dist,
-                        flags=cv2.SOLVEPNP_IPPE_SQUARE,
+                    img_pts = corners[i][0].astype(np.float64)
+                    n, rvecs, tvecs, errs = cv2.solvePnPGeneric(
+                        obj, img_pts, K, dist, flags=cv2.SOLVEPNP_IPPE_SQUARE,
                     )
-                    if not ok:
+                    if n < 1:
                         continue
+                    # ±π 평면 모호성: 두 해 모두 psi 계산 후 재투영오차 작은 쪽 채택(안정화)
+                    cand = []
+                    for si in range(n):
+                        Rs, _ = cv2.Rodrigues(rvecs[si])
+                        psi_s = math.atan2(float(Rs[0, 2]), -float(Rs[2, 2]))
+                        e = float(errs[si][0]) if errs is not None else 0.0
+                        cand.append((e, psi_s, rvecs[si], tvecs[si]))
+                    cand.sort(key=lambda c: c[0])
+                    _, _, rvec, tvec = cand[0]
                     tx, ty, tz = (float(v) for v in tvec.flatten())
                     rx, ry, rz = (float(v) for v in rvec.flatten())
+                    amb = "  ".join(
+                        f"psi={math.degrees(c[1]):+.1f}°(e={c[0]:.2f})" for c in cand
+                    )
                     # 픽셀 중심 대비 마커 중심 위치(부호 직관 확인용)
                     cx_px = float(corners[i][0][:, 0].mean())
                     side = "왼쪽" if cx_px < CAM_W / 2 else "오른쪽"
@@ -127,6 +139,7 @@ def main():
                         f"id={mid} | tvec[x,y,z]=({tx:+.3f},{ty:+.3f},{tz:+.3f}) "
                         f"rvec=({rx:+.2f},{ry:+.2f},{rz:+.2f}) "
                         f"| 마커 화면 {side}(cx={cx_px:.0f})"
+                        f"\n      [두 해 psi/재투영오차] {amb}  (채택=오차작은쪽)"
                     )
                     if mid in MARKER_WORLD:
                         mwx, mwy = MARKER_WORLD[mid]
