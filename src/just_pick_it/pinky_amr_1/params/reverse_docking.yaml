@@ -37,29 +37,24 @@
     acquire_rotate_speed: 0.3     # 마커 탐색 제자리 회전 (rad/s)
     marker_lat_kp: 0.6            # coarse 횡 게인 (tvec[0] 기반) — 진동 완화로 하향
     marker_yaw_kp: 0.6            # coarse yaw 게인 (rvec[1] 기반)
-    # 마커 장착 미세 기울기 보정(상수 bias). yaw정렬이 로봇을 psi=offset 으로 향하게 하고,
-    # 그 헤딩이 측정 tx 에도 반영돼 측정·yaw 가 같은 offset 하나로 묶인다.
-    # 실차 bracket(clean 상태): 0 -> 과대측정/법선 지나침, -4 -> 과소측정/도달전 정렬+좌틀어짐.
-    # 참값은 그 사이 -2.0. 미세조정: 지나치면 0 쪽(-1.5), 못 미치면 더 음수(-2.5).
-    marker_yaw_offset_deg: -2.0
+    # 어제 working 상태 복구: offset 0(미사용=raw psi). yaw정렬 psi->0, 측정 raw psi.
+    # 정밀(법선 오프셋) 보정은 psi 노이즈 우회하는 방법 B(odom)로 별도 구현 예정.
+    marker_yaw_offset_deg: 0.0
 
     # 시퀀스1: 마커로 법선 횡오차 1회 측정 → 부드러운 후진 arc 로 진입(odom 으로 종료판단).
     arc_omega: 0.25            # arc 회전율(rad/s). 작을수록 큰 반경(회전 적고 후진 많음).
     arc_lat_tol_m: 0.005       # odom 횡이동 종료 허용오차(m)
     arc_timeout_sec: 20.0
     measure_frames: 10         # 법선 횡오차 1회 측정 평균 프레임수
-    align_conv_tol_m: 0.01     # Δx<이면 정렬됨으로 종료. 측정 해상도 ~1cm 라 그 근처로.
-                               # 판정은 strict < 라 정확히 0.01 이면 2차 돎. 헛2차 재발 시 0.011 로
+    align_conv_tol_m: 0.015    # 어제 working 값으로 복구
     first_pass_gain: 1.0       # 1차 보정 이동 비율 (Δx 전량 보정으로 복원)
     arc_refine_gain: 0.3       # 2차+ 보정 이동 비율 (과보정으로 법선 지나침 방지)
     arc_max_travel_m: 0.06     # arc 1회 최대 횡이동(벽 돌진 방지 캡)
     # 시퀀스2 라인 횡조향 사용 여부. false=직진 후진(마커는 깊이 정지만). 라인검출이
     # 이 거리에서 불안정해 기본 off. 라인 품질 개선되면 true.
     use_lane_steering: false
-    # [측정→arc→재정렬] 반복 횟수. 1 로: 1차는 oblique 뷰라 psi 안정해 정확하지만, 1차가
-    # 법선에 들여놓으면(fronto-parallel) 2차 측정 psi 가 ±π 모호성으로 튀어 dx 가 완전히
-    # 어긋나 좋은 1차 위치를 망침. 그래서 신뢰 가능한 1차만 하고 2차 측정 제거.
-    align_passes: 1
+    # [측정→arc→재정렬] 반복 횟수. 어제 working 값 2 로 복구.
+    align_passes: 2
     yaw_align_tol_rad: 0.04    # ≈2.3°. 0.01 은 psi 노이즈(±4°)보다 작아 영영 수렴 못하고 flail->마커상실->측정실패. 노이즈 위로 복원
     yaw_hold_kp: 1.0
     # 마커 상실/재정렬 시 제자리 회전 재중심. kp=중심 정렬 게인, tol=중앙 허용 bearing(rad).
