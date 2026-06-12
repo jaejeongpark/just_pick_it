@@ -65,7 +65,10 @@ class MoveToGoal(Node):
             emergency_latch = EmergencyLatch()
         self._emergency = emergency_latch
 
-        self.declare_parameter("precision_approach_distance", 0.3)
+        # 최종 목적지 이 거리 전에 Nav2 를 끄고 cmd_vel 정밀접근(직진)으로 마무리한다.
+        # 이 구간은 costmap/collision 회피가 없는 'blind' 구간이라, 길면(0.3) 그 사이 벽/
+        # 진열대에 박을 수 있다. 짧게(0.15) 두어 Nav2 가 회피·회전을 최대한 담당하게 한다.
+        self.declare_parameter("precision_approach_distance", 0.15)
         # 중간 경유지 도달 판정 거리. 이 거리 안에 들면 다음 경유지로 넘어간다.
         # 작을수록 경유지에 더 근접한 뒤 꺾는다(최종 목적지는 precision_approach_distance 사용).
         self.declare_parameter("waypoint_reach_distance", 0.12)
