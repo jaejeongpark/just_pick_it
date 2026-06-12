@@ -27,8 +27,6 @@ TASK_PHASE_STATES = {
     'UNLOAD':           ['UNLOADING'],
     'DISPLAY_SCAN':     ['SCANNING'],
     'DISPLAY_PLACE':    ['PLACING'],
-    # 임시 테스트용
-    'SORTING_ONLY':     ['SORTING'], #나중에 삭제
 }
 
 
@@ -305,19 +303,29 @@ class CobotStateManager(Node):
         반환값: (success, detected_quantity)
         """
         if phase == 'SORTING':
-            return self._controller.run_sorting(request)
+            # [구현 필요] Vision Server에서 grasp_trajectory 수신 후 교체
+            grasp_trajectory: list[list[float]] = []
+            return self._controller.run_sorting(grasp_trajectory)
 
         elif phase == 'LOADING':
-            return self._controller.run_loading(request)
+            # [구현 필요] Vision Server에서 pick/place trajectory 수신 후 교체
+            pick_trajectory:  list[list[float]] = []
+            place_trajectory: list[list[float]] = []
+            return self._controller.run_loading(pick_trajectory, place_trajectory)
 
         elif phase == 'INSPECTING':
-            return self._controller.run_inspecting(request)
+            # [구현 필요] Vision Server에서 inspect_trajectory 수신 후 교체
+            inspect_trajectory: list[list[float]] = []
+            return self._controller.run_inspecting(inspect_trajectory)
 
         elif phase == 'UNLOADING':
-            return self._controller.run_unloading(request)
+            # [구현 필요] Vision Server에서 pick/place trajectory 수신 후 교체
+            pick_trajectory:  list[list[float]] = []
+            place_trajectory: list[list[float]] = []
+            return self._controller.run_unloading(pick_trajectory, place_trajectory)
 
         elif phase == 'SCANNING':
-            # [확정 필요] VisionScanService 인터페이스 타입 확정 후 아래 주석 해제
+            # [구현 필요] VisionScanService 인터페이스 확정 후 주석 해제
             #
             # req = VisionScanService.Request()
             # req.task_id          = request.task_id
@@ -331,7 +339,10 @@ class CobotStateManager(Node):
             return True, 0
 
         elif phase == 'PLACING':
-            success, qty = self._controller.run_placing(self._scan_result, request)
+            # [구현 필요] Vision Server에서 pick/place trajectory 수신 후 교체
+            pick_trajectory:  list[list[float]] = []
+            place_trajectory: list[list[float]] = []
+            success, qty = self._controller.run_placing(pick_trajectory, place_trajectory)
             if success:
                 self._scan_result = None
             return success, qty
