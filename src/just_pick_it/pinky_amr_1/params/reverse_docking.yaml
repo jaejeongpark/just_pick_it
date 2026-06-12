@@ -37,11 +37,11 @@
     acquire_rotate_speed: 0.3     # 마커 탐색 제자리 회전 (rad/s)
     marker_lat_kp: 0.6            # coarse 횡 게인 (tvec[0] 기반) — 진동 완화로 하향
     marker_yaw_kp: 0.6            # coarse yaw 게인 (rvec[1] 기반)
-    # 마커 장착 미세 기울기 보정(상수 bias). yaw정렬·측정 모두 psi - 이 offset 을 법선 기준으로.
-    # 측정 핵심: psi 편향(정렬자세 raw psi 약 -4°)을 상쇄해 dx 의 tz·sin(psi) 과대항 제거.
-    # 0 이면 그 편향이 남아 Δx 과대→법선 지나침(실차 확인). -4 로 복원해 측정 정확화.
-    # 측정은 -4 로 안정. 후진 yaw 가 남으면 그건 yaw_align 쪽에서 별도로 잡는다.
-    marker_yaw_offset_deg: -4.0
+    # 마커 장착 미세 기울기 보정(상수 bias). yaw정렬이 로봇을 psi=offset 으로 향하게 하고,
+    # 그 헤딩이 측정 tx 에도 반영돼 측정·yaw 가 같은 offset 하나로 묶인다.
+    # 실차 bracket(clean 상태): 0 -> 과대측정/법선 지나침, -4 -> 과소측정/도달전 정렬+좌틀어짐.
+    # 참값은 그 사이 -2.0. 미세조정: 지나치면 0 쪽(-1.5), 못 미치면 더 음수(-2.5).
+    marker_yaw_offset_deg: -2.0
 
     # 시퀀스1: 마커로 법선 횡오차 1회 측정 → 부드러운 후진 arc 로 진입(odom 으로 종료판단).
     arc_omega: 0.25            # arc 회전율(rad/s). 작을수록 큰 반경(회전 적고 후진 많음).
