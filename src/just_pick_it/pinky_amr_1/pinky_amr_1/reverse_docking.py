@@ -732,10 +732,10 @@ class ReverseDocking(Node):
         tx = sum(txs) / len(txs)
         tz = sum(tzs) / len(tzs)
         psi = math.atan2(sum(nxs) / len(nxs), -sum(nzs) / len(nzs))
-        # solvePnP tvec 이 실측보다 짧게 나오므로 lateral_scale(측정거리 기준 ~1.48)을 곱해
-        # 실제 거리(m)로. 깊이정지(원거리)용 depth_scale 과 분리(측정·정지 거리가 달라 비율 다름).
-        dx = (-(tx * math.cos(psi) + tz * math.sin(psi)) * self._lateral_scale
-              + self._marker_lat_offset)
+        # 횡 측정은 tx 만 사용(× lateral_scale). tz·sin(psi) 디커플링 항은 제거했다:
+        # 로그상 on-line(tx≈0)인데도 헤딩 잔차(psi≈-3°)가 tz·sin 으로 +1.5cm 가짜 횡오차를
+        # 주입해(먼거리일수록 증폭) 과진입을 일으켰다. tx 만 쓰면 on-line 에서 dx≈0 으로 수렴.
+        dx = -tx * self._lateral_scale + self._marker_lat_offset
         self.get_logger().info(
             f"Measure: Δx={dx:+.3f}m (tx={tx:.3f} tz={tz:.3f} "
             f"psi={math.degrees(psi):+.1f}deg, lat_scale={self._lateral_scale}, "
