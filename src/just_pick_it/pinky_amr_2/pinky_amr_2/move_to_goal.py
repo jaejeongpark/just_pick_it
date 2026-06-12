@@ -61,6 +61,9 @@ GOAL_STATUS_NAMES = {
     GoalStatus.STATUS_ABORTED: "ABORTED",
 }
 
+NAV_DIRECT_REACH = "direct_reach"
+NAV_ACTION_SUCCEEDED = "action_succeeded"
+
 
 def goal_status_name(status: int) -> str:
     return GOAL_STATUS_NAMES.get(status, f"UNKNOWN({status})")
@@ -75,12 +78,22 @@ class MoveToGoal(Node):
         self.declare_parameter("xy_goal_tolerance", 0.01)
         self.declare_parameter("yaw_goal_tolerance", 0.05)
         self.declare_parameter("nav_timeout_sec", 120.0)
+        self.declare_parameter("arrival_success_tolerance", 0.10)
+        self.declare_parameter("precision_max_linear_vel", 0.10)
+        self.declare_parameter("precision_max_angular_vel", 0.6)
+        self.declare_parameter("precision_heading_deadband_distance", 0.03)
 
         self._prec_dist = self.get_parameter("precision_approach_distance").value
         self._waypoint_reach = self.get_parameter("waypoint_reach_distance").value
         self._xy_tol = self.get_parameter("xy_goal_tolerance").value
         self._yaw_tol = self.get_parameter("yaw_goal_tolerance").value
         self._nav_timeout = self.get_parameter("nav_timeout_sec").value
+        self._arrival_success_tol = self.get_parameter("arrival_success_tolerance").value
+        self._precision_max_linear = self.get_parameter("precision_max_linear_vel").value
+        self._precision_max_angular = self.get_parameter("precision_max_angular_vel").value
+        self._precision_heading_deadband = self.get_parameter(
+            "precision_heading_deadband_distance"
+        ).value
 
         self._lock = threading.Lock()
         self._cur_x = 0.0
@@ -125,14 +138,17 @@ class MoveToGoal(Node):
             cur_x, cur_y = self._cur_x, self._cur_y
         bearing = math.atan2(y - cur_y, x - cur_x)
 
-        if not self._nav2_navigate(x, y, bearing, reach_dist):
+        nav_result = self._nav2_navigate(x, y, bearing, reach_dist)
+        if not nav_result:
             return False
 
         if not final:
             self.get_logger().info("move_to_goal: 경유지 통과")
             return True
 
-        if not self._precision_approach(x, y):
+        if nav_result == NAV_ACTION_SUCCEEDED and self._is_close_enough_to_arrive(x, y):
+            self.get_logger().info("move_to_goal: Nav2 근접 도착 인정, 정밀접근 생략")
+        elif not self._precision_approach(x, y):
             return False
 
         # 최종 목적지(goal zone)에서만 task_type 별 정지 자세로 회전한다.
@@ -167,7 +183,7 @@ class MoveToGoal(Node):
     # 내부 단계
     # ------------------------------------------------------------------ #
 
-    def _nav2_navigate(self, x: float, y: float, yaw: float, reach_dist: float) -> bool:
+    def _nav2_navigate(self, x: float, y: float, yaw: float, reach_dist: float):
         if not self._nav_client.wait_for_server(timeout_sec=5.0):
             self.get_logger().error("navigate_to_pose action server unavailable")
             return False
@@ -240,12 +256,10 @@ class MoveToGoal(Node):
                     f"Nav2 phase done — dist={dist:.3f}m, switching to precision"
                 )
                 self._clear_active_goal(goal_handle)
-                return True
+                return NAV_DIRECT_REACH
 
             if result_future.done():
-                if self._handle_nav2_result(result_future, goal_handle, dist):
-                    return True
-                return False
+                return self._handle_nav2_result(result_future, goal_handle, dist)
 
             time.sleep(0.1)
 
@@ -256,7 +270,7 @@ class MoveToGoal(Node):
         self.get_logger().warn("Nav2 navigation timeout")
         return False
 
-    def _handle_nav2_result(self, result_future, goal_handle, dist: float) -> bool:
+    def _handle_nav2_result(self, result_future, goal_handle, dist: float):
         """Nav2 action result를 state_machine이 판단할 수 있는 bool로 변환한다."""
         try:
             response = result_future.result()
@@ -277,7 +291,7 @@ class MoveToGoal(Node):
 
         if status == GoalStatus.STATUS_SUCCEEDED:
             self.get_logger().info(f"Nav2 result SUCCEEDED — dist={dist:.3f}m")
-            return True
+            return NAV_ACTION_SUCCEEDED
 
         detail = f"status={status_name}, dist={dist:.3f}m"
         if error_code is not None:
@@ -291,6 +305,24 @@ class MoveToGoal(Node):
         with self._lock:
             if self._active_goal_handle is goal_handle:
                 self._active_goal_handle = None
+
+    def _distance_to_goal(self, tx: float, ty: float) -> float:
+        with self._lock:
+            return math.hypot(tx - self._cur_x, ty - self._cur_y)
+
+    def _is_close_enough_to_arrive(self, tx: float, ty: float) -> bool:
+        dist = self._distance_to_goal(tx, ty)
+        if dist <= self._arrival_success_tol:
+            self.get_logger().warn(
+                f"Nav2 대체 goal 도착: 원 목표까지 {dist:.3f}m "
+                f"<= 성공허용 {self._arrival_success_tol:.3f}m"
+            )
+            return True
+        self.get_logger().warn(
+            f"Nav2는 성공했지만 원 목표까지 {dist:.3f}m "
+            f"> 성공허용 {self._arrival_success_tol:.3f}m"
+        )
+        return False
 
     def _precision_approach(self, tx: float, ty: float) -> bool:
         """저속 직진으로 목표 xy 오차 이하까지 접근."""
@@ -312,18 +344,32 @@ class MoveToGoal(Node):
                 self._stop_robot()
                 return True
 
-            # 현재 heading과 목표 방향의 각도 차이로 조향
-            target_heading = math.atan2(dy, dx)
-            angle_err = normalize_angle(target_heading - cur_yaw)
-
             twist = Twist()
-            twist.linear.x = min(KP * dist, 0.12)
-            twist.angular.z = 1.0 * angle_err
+            twist.linear.x = min(KP * dist, self._precision_max_linear)
+            if dist > self._precision_heading_deadband:
+                target_heading = math.atan2(dy, dx)
+                angle_err = normalize_angle(target_heading - cur_yaw)
+                twist.angular.z = max(
+                    -self._precision_max_angular,
+                    min(self._precision_max_angular, angle_err),
+                )
+            else:
+                twist.angular.z = 0.0
             self._cmd_pub.publish(twist)
             time.sleep(0.05)
 
         self._stop_robot()
-        self.get_logger().warn("Precision approach timeout")
+        dist = self._distance_to_goal(tx, ty)
+        if dist <= self._arrival_success_tol:
+            self.get_logger().warn(
+                f"Precision approach: {self._xy_tol}m 미달이나 {dist:.3f}m "
+                f"<= 성공허용 {self._arrival_success_tol:.3f}m → 도착 인정"
+            )
+            return True
+        self.get_logger().warn(
+            f"Precision approach timeout (dist={dist:.3f}m > 성공허용 "
+            f"{self._arrival_success_tol:.3f}m)"
+        )
         return False
 
     def _yaw_correction(self, target_yaw: float) -> bool:

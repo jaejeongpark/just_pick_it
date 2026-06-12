@@ -10,5 +10,14 @@
     xy_goal_tolerance: 0.01
     yaw_goal_tolerance: 0.05
 
+    # Nav2가 planner tolerance 안의 대체 goal에 도착했을 때 원 목표까지 이 거리 안이면
+    # 원 좌표로 직접 밀고 들어가지 않고 도착으로 인정한다.
+    arrival_success_tolerance: 0.10
+
+    # 직접 정밀 접근 단계의 속도/조향 제한. 목표 근처에서 heading 노이즈로 버벅이는 것을 줄인다.
+    precision_max_linear_vel: 0.10
+    precision_max_angular_vel: 0.6
+    precision_heading_deadband_distance: 0.03
+
     # 한 waypoint에서 Nav2 단계가 이 시간 안에 끝나지 않으면 실패 처리한다.
     nav_timeout_sec: 120.0
