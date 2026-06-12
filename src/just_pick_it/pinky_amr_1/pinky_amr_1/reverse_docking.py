@@ -642,16 +642,21 @@ class ReverseDocking(Node):
                 self.get_logger().info("YawAlign: 마커 미검출 → 현 정렬 유지")
                 return True
             psi = math.atan2(sum(nxs) / len(nxs), -sum(nzs) / len(nzs))
-            if abs(psi) < self._yaw_align_tol:
+            # 헤딩 잔차 보정: 법선 정면 목표를 psi=marker_yaw_offset 으로 둔다(yaw 정렬에만
+            # 적용, 측정(_measure_lateral_offset)은 raw psi 그대로 → depth 커플링 재발 없음).
+            psi_err = psi - self._marker_yaw_offset
+            if abs(psi_err) < self._yaw_align_tol:
                 self._stop()
-                self.get_logger().info(f"YawAlign: 완료 (psi={math.degrees(psi):+.1f}deg)")
+                self.get_logger().info(
+                    f"YawAlign: 완료 (psi={math.degrees(psi):+.1f}deg, err={math.degrees(psi_err):+.1f})"
+                )
                 return True
-            if prev_abs is not None and abs(psi) > prev_abs + 0.03:
+            if prev_abs is not None and abs(psi_err) > prev_abs + 0.03:
                 omega_sign = -omega_sign
                 self.get_logger().warn("YawAlign: 방향 반대 감지 → 부호 반전")
-            prev_abs = abs(psi)
+            prev_abs = abs(psi_err)
             twist = Twist()
-            twist.angular.z = self._clamp(omega_sign * self._recenter_kp * psi)
+            twist.angular.z = self._clamp(omega_sign * self._recenter_kp * psi_err)
             self._cmd_pub.publish(twist)
             if time.time() - last_log > 0.5:
                 self.get_logger().info(f"YawAlign: psi={math.degrees(psi):+.1f}deg")

@@ -37,9 +37,9 @@
     acquire_rotate_speed: 0.3     # 마커 탐색 제자리 회전 (rad/s)
     marker_lat_kp: 0.6            # coarse 횡 게인 (tvec[0] 기반) — 진동 완화로 하향
     marker_yaw_kp: 0.6            # coarse yaw 게인 (rvec[1] 기반)
-    # 정적확인: 정렬위치에서 rvec[1]≈176°(법선기준 -4°). 마커 장착 미세 기울기 보정용.
-    # +면 법선에서 더 회전(rvec[1] 목표를 +방향). 도크가 반대로 틀어지면 부호 반전.
-    marker_yaw_offset_deg: 4.0
+    # yaw정렬 헤딩 목표를 psi=이 값으로 보정(측정엔 영향 없음). 정렬이 좌1° 잔차라 +1.0.
+    # 후진이 더 좌로 틀어지면 부호 반전(-1.0), 우로 지나치면 줄이기.
+    marker_yaw_offset_deg: 1.0
 
     # 시퀀스1: 마커로 법선 횡오차 1회 측정 → 부드러운 후진 arc 로 진입(odom 으로 종료판단).
     arc_omega: 0.25            # arc 회전율(rad/s). 작을수록 큰 반경(회전 적고 후진 많음).
