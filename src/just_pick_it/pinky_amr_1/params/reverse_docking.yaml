@@ -46,8 +46,9 @@
     arc_lat_tol_m: 0.005       # odom 횡이동 종료 허용오차(m)
     arc_timeout_sec: 20.0
     measure_frames: 10         # 법선 횡오차 1회 측정 평균 프레임수
-    align_conv_tol_m: 0.02     # Δx<이면 정렬됨으로 보고 arc 생략·반복종료(phantom 추종 방지)
-    arc_refine_gain: 0.5       # 2차+ 보정은 Δx의 이 비율만 이동(과보정으로 법선 지나침 방지)
+    align_conv_tol_m: 0.015    # Δx<이면 정렬됨으로 종료. 보수적으로 낮춤(off인데 건너뛰는것 방지)
+    first_pass_gain: 0.8       # 1차 보정 이동 비율
+    arc_refine_gain: 0.3       # 2차+ 보정 이동 비율 (과보정으로 법선 지나침 방지)
     arc_max_travel_m: 0.06     # arc 1회 최대 횡이동(벽 돌진 방지 캡)
     # 시퀀스2 라인 횡조향 사용 여부. false=직진 후진(마커는 깊이 정지만). 라인검출이
     # 이 거리에서 불안정해 기본 off. 라인 품질 개선되면 true.

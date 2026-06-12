@@ -155,8 +155,10 @@ class ReverseDocking(Node):
         # 측정 Δx 가 이보다 작으면 이미 정렬된 것으로 보고 arc 생략·반복 종료(노이즈/phantom
         # 추종 방지). rvec 잔여 yaw 로 인한 측정 phantom 바닥(~2~3cm)보다 약간 크게.
         self.declare_parameter("align_conv_tol_m", 0.03)
-        # 2차+ 정렬 패스에서 Δx 의 이 비율만큼만 이동(과보정으로 법선 지나침 방지). 1차는 전체.
-        self.declare_parameter("arc_refine_gain", 0.5)
+        # 정렬 보정 게인: 1차는 first_pass_gain, 2차+ 는 arc_refine_gain 비율만 이동
+        # (과보정으로 법선 지나침 방지).
+        self.declare_parameter("first_pass_gain", 0.8)
+        self.declare_parameter("arc_refine_gain", 0.3)
         # arc 1회 최대 횡이동(m). phantom 으로 큰 Δx 가 나와도 벽으로 돌진 못하게 캡.
         self.declare_parameter("arc_max_travel_m", 0.06)
         # 시퀀스2 라인검출 횡조향 사용 여부. 기본 off → arc+recenter 정렬 믿고 직진 후진,
@@ -243,6 +245,7 @@ class ReverseDocking(Node):
         self._use_lane      = bool(self.get_parameter("use_lane_steering").value)
         self._align_passes  = int(self.get_parameter("align_passes").value)
         self._align_conv_tol = self.get_parameter("align_conv_tol_m").value
+        self._first_pass_gain = self.get_parameter("first_pass_gain").value
         self._arc_refine_gain = self.get_parameter("arc_refine_gain").value
         self._arc_max_travel = self.get_parameter("arc_max_travel_m").value
         self._yaw_align_tol = self.get_parameter("yaw_align_tol_rad").value
@@ -364,20 +367,20 @@ class ReverseDocking(Node):
                 self.get_logger().info(
                     f"정렬 {p + 1}/{self._align_passes}차: Δx={dx:+.3f}m"
                 )
-                # 수렴 종료: Δx 가 작으면 이미 정렬된 것으로 보고 arc 생략·반복 중단.
-                # (정렬된 지점에선 측정 phantom(잔여 yaw)이 노이즈로 떠 다님 → 추종 금지)
+                # 수렴 종료: Δx 가 허용오차보다 작으면 정렬된 것으로 보고 종료. 허용오차를
+                # 보수적으로(작게) 둬야 off 인데 작게 측정돼 건너뛰고 후진하는 걸 줄인다.
                 if abs(dx) < self._align_conv_tol:
                     self.get_logger().info(
                         f"정렬 수렴 (|Δx|={abs(dx):.3f} < {self._align_conv_tol}) → 반복 종료"
                     )
                     break
-                # 2차+ 보정은 Δx 의 일부만 이동(arc_refine_gain)해 과보정으로 법선을
-                # 지나치는 것을 막는다. 1차는 전체 이동(빠른 진입), 2차부터 절반(기본).
-                move_dx = dx if p == 0 else dx * self._arc_refine_gain
-                if p > 0:
-                    self.get_logger().info(
-                        f"  2차+ 보정: Δx {dx:+.3f} 의 {self._arc_refine_gain}배 = {move_dx:+.3f}m 만 이동"
-                    )
+                # 보정 게인: 1차는 first_pass_gain(0.8), 2차+ 는 arc_refine_gain(0.3) 만
+                # 이동해 과보정으로 법선을 지나치는 것을 막는다.
+                gain = self._first_pass_gain if p == 0 else self._arc_refine_gain
+                move_dx = dx * gain
+                self.get_logger().info(
+                    f"  보정: Δx {dx:+.3f} 의 {gain}배 = {move_dx:+.3f}m 이동"
+                )
                 # 부드러운 후진 arc 로 법선 진입(open-loop, odom 으로 종료판단). dx>0 → 서쪽.
                 if not self._arc_into_line(move_dx):
                     self._stop()
