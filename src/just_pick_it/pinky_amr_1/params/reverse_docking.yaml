@@ -47,7 +47,7 @@
     arc_timeout_sec: 20.0
     measure_frames: 10         # 법선 횡오차 1회 측정 평균 프레임수
     align_conv_tol_m: 0.015    # 어제 working 값으로 복구
-    first_pass_gain: 0.8       # 1차 보정 이동 비율. 법선 과진입 경향이라 0.8 로(Δx의 80%만)
+    first_pass_gain: 1.0       # 1차 보정 이동 비율 (전량). 과/소진입은 잔여 헤딩의 tz·sin(psi_n) 누설이 원인이라 gain 아닌 yaw정밀도로 해결
     arc_refine_gain: 0.3       # 2차+ 보정 이동 비율 (과보정으로 법선 지나침 방지)
     arc_max_travel_m: 0.06     # arc 1회 최대 횡이동(벽 돌진 방지 캡)
     # 시퀀스2 라인 횡조향 사용 여부. false=직진 후진(마커는 깊이 정지만). 라인검출이
