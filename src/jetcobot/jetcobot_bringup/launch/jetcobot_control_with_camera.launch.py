@@ -90,7 +90,7 @@ def generate_launch_description():
                     {"camera_device": camera_device},
                     {"dest_ip": camera_dest_ip},
                     {"dest_port": camera_dest_port},
-                    {"dest_port_2": camera_dest_port_2},
+                    {"dest_port2": camera_dest_port_2},
                     {"jpeg_quality": jpeg_quality},
                     {"fps": fps},
                     {"width": width},
