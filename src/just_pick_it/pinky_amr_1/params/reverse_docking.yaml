@@ -49,7 +49,7 @@
     arc_timeout_sec: 20.0
     measure_frames: 10         # 법선 횡오차 1회 측정 평균 프레임수
     align_conv_tol_m: 0.005    # Δx<이면 정렬됨으로 종료. 0.005 로 더 낮춤(0.005~0.015 의 유의미한 오차도 보정하도록)
-    first_pass_gain: 0.8       # 1차 보정 이동 비율
+    first_pass_gain: 1.0       # 1차 보정 이동 비율 (Δx 전량 보정으로 복원)
     arc_refine_gain: 0.3       # 2차+ 보정 이동 비율 (과보정으로 법선 지나침 방지)
     arc_max_travel_m: 0.06     # arc 1회 최대 횡이동(벽 돌진 방지 캡)
     # 시퀀스2 라인 횡조향 사용 여부. false=직진 후진(마커는 깊이 정지만). 라인검출이
@@ -57,7 +57,7 @@
     use_lane_steering: false
     # [측정→arc→재정렬] 반복 횟수. 최종 yaw 정렬 허용오차(rad). 후진 중 odom 헤딩유지 게인.
     align_passes: 2
-    yaw_align_tol_rad: 0.04
+    yaw_align_tol_rad: 0.01    # ≈0.57°. 많이 좁힘: recenter 로 틀어진 채 후진 못하게(틀어지면 재정렬). timeout 시 재완화 고려
     yaw_hold_kp: 1.0
     # 마커 상실/재정렬 시 제자리 회전 재중심. kp=중심 정렬 게인, tol=중앙 허용 bearing(rad).
     recenter_kp: 0.8
