@@ -559,9 +559,9 @@ class ReverseDocking(Node):
         """마커 상실/시퀀스 전환 시: 후진을 멈추고 제자리 회전으로 마커를 카메라 중앙에
         되돌린다(헤딩=법선 복귀, 포지션 확정). 중앙 정렬되면 True.
 
-        회전 부호(실차 확인, 카메라 180° 거꾸로 장착): omega = +recenter_kp·bearing.
-        이전 -부호일 때 제자리회전이 반대로 돌아 마커정렬이 더 틀어졌음. 마커가 안 보이면
-        마지막에 보이던 쪽으로 같은 부호 방향으로 탐색 회전. last_tx 부호로 초기 방향 결정.
+        회전 부호(정적검증 테스트3 기준): 마커가 왼쪽(tvec[0]<0)이면 CCW(ω>0)로 돌려야
+        중앙에 온다 → omega = -recenter_kp·bearing. 마커가 안 보이면 마지막에 보이던
+        쪽으로 탐색 회전(오른쪽이었으면 CW). last_tx 부호로 방향 결정.
         """
         deadline = time.time() + self._recenter_to
         search_dir = 1.0 if last_tx >= 0.0 else -1.0
@@ -583,17 +583,16 @@ class ReverseDocking(Node):
                 tvec, _ = marker
                 dist = max(float(tvec[2]), 0.1)
                 bearing = float(tvec[0]) / dist     # 카메라 광축 대비 마커 횡(rad 근사)
-                # 상실 시 탐색 방향힌트(아래 회전부호와 같은 방향으로 마커를 쫓도록).
-                search_dir = 1.0 if bearing >= 0.0 else -1.0
+                # 마커가 왼쪽(bearing<0)이면 CCW 로 탐색해야 하므로 다음 상실 시 방향힌트.
+                search_dir = -1.0 if bearing >= 0.0 else 1.0
                 if abs(bearing) < self._recenter_tol:
                     self._stop()
                     self.get_logger().info(
                         f"Recenter: 마커 중앙 복귀 완료 (bearing={bearing:.3f})"
                     )
                     return True
-                # 실차 확인: 카메라 180° 거꾸로 장착이라 부호가 반대였음. 마커정렬 제자리회전이
-                # 같은 방향으로 돌아 더 틀어지던 것 수정(부호 +). 법선 yaw정렬은 정상이라 안 건드림.
-                twist.angular.z = self._clamp(self._recenter_kp * bearing)
+                # 마커 왼쪽(bearing<0) → CCW(ω>0) 로 돌려야 중앙(정적검증 테스트3). 부호 -.
+                twist.angular.z = self._clamp(-self._recenter_kp * bearing)
             else:
                 twist.angular.z = self._clamp(search_dir * self._acquire_rot)
 
@@ -614,8 +613,9 @@ class ReverseDocking(Node):
         """마커가 fronto-parallel(법선 정면, psi≈0)이 되도록 제자리 yaw 정렬. best-effort.
 
         psi = atan2(R[0,2], -R[2,2]) (정면 정렬 시 ~0). 정면 근처에서 psi 가 ±부호로
-        튀므로(rvec ±π 모호성) 매 판정마다 몇 프레임 평균낸다. d(psi)/d(omega)<0 이라
-        omega = recenter_kp·psi (psi<0→CW). |psi| 가 커지면 부호 자동 반전(오류 강건).
+        튀므로(rvec ±π 모호성) 매 판정마다 몇 프레임 평균낸다. 카메라 180° 거꾸로 장착이라
+        d(psi)/d(omega)>0 (실차 확인): omega = -recenter_kp·psi_err. 마커정렬 후 이 법선
+        yaw정렬이 반대로 돌던 것 수정. |psi_err| 가 커지면 부호 자동 반전(오류 강건).
         실패해도(마커 상실/timeout) 현재 정렬 유지하고 True(도킹 진행).
         """
         deadline = time.time() + self._recenter_to
@@ -658,7 +658,7 @@ class ReverseDocking(Node):
                 self.get_logger().warn("YawAlign: 방향 반대 감지 → 부호 반전")
             prev_abs = abs(psi_err)
             twist = Twist()
-            twist.angular.z = self._clamp(omega_sign * self._recenter_kp * psi_err)
+            twist.angular.z = self._clamp(-omega_sign * self._recenter_kp * psi_err)
             self._cmd_pub.publish(twist)
             if time.time() - last_log > 0.5:
                 self.get_logger().info(f"YawAlign: psi={math.degrees(psi):+.1f}deg")
