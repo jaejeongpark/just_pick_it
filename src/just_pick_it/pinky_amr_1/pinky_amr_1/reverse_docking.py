@@ -155,6 +155,8 @@ class ReverseDocking(Node):
         # 측정 Δx 가 이보다 작으면 이미 정렬된 것으로 보고 arc 생략·반복 종료(노이즈/phantom
         # 추종 방지). rvec 잔여 yaw 로 인한 측정 phantom 바닥(~2~3cm)보다 약간 크게.
         self.declare_parameter("align_conv_tol_m", 0.03)
+        # 2차+ 정렬 패스에서 Δx 의 이 비율만큼만 이동(과보정으로 법선 지나침 방지). 1차는 전체.
+        self.declare_parameter("arc_refine_gain", 0.5)
         # arc 1회 최대 횡이동(m). phantom 으로 큰 Δx 가 나와도 벽으로 돌진 못하게 캡.
         self.declare_parameter("arc_max_travel_m", 0.06)
         # 시퀀스2 라인검출 횡조향 사용 여부. 기본 off → arc+recenter 정렬 믿고 직진 후진,
@@ -241,6 +243,7 @@ class ReverseDocking(Node):
         self._use_lane      = bool(self.get_parameter("use_lane_steering").value)
         self._align_passes  = int(self.get_parameter("align_passes").value)
         self._align_conv_tol = self.get_parameter("align_conv_tol_m").value
+        self._arc_refine_gain = self.get_parameter("arc_refine_gain").value
         self._arc_max_travel = self.get_parameter("arc_max_travel_m").value
         self._yaw_align_tol = self.get_parameter("yaw_align_tol_rad").value
         self._yaw_hold_kp   = self.get_parameter("yaw_hold_kp").value
@@ -368,13 +371,20 @@ class ReverseDocking(Node):
                         f"정렬 수렴 (|Δx|={abs(dx):.3f} < {self._align_conv_tol}) → 반복 종료"
                     )
                     break
+                # 2차+ 보정은 Δx 의 일부만 이동(arc_refine_gain)해 과보정으로 법선을
+                # 지나치는 것을 막는다. 1차는 전체 이동(빠른 진입), 2차부터 절반(기본).
+                move_dx = dx if p == 0 else dx * self._arc_refine_gain
+                if p > 0:
+                    self.get_logger().info(
+                        f"  2차+ 보정: Δx {dx:+.3f} 의 {self._arc_refine_gain}배 = {move_dx:+.3f}m 만 이동"
+                    )
                 # 부드러운 후진 arc 로 법선 진입(open-loop, odom 으로 종료판단). dx>0 → 서쪽.
-                if not self._arc_into_line(dx):
+                if not self._arc_into_line(move_dx):
                     self._stop()
                     self.get_logger().error("reverse_dock: FAILED — arc 진입")
                     return False
-                # arc 회전 후 마커 다시 중앙으로(dx 부호로 탐색방향 힌트).
-                if not self._recenter_on_marker(marker_id, dx):
+                # arc 회전 후 마커 다시 중앙으로(이동 부호로 탐색방향 힌트).
+                if not self._recenter_on_marker(marker_id, move_dx):
                     self._stop()
                     self.get_logger().error("reverse_dock: FAILED — 마커 재정렬")
                     return False
