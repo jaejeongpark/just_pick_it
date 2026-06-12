@@ -31,7 +31,7 @@ from just_pick_it_db.services.status_service import (
 from just_pick_it_db.services.display_service import (
     build_display_item_summary,
     create_display_item_record,
-    has_open_display_item,
+    has_appendable_display_item,
     queue_auto_display_if_low_stock,
 )
 from just_pick_it_db.services.workflow_service import (
@@ -986,7 +986,7 @@ class FleetRepository:
         *,
         require_active_context: bool = False,
     ) -> None:
-        """상품 재고가 부족이면 기존 진열 흐름에 자동 요청을 추가한다."""
+        """상품 재고가 부족이면 자동 진열 요청을 생성한다."""
         if require_active_context and not self._has_active_auto_display_context(db):
             return
 
@@ -1001,8 +1001,12 @@ class FleetRepository:
         )
 
     def _has_active_auto_display_context(self, db) -> bool:
-        """주문 생성 시점에 자동진열을 즉시 queue해도 되는 실행 중인 흐름이 있는지 확인한다."""
-        if has_open_display_item(db):
+        """주문 생성 시점에 자동진열을 즉시 queue해도 되는 흐름이 있는지 확인한다.
+
+        이미 IN_PROGRESS인 진열에는 새 주문의 부족 상품을 붙이지 않는다. 아직 수행 전인
+        진열이 있거나 다른 주문 흐름이 진행 중일 때만 주문 생성 시점에 자동 진열을 queue한다.
+        """
+        if has_appendable_display_item(db):
             return True
 
         return (
