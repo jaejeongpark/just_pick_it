@@ -95,7 +95,7 @@ VALUES (
     (
         'PRODUCT_SLOT_1',
         'PRODUCT_SLOT',
-        0.82,
+        0.78,
         0.60,
         0.35,
         0.00
@@ -103,7 +103,7 @@ VALUES (
     (
         'PRODUCT_SLOT_2',
         'PRODUCT_SLOT',
-        1.17,
+        1.20,
         0.60,
         0.35,
         0.00
@@ -111,7 +111,7 @@ VALUES (
     (
         'PRODUCT_SLOT_3',
         'PRODUCT_SLOT',
-        1.52,
+        1.62,
         0.60,
         0.35,
         0.00
@@ -119,7 +119,7 @@ VALUES (
     (
         'PRODUCT_SLOT_4',
         'PRODUCT_SLOT',
-        0.82,
+        0.78,
         0.35,
         0.35,
         0.00
@@ -127,7 +127,7 @@ VALUES (
     (
         'PRODUCT_SLOT_5',
         'PRODUCT_SLOT',
-        1.17,
+        1.20,
         0.35,
         0.35,
         0.00
@@ -135,7 +135,7 @@ VALUES (
     (
         'PRODUCT_SLOT_6',
         'PRODUCT_SLOT',
-        1.52,
+        1.62,
         0.35,
         0.35,
         0.00

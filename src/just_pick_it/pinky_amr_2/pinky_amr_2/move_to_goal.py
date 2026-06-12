@@ -74,7 +74,7 @@ class MoveToGoal(Node):
         super().__init__("move_to_goal")
 
         self.declare_parameter("precision_approach_distance", 0.03)
-        self.declare_parameter("waypoint_reach_distance", 0.10)
+        self.declare_parameter("waypoint_reach_distance", 0.15)
         self.declare_parameter("xy_goal_tolerance", 0.01)
         self.declare_parameter("yaw_goal_tolerance", 0.05)
         self.declare_parameter("nav_timeout_sec", 120.0)
@@ -82,6 +82,7 @@ class MoveToGoal(Node):
         self.declare_parameter("precision_max_linear_vel", 0.10)
         self.declare_parameter("precision_max_angular_vel", 0.6)
         self.declare_parameter("precision_heading_deadband_distance", 0.03)
+        self.declare_parameter("precision_heading_gate_angle", 0.35)
 
         self._prec_dist = self.get_parameter("precision_approach_distance").value
         self._waypoint_reach = self.get_parameter("waypoint_reach_distance").value
@@ -93,6 +94,9 @@ class MoveToGoal(Node):
         self._precision_max_angular = self.get_parameter("precision_max_angular_vel").value
         self._precision_heading_deadband = self.get_parameter(
             "precision_heading_deadband_distance"
+        ).value
+        self._precision_heading_gate = self.get_parameter(
+            "precision_heading_gate_angle"
         ).value
 
         self._lock = threading.Lock()
@@ -345,7 +349,6 @@ class MoveToGoal(Node):
                 return True
 
             twist = Twist()
-            twist.linear.x = min(KP * dist, self._precision_max_linear)
             if dist > self._precision_heading_deadband:
                 target_heading = math.atan2(dy, dx)
                 angle_err = normalize_angle(target_heading - cur_yaw)
@@ -353,8 +356,15 @@ class MoveToGoal(Node):
                     -self._precision_max_angular,
                     min(self._precision_max_angular, angle_err),
                 )
+                if abs(angle_err) <= self._precision_heading_gate:
+                    heading_scale = max(0.0, math.cos(angle_err))
+                    twist.linear.x = min(
+                        KP * dist * heading_scale,
+                        self._precision_max_linear,
+                    )
             else:
                 twist.angular.z = 0.0
+                twist.linear.x = min(KP * dist, self._precision_max_linear)
             self._cmd_pub.publish(twist)
             time.sleep(0.05)
 
