@@ -353,17 +353,16 @@ class ReverseDocking(Node):
                 self.get_logger().error("reverse_dock: FAILED — 마커 미획득")
                 return False
 
-            # 2) 1차 법선정렬: [recenter(마커 정면) → 측정 → arc] × N → 최종 yaw_align.
-            #    측정은 반드시 '마커 정면(recenter)' 자세에서 한다 — off-line 일 때 법선 정면
-            #    자세는 마커가 화각을 벗어나 검출 실패하기 때문. 마커 정면에선 tx≈0 이라 횡오차가
-            #    tz·sin(psi) 로 잡힌다(measure 가 디커플링 전체식 사용). 후진은 reverse_insert
-            #    가 정렬된 헤딩을 odom 으로 앵커링·유지(후진하면 마커가 화각 이탈 → odom 필수).
-            move_dx = 0.0
+            # 2) 흐름(사용자 지정): 초기 recenter → [법선정렬(yaw_align) → 측정 → arc →
+            #    마커방향정렬(recenter)] × N → 최종 법선정렬(yaw_align) → 후진. 매 보정 후
+            #    마커 방향으로 다시 정렬(recenter)한 뒤 다음 법선정렬을 한다.
+            #    후진은 reverse_insert 가 정렬된 헤딩을 odom 으로 앵커링·유지(후진 중 마커 이탈).
+            if not self._recenter_on_marker(marker_id, 0.0):
+                self._stop()
+                self.get_logger().error("reverse_dock: FAILED — 초기 재정렬")
+                return False
             for p in range(self._align_passes):
-                if not self._recenter_on_marker(marker_id, move_dx):
-                    self._stop()
-                    self.get_logger().error("reverse_dock: FAILED — 마커 재정렬")
-                    return False
+                self._align_yaw_to_normal(marker_id)   # 법선 정렬(측정 전 똑바로)
                 dx = self._measure_lateral_offset(marker_id)
                 if dx is None:
                     self._stop()
@@ -386,9 +385,12 @@ class ReverseDocking(Node):
                     self._stop()
                     self.get_logger().error("reverse_dock: FAILED — arc 진입")
                     return False
+                if not self._recenter_on_marker(marker_id, move_dx):   # 마커 방향 정렬
+                    self._stop()
+                    self.get_logger().error("reverse_dock: FAILED — 마커 재정렬")
+                    return False
 
-            # 3) 후진 전 최종 법선 정렬(on-line 이라 법선에서도 마커 화각 안).
-            #    reverse_insert 가 이 헤딩을 odom 으로 앵커링·유지.
+            # 3) 후진 전 최종 법선 정렬(이 헤딩을 reverse_insert 가 odom 으로 앵커링·유지).
             self._align_yaw_to_normal(marker_id)
             if not self._reverse_insert(marker_id, marker_y, dock_map_y):
                 self._stop()
