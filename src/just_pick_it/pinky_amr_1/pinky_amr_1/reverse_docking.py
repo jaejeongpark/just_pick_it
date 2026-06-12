@@ -353,16 +353,17 @@ class ReverseDocking(Node):
                 self.get_logger().error("reverse_dock: FAILED — 마커 미획득")
                 return False
 
-            # 2) 1차 법선정렬(어제 방식, 정확): recenter → [yaw_align(psi) → 측정 → arc →
-            #    recenter] × N → 최종 yaw_align. 마커가 보이는 이 단계에서 psi 로 법선을 맞춘다.
-            #    후진은 reverse_insert 가 진입 시 odom θ_ref 를 앵커링해 유지한다(후진하면
-            #    마커가 화각을 벗어나므로 헤딩은 odom 으로만 유지 가능).
-            if not self._recenter_on_marker(marker_id, 0.0):
-                self._stop()
-                self.get_logger().error("reverse_dock: FAILED — 초기 재정렬")
-                return False
+            # 2) 1차 법선정렬: [recenter(마커 정면) → 측정 → arc] × N → 최종 yaw_align.
+            #    측정은 반드시 '마커 정면(recenter)' 자세에서 한다 — off-line 일 때 법선 정면
+            #    자세는 마커가 화각을 벗어나 검출 실패하기 때문. 마커 정면에선 tx≈0 이라 횡오차가
+            #    tz·sin(psi) 로 잡힌다(measure 가 디커플링 전체식 사용). 후진은 reverse_insert
+            #    가 정렬된 헤딩을 odom 으로 앵커링·유지(후진하면 마커가 화각 이탈 → odom 필수).
+            move_dx = 0.0
             for p in range(self._align_passes):
-                self._align_yaw_to_normal(marker_id)   # 측정 전 법선 정면(psi 정렬)
+                if not self._recenter_on_marker(marker_id, move_dx):
+                    self._stop()
+                    self.get_logger().error("reverse_dock: FAILED — 마커 재정렬")
+                    return False
                 dx = self._measure_lateral_offset(marker_id)
                 if dx is None:
                     self._stop()
@@ -385,12 +386,9 @@ class ReverseDocking(Node):
                     self._stop()
                     self.get_logger().error("reverse_dock: FAILED — arc 진입")
                     return False
-                if not self._recenter_on_marker(marker_id, move_dx):
-                    self._stop()
-                    self.get_logger().error("reverse_dock: FAILED — 마커 재정렬")
-                    return False
 
-            # 3) 후진 전 최종 법선 정렬(이 헤딩을 reverse_insert 가 odom 으로 앵커링·유지).
+            # 3) 후진 전 최종 법선 정렬(on-line 이라 법선에서도 마커 화각 안).
+            #    reverse_insert 가 이 헤딩을 odom 으로 앵커링·유지.
             self._align_yaw_to_normal(marker_id)
             if not self._reverse_insert(marker_id, marker_y, dock_map_y):
                 self._stop()
@@ -675,7 +673,7 @@ class ReverseDocking(Node):
         성분(R[0,2], R[2,2])을 평균해 한 번만 psi 를 구한다(노이즈·flip 완화).
         Δx>0 이면 로봇이 법선보다 +x(동)쪽 → 서쪽으로 이동해야 함. 실패 시 None.
         """
-        txs, tzs, nxs, nzs = [], [], [], []
+        txs, tzs, psis = [], [], []
         deadline = time.time() + 3.0
         while len(txs) < self._measure_frames and time.time() < deadline:
             frame = self._get_latest_frame()
@@ -690,23 +688,22 @@ class ReverseDocking(Node):
             R, _ = cv2.Rodrigues(np.asarray(rvec, dtype=np.float64).reshape(3, 1))
             txs.append(float(tvec[0]))
             tzs.append(float(tvec[2]))
-            nxs.append(float(R[0, 2]))
-            nzs.append(float(R[2, 2]))
+            psis.append(math.atan2(float(R[0, 2]), -float(R[2, 2])))
             time.sleep(0.03)
         if len(txs) < 3:
             self.get_logger().warn("Measure: 마커 샘플 부족")
             return None
-        # median: flip(±π) 시 tvec 도 바뀌므로 평균 대신 중앙값으로 outlier 제거.
+        # median: flip(±π) outlier 제거(평균은 flip 한두개에 편향).
         tx = sorted(txs)[len(txs) // 2]
         tz = sorted(tzs)[len(tzs) // 2]
-        psi = math.atan2(sum(nxs) / len(nxs), -sum(nzs) / len(nzs))
-        # 마커 장착 미세 기울기 보정: 실제 법선 기준 헤딩은 psi - marker_yaw_offset.
-        # yaw정렬과 같은 기준을 써야 정렬 후 Δx≈0 으로 일관(안 그러면 arc 가 tz·sin(offset) 만큼 헛감).
+        psis.sort()
+        psi = psis[len(psis) // 2]
         psi_n = psi - self._marker_yaw_offset
-        # 횡 측정: psi 디커플링(tz·sin(psi_n)) 제거. yaw정렬이 법선을 향하므로 헤딩≈0 이라
-        # 이 항은 0이어야 하지만, psi 가 ±2° 부정확해 그 오차 ε 가 D·ε 로 depth 증폭(먼거리
-        # 일수록 x 과보정)됐다. tx 만 쓰면 depth 독립. solvePnP tvec 단축은 lateral_scale 로 보정.
-        dx = -tx * self._lateral_scale + self._marker_lat_offset
+        # 마커 정면(recenter) 자세에서 측정 → tx≈0, 횡오차는 tz·sin(psi_n) 에 담긴다.
+        # 법선 자세는 off-line 시 마커가 화각을 벗어나 검출 불가라 부득이 마커 정면에서 측정.
+        # 그래서 디커플링 전체식 사용(psi 노이즈는 median + 모호성해소로 완화).
+        dx = (-(tx * math.cos(psi_n) + tz * math.sin(psi_n)) * self._lateral_scale
+              + self._marker_lat_offset)
         self.get_logger().info(
             f"Measure: Δx={dx:+.3f}m (tx={tx:.3f} tz={tz:.3f} "
             f"psi={math.degrees(psi):+.1f}deg(법선기준 {math.degrees(psi_n):+.1f}), "
