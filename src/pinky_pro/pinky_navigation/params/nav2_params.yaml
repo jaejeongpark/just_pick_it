@@ -51,7 +51,10 @@ bt_navigator:
     robot_base_frame: base_link
     odom_topic: odom
     bt_loop_duration: 10
-    default_server_timeout: 100
+    # controller_frequency 10Hz(=100ms 루프)면 follow_path 취소 응답이 ~100ms 걸려
+    # server_timeout 100ms 와 겹쳐 'Failed to get result in node halt!' 간헐 발생
+    # (경유지 취소 꼬임→다음 goal 못 감→정지). 느린 controller+CPU 지터를 견디게 상향.
+    default_server_timeout: 300
     wait_for_service_timeout: 1000
     action_server_result_timeout: 900.0
     navigators: ["navigate_to_pose", "navigate_through_poses"]
@@ -179,7 +182,7 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.08
+        inflation_radius: 0.10
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: True
@@ -238,7 +241,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.08
+        inflation_radius: 0.10
       always_send_full_costmap: True
 
 # The yaml_filename does not need to be specified since it going to be set by defaults in launch.

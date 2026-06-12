@@ -65,19 +65,27 @@ class MoveToGoal(Node):
             emergency_latch = EmergencyLatch()
         self._emergency = emergency_latch
 
-        self.declare_parameter("precision_approach_distance", 0.3)
+        # 최종 목적지 이 거리 전에 Nav2 를 끄고 cmd_vel 정밀접근(직진)으로 마무리한다.
+        # 이 구간은 costmap/collision 회피가 없는 'blind' 구간이라, 길면(0.3) 그 사이 벽/
+        # 진열대에 박을 수 있다. 짧게(0.15) 두어 Nav2 가 회피·회전을 최대한 담당하게 한다.
+        self.declare_parameter("precision_approach_distance", 0.15)
         # 중간 경유지 도달 판정 거리. 이 거리 안에 들면 다음 경유지로 넘어간다.
         # 작을수록 경유지에 더 근접한 뒤 꺾는다(최종 목적지는 precision_approach_distance 사용).
-        self.declare_parameter("waypoint_reach_distance", 0.2)
+        self.declare_parameter("waypoint_reach_distance", 0.12)
         self.declare_parameter("xy_goal_tolerance", 0.01)
         self.declare_parameter("yaw_goal_tolerance", 0.05)
         self.declare_parameter("nav_timeout_sec", 120.0)
+        # 정밀접근은 xy_goal_tolerance(0.01)까지 최대한 붙되, AMCL 노이즈로 1cm 안에
+        # 못 들어가 timeout 나도 이 거리 이내면 '도착 성공'으로 인정한다(과한 실패 방지).
+        # 접근 목표는 그대로 빡빡하게, 성공 판정만 여유있게.
+        self.declare_parameter("arrival_success_tolerance", 0.05)
 
         self._prec_dist = self.get_parameter("precision_approach_distance").value
         self._waypoint_reach = self.get_parameter("waypoint_reach_distance").value
         self._xy_tol = self.get_parameter("xy_goal_tolerance").value
         self._yaw_tol = self.get_parameter("yaw_goal_tolerance").value
         self._nav_timeout = self.get_parameter("nav_timeout_sec").value
+        self._arrival_success_tol = self.get_parameter("arrival_success_tolerance").value
 
         self._lock = threading.Lock()
         self._cur_x = 0.0
@@ -277,8 +285,21 @@ class MoveToGoal(Node):
             self._cmd_pub.publish(twist)
             time.sleep(0.05)
 
+        # 접근 목표(xy_tol=0.01)는 못 맞췄지만, AMCL 노이즈로 1cm 안에 못 들어간 것일 뿐
+        # arrival_success_tolerance 이내면 '도착 성공'으로 인정한다(과한 실패 방지).
         self._stop_robot()
-        self.get_logger().warn("Precision approach timeout")
+        with self._lock:
+            dist = math.hypot(tx - self._cur_x, ty - self._cur_y)
+        if dist <= self._arrival_success_tol:
+            self.get_logger().warn(
+                f"Precision approach: {self._xy_tol}m 미달이나 {dist:.3f}m "
+                f"<= 성공허용 {self._arrival_success_tol}m → 도착 인정"
+            )
+            return True
+        self.get_logger().warn(
+            f"Precision approach timeout (dist={dist:.3f}m > 성공허용 "
+            f"{self._arrival_success_tol}m) → 실패"
+        )
         return False
 
     def _yaw_correction(self, target_yaw: float) -> bool:
