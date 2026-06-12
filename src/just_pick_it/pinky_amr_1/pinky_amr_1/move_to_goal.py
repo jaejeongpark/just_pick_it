@@ -38,7 +38,7 @@ def normalize_angle(a: float) -> float:
 
 
 # 최종 목적지 정지 자세(사방향 90° 스냅) 회전 파라미터
-STOP_ROTATE_SPEED = 0.4        # [rad/s] 정지자세 제자리회전. 빠르면(0.8) 슬립으로 밀려 벽/진열대 swing
+STOP_ROTATE_SPEED = 0.8        # [rad/s]
 STOP_ROTATE_TOL = 0.05         # [rad] 약 3도
 STOP_ROTATE_TIMEOUT = 8.0      # [s]
 
