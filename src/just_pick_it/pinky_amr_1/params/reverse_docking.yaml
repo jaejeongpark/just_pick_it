@@ -55,7 +55,7 @@
     use_lane_steering: false
     # [측정→arc→재정렬] 반복 횟수. 어제 working 값 2 로 복구.
     align_passes: 2
-    yaw_align_tol_rad: 0.04    # ≈2.3°. 0.01 은 psi 노이즈(±4°)보다 작아 영영 수렴 못하고 flail->마커상실->측정실패. 노이즈 위로 복원
+    yaw_align_tol_rad: 0.02    # ≈1.1°. 모호성 해소+9프레임평균으로 psi 안정해져 조임(2.3°는 목표 못미쳐 정렬오인). flail 재발시 0.03
     yaw_hold_kp: 1.0
     # 마커 상실/재정렬 시 제자리 회전 재중심. kp=중심 정렬 게인, tol=중앙 허용 bearing(rad).
     recenter_kp: 0.8

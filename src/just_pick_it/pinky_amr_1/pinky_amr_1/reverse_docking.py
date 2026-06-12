@@ -630,7 +630,7 @@ class ReverseDocking(Node):
                 deadline += self._wait_if_paused()
                 continue
             nxs, nzs = [], []
-            for _ in range(3):
+            for _ in range(9):   # 모호성 해소된 psi 를 9프레임 평균 → 판정 안정(tol 0.02 지원)
                 f = self._get_latest_frame()
                 if f is not None:
                     m = self._detect_aruco(f, marker_id)
