@@ -705,10 +705,10 @@ class ReverseDocking(Node):
         # 마커 장착 미세 기울기 보정: 실제 법선 기준 헤딩은 psi - marker_yaw_offset.
         # yaw정렬과 같은 기준을 써야 정렬 후 Δx≈0 으로 일관(안 그러면 arc 가 tz·sin(offset) 만큼 헛감).
         psi_n = psi - self._marker_yaw_offset
-        # solvePnP tvec 이 실측보다 짧게 나오므로 lateral_scale(측정거리 기준 ~1.48)을 곱해
-        # 실제 거리(m)로. 깊이정지(원거리)용 depth_scale 과 분리(측정·정지 거리가 달라 비율 다름).
-        dx = (-(tx * math.cos(psi_n) + tz * math.sin(psi_n)) * self._lateral_scale
-              + self._marker_lat_offset)
+        # 횡 측정: psi 디커플링(tz·sin(psi_n)) 제거. yaw정렬이 법선을 향하므로 헤딩≈0 이라
+        # 이 항은 0이어야 하지만, psi 가 ±2° 부정확해 그 오차 ε 가 D·ε 로 depth 증폭(먼거리
+        # 일수록 x 과보정)됐다. tx 만 쓰면 depth 독립. solvePnP tvec 단축은 lateral_scale 로 보정.
+        dx = -tx * self._lateral_scale + self._marker_lat_offset
         self.get_logger().info(
             f"Measure: Δx={dx:+.3f}m (tx={tx:.3f} tz={tz:.3f} "
             f"psi={math.degrees(psi):+.1f}deg(법선기준 {math.degrees(psi_n):+.1f}), "

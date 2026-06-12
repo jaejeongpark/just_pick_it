@@ -156,10 +156,10 @@ def main():
                             f"robot_x: simple={rx_simple:.3f} dec+={rx_dec:.3f} dec-={rx_dec2:.3f} "
                             f"(실제 dock_x {DOCK.get(mid,('?',))[0]})"
                         )
-                        # ── 보정 후(reverse_docking 노드와 동일 식): psi_n=psi-offset, Δx=측정식 ──
+                        # ── 보정 후(reverse_docking 노드와 동일 식): tz·sin(psi_n) 디커플링 제거,
+                        #    tx 만(depth 독립). psi_n 은 yaw정렬용 참고로만 표시.
                         psi_n = psi - YAW_OFFSET
-                        dx = (-(tx * math.cos(psi_n) + tz * math.sin(psi_n)) * LATERAL_SCALE
-                              + LAT_OFFSET)
+                        dx = -tx * LATERAL_SCALE + LAT_OFFSET
                         line += (
                             f"\n      [보정후] psi_법선기준={math.degrees(psi_n):+.1f}deg(정면시 ~0) "
                             f"Δx(node)={dx:+.3f} robot_x_est={mwx + dx:.3f} (목표 {mwx:.3f})"
