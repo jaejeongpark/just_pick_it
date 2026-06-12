@@ -282,6 +282,8 @@ class ReverseDocking(Node):
             [ h, -h, 0.0],
             [-h, -h, 0.0],
         ], dtype=np.float64)
+        # ±π 평면 모호성 해소용: 직전에 채택한 psi(시간연속성으로 8° 튐 거름). 도킹 시작 시 리셋.
+        self._last_psi = None
 
         # ── PID (정밀 정렬용 라인 lateral/yaw) ──────────────────────────
         self._lane_lat_pid = PID(self._lane_lat_kp, 0.0, 0.0005)
@@ -340,6 +342,7 @@ class ReverseDocking(Node):
         )
         self._lane_lat_pid.reset()
         self._lane_yaw_pid.reset()
+        self._last_psi = None   # 모호성 해소 시간연속성 초기화(첫 검출은 재투영오차로)
 
         # picamera2 모드는 도킹 동안만 카메라를 열고, 끝나면(성공/실패 무관) 반납한다.
         self._open_camera()
@@ -795,7 +798,9 @@ class ReverseDocking(Node):
     # ====================================================================== #
 
     def _detect_aruco(self, frame, target_id: int):
-        """IPPE_SQUARE solvePnP 기반 ArUco pose. (tvec[3], rvec[3]) 또는 None."""
+        """IPPE_SQUARE 기반 ArUco pose. 평면 ±π 모호성을 두 해 중 직전 psi 와 가장
+        가까운 해(시간연속성)로 골라 해소한다. 첫 검출은 재투영오차 작은 해.
+        (tvec[3], rvec[3]) 또는 None."""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         corners, ids, _ = self._detector.detectMarkers(gray)
         if ids is None:
@@ -804,15 +809,32 @@ class ReverseDocking(Node):
         for i, mid in enumerate(ids.flatten()):
             if mid != target_id:
                 continue
-            ok, rvec, tvec = cv2.solvePnP(
+            n, rvecs, tvecs, errs = cv2.solvePnPGeneric(
                 self._marker_obj_pts,
                 corners[i][0].astype(np.float64),
                 self._cam_matrix,
                 self._dist_coeffs,
-                flags=cv2.SOLVEPNP_IPPE_SQUARE,   # 평면 정사각 마커 ambiguity 처리
+                flags=cv2.SOLVEPNP_IPPE_SQUARE,   # 평면 정사각 마커: 최대 2해 반환
             )
-            if ok:
-                return tvec.flatten(), rvec.flatten()
+            if n < 1:
+                return None
+            # 각 해의 psi(법선기준 헤딩) 계산
+            cands = []
+            for si in range(n):
+                R, _ = cv2.Rodrigues(rvecs[si])
+                psi = math.atan2(float(R[0, 2]), -float(R[2, 2]))
+                e = float(errs[si][0]) if errs is not None else 0.0
+                cands.append((psi, e, rvecs[si], tvecs[si]))
+            # ±π 모호성 해소: 직전 psi 가 있으면 그와 가장 가까운 해(8° 튐 거름),
+            # 없으면(첫 검출) 재투영오차 작은 해. 정면 근처서 두 오차가 비슷해도
+            # 시간연속성으로 한 군집에 고정된다.
+            if self._last_psi is not None and n > 1:
+                psi, _, rvec, tvec = min(
+                    cands, key=lambda c: abs(c[0] - self._last_psi))
+            else:
+                psi, _, rvec, tvec = min(cands, key=lambda c: c[1])
+            self._last_psi = psi
+            return tvec.flatten(), rvec.flatten()
 
         return None
 
