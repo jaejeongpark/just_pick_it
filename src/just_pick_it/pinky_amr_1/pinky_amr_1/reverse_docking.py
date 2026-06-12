@@ -479,10 +479,16 @@ class ReverseDocking(Node):
         last_tx = 0.0
         last_log = 0.0
         # 후진 시작 헤딩(법선)을 odom 으로 앵커링 → 이 헤딩을 유지한다.
+        # 헤딩 미세보정: 정렬이 일정하게 좌로 약간 틀어지므로 앵커값을 marker_yaw_offset 만큼
+        # 우(CW=yaw 감소)로 옮긴다. 측정·정렬이 모두 끝난 뒤 odom 앵커값만 바꾸는 것이라
+        # x(횡)에는 영향이 없다. marker_yaw_offset_deg>0 = 우회전, 더 좌면 음수로.
         od0 = self._get_odom()
-        theta_ref = od0[2] if od0 is not None else None
+        theta_ref = od0[2] - self._marker_yaw_offset if od0 is not None else None
         if theta_ref is not None:
-            self.get_logger().info(f"Insert: odom 헤딩 앵커 θ_ref={math.degrees(theta_ref):+.1f}deg")
+            self.get_logger().info(
+                f"Insert: odom 헤딩 앵커 θ_ref={math.degrees(theta_ref):+.1f}deg "
+                f"(헤딩보정 {math.degrees(self._marker_yaw_offset):+.1f}deg 우)"
+            )
 
         while time.time() < deadline:
             if self._emergency.is_stopped():
