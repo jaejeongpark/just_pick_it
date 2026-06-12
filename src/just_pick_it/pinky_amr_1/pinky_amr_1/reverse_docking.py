@@ -392,11 +392,8 @@ class ReverseDocking(Node):
                     self.get_logger().error("reverse_dock: FAILED — 마커 재정렬")
                     return False
 
-            # 3) 후진 전 똑바로 세움(법선 psi→0).
+            # 3) 후진 전 똑바로 세움(이 헤딩을 odom θ_ref 로 앵커링해 후진 내내 유지).
             self._align_yaw_to_normal(marker_id)
-            # 3b) 마커 정렬 후 무조건 고정 우회전(odom). 헤딩 좌잔차 보정. 측정 다 끝난 뒤라
-            #     x 에 영향 없음. marker_yaw_offset_deg(+1=우 1°). 이 헤딩을 reverse 가 유지.
-            self._rotate_fixed_odom(-self._marker_yaw_offset)
 
             # 4) 그대로 직진 후진 + 마커 깊이로 정지.
             if not self._reverse_insert(marker_id, marker_y, dock_map_y):
@@ -664,42 +661,6 @@ class ReverseDocking(Node):
         self.get_logger().info("YawAlign: timeout → 현 정렬 유지")
         return True
 
-    def _rotate_fixed_odom(self, delta_rad: float, timeout: float = 3.0) -> bool:
-        """현재 odom yaw 에서 delta_rad 만큼 제자리 회전(delta<0 = 오른쪽/CW).
-
-        odom 기준이라 정밀(부호 표준: angular.z>0=CCW=yaw 증가). 마커 정렬·측정이 모두
-        끝난 뒤 후진 직전 헤딩만 고정 보정하는 용도(측정엔 영향 없음). odom 없으면 즉시 True.
-        """
-        if abs(delta_rad) < 1e-6:
-            return True
-        od0 = self._get_odom()
-        if od0 is None:
-            return True
-        target = od0[2] + delta_rad
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            if self._emergency.is_stopped():
-                self._stop()
-                deadline += self._wait_if_paused()
-                continue
-            od = self._get_odom()
-            if od is None:
-                time.sleep(0.05)
-                continue
-            err = math.atan2(math.sin(target - od[2]), math.cos(target - od[2]))
-            if abs(err) < 0.005:
-                self._stop()
-                self.get_logger().info(
-                    f"FixedRotate: 완료 ({math.degrees(delta_rad):+.1f}deg)"
-                )
-                return True
-            twist = Twist()
-            twist.angular.z = self._clamp(self._yaw_hold_kp * err)   # err>0 → CCW(+)
-            self._cmd_pub.publish(twist)
-            time.sleep(0.05)
-        self._stop()
-        return True
-
     def _measure_lateral_offset(self, marker_id: int):
         """마커를 여러 프레임 평균내어 법선(마커 x선)까지의 횡오차 Δx 를 1회 계산.
 
@@ -732,10 +693,10 @@ class ReverseDocking(Node):
         tx = sum(txs) / len(txs)
         tz = sum(tzs) / len(tzs)
         psi = math.atan2(sum(nxs) / len(nxs), -sum(nzs) / len(nzs))
-        # 횡 측정은 tx 만 사용(× lateral_scale). tz·sin(psi) 디커플링 항은 제거했다:
-        # 로그상 on-line(tx≈0)인데도 헤딩 잔차(psi≈-3°)가 tz·sin 으로 +1.5cm 가짜 횡오차를
-        # 주입해(먼거리일수록 증폭) 과진입을 일으켰다. tx 만 쓰면 on-line 에서 dx≈0 으로 수렴.
-        dx = -tx * self._lateral_scale + self._marker_lat_offset
+        # solvePnP tvec 이 실측보다 짧게 나오므로 lateral_scale(측정거리 기준 ~1.48)을 곱해
+        # 실제 거리(m)로. 깊이정지(원거리)용 depth_scale 과 분리(측정·정지 거리가 달라 비율 다름).
+        dx = (-(tx * math.cos(psi) + tz * math.sin(psi)) * self._lateral_scale
+              + self._marker_lat_offset)
         self.get_logger().info(
             f"Measure: Δx={dx:+.3f}m (tx={tx:.3f} tz={tz:.3f} "
             f"psi={math.degrees(psi):+.1f}deg, lat_scale={self._lateral_scale}, "
