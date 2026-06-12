@@ -63,7 +63,7 @@ VALUES (
     (
         'PRODUCT_ZONE_3',
         'PRODUCT',
-        1.47,
+        1.48,
         0.60,
         0.00,
         0.00
@@ -87,7 +87,7 @@ VALUES (
     (
         'PRODUCT_ZONE_6',
         'PRODUCT',
-        1.47,
+        1.48,
         0.36,
         0.00,
         0.00
@@ -152,7 +152,7 @@ VALUES (
         'PICKUP_ZONE_2',
         'PICKUP',
         1.80,
-        0.18,
+        0.17,
         0.00,
         3.14
     ),

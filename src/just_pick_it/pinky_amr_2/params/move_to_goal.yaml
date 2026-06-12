@@ -4,7 +4,7 @@
     precision_approach_distance: 0.03
 
     # 중간 waypoint는 정밀 접근 없이 이 거리 안에 들어오면 통과 처리한다.
-    waypoint_reach_distance: 0.10
+    waypoint_reach_distance: 0.15
 
     # 직접 정밀 접근 단계의 최종 위치/yaw 허용 오차.
     xy_goal_tolerance: 0.01

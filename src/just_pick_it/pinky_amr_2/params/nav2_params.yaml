@@ -109,7 +109,7 @@ controller_server:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
 
       # 기본 속도들 (Pinky 상황 맞게 나중에 조정 가능)
-      desired_linear_vel: 0.10 # [m/s]
+      desired_linear_vel: 0.08 # [m/s]
       max_linear_accel: 0.5 # [m/s^2]
       max_linear_decel: 0.5 # [m/s^2]
       max_angular_vel: 0.7 # [rad/s]
