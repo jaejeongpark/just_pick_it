@@ -29,7 +29,7 @@
     camera_forward_offset_m: 0.060   # robot(lidar)-marker 0.235 - camera-marker 0.175
     depth_scale: 1.38                # 도크(원거리) 정지용. ↑면 더 일찍(덜 깊게) 정지. 1.36→1.38 ≈ 0.8cm 덜
     lateral_scale: 1.48              # Δx(횡, 가까운 측정거리)용. 깊이와 분리
-    marker_lat_offset_m: 0.005       # 과진입은 yaw offset 탓이었음 → 좋았던 0.005 복원
+    marker_lat_offset_m: 0.003       # 0.005 과진입 → 0.003 으로 줄임
 
     # ------------------------------------------------------------------ #
     # 단계 A: 마커 획득 + 시작 coarse 정렬 (마커 상대)
