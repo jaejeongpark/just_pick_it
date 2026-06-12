@@ -637,22 +637,23 @@ class ReverseDocking(Node):
                 self._stop()
                 deadline += self._wait_if_paused()
                 continue
-            nxs, nzs = [], []
-            for _ in range(9):   # 모호성 해소된 psi 를 9프레임 평균 → 판정 안정(tol 0.02 지원)
+            psis = []
+            for _ in range(15):   # 프레임별 psi 수집 후 median → flip(±π) outlier 제거.
                 f = self._get_latest_frame()
                 if f is not None:
                     m = self._detect_aruco(f, marker_id)
                     if m is not None:
                         R, _ = cv2.Rodrigues(
                             np.asarray(m[1], dtype=np.float64).reshape(3, 1))
-                        nxs.append(float(R[0, 2]))
-                        nzs.append(float(R[2, 2]))
+                        psis.append(math.atan2(float(R[0, 2]), -float(R[2, 2])))
                 time.sleep(0.02)
-            if not nxs:
+            if not psis:
                 self._stop()
                 self.get_logger().info("YawAlign: 마커 미검출 → 현 정렬 유지")
                 return True
-            psi = math.atan2(sum(nxs) / len(nxs), -sum(nzs) / len(nzs))
+            # median: 평균은 flip 한두개에 편향되지만 중앙값은 강건(θ_ref 정확도 핵심).
+            psis.sort()
+            psi = psis[len(psis) // 2]
             # 마커 장착 미세 기울기 보정: 실제 법선 정면은 psi=marker_yaw_offset 일 때이므로
             # 그 기준으로 정렬(psi_err→0). (마커 fronto-parallel psi=0 이 실제 법선이 아님)
             psi_err = psi - self._marker_yaw_offset
@@ -707,8 +708,9 @@ class ReverseDocking(Node):
         if len(txs) < 3:
             self.get_logger().warn("Measure: 마커 샘플 부족")
             return None
-        tx = sum(txs) / len(txs)
-        tz = sum(tzs) / len(tzs)
+        # median: flip(±π) 시 tvec 도 바뀌므로 평균 대신 중앙값으로 outlier 제거.
+        tx = sorted(txs)[len(txs) // 2]
+        tz = sorted(tzs)[len(tzs) // 2]
         psi = math.atan2(sum(nxs) / len(nxs), -sum(nzs) / len(nzs))
         # 마커 장착 미세 기울기 보정: 실제 법선 기준 헤딩은 psi - marker_yaw_offset.
         # yaw정렬과 같은 기준을 써야 정렬 후 Δx≈0 으로 일관(안 그러면 arc 가 tz·sin(offset) 만큼 헛감).
