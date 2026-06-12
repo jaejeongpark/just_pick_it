@@ -71,7 +71,7 @@ class MoveToGoal(Node):
         self.declare_parameter("precision_approach_distance", 0.15)
         # 중간 경유지 도달 판정 거리. 이 거리 안에 들면 다음 경유지로 넘어간다.
         # 작을수록 경유지에 더 근접한 뒤 꺾는다(최종 목적지는 precision_approach_distance 사용).
-        self.declare_parameter("waypoint_reach_distance", 0.12)
+        self.declare_parameter("waypoint_reach_distance", 0.14)
         self.declare_parameter("xy_goal_tolerance", 0.01)
         self.declare_parameter("yaw_goal_tolerance", 0.05)
         self.declare_parameter("nav_timeout_sec", 120.0)
