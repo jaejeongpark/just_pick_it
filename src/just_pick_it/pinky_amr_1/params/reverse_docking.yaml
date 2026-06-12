@@ -29,7 +29,7 @@
     camera_forward_offset_m: 0.060   # robot(lidar)-marker 0.235 - camera-marker 0.175
     depth_scale: 1.38                # 도크(원거리) 정지용. ↑면 더 일찍(덜 깊게) 정지. 1.36→1.38 ≈ 0.8cm 덜
     lateral_scale: 1.48              # Δx(횡, 가까운 측정거리)용. 깊이와 분리
-    marker_lat_offset_m: 0.003       # 0.005 는 안쪽 과진입 → 0.003 으로 줄임
+    marker_lat_offset_m: 0.005       # 과진입은 yaw offset 탓이었음 → 좋았던 0.005 복원
 
     # ------------------------------------------------------------------ #
     # 단계 A: 마커 획득 + 시작 coarse 정렬 (마커 상대)
@@ -37,8 +37,8 @@
     acquire_rotate_speed: 0.3     # 마커 탐색 제자리 회전 (rad/s)
     marker_lat_kp: 0.6            # coarse 횡 게인 (tvec[0] 기반) — 진동 완화로 하향
     marker_yaw_kp: 0.6            # coarse yaw 게인 (rvec[1] 기반)
-    # yaw정렬 헤딩 목표를 psi=이 값으로 보정(측정엔 영향 없음). 정렬이 좌1° 잔차라 +1.0.
-    # 후진이 더 좌로 틀어지면 부호 반전(-1.0), 우로 지나치면 줄이기.
+    # 후진 직전 odom 고정 회전량(도). +1 = 마커정렬 후 무조건 1° 우회전(헤딩 좌잔차 보정).
+    # yaw_align/측정엔 영향 없음(다 끝난 뒤 회전). 더 좌면 키우고, 우로 지나치면 줄이거나 -로.
     marker_yaw_offset_deg: 1.0
 
     # 시퀀스1: 마커로 법선 횡오차 1회 측정 → 부드러운 후진 arc 로 진입(odom 으로 종료판단).
