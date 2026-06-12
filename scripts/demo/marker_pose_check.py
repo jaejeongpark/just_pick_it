@@ -20,14 +20,43 @@ import cv2
 import numpy as np
 import yaml
 
-# ── reverse_docking.yaml 과 동일한 값 ──────────────────────────────────
-MARKER_SIZE = 0.05                       # AprilTag 36h11 한 변 (m)
-CAM_FWD = 0.060                          # robot(lidar)-marker 0.235 - camera-marker 0.175
-DEPTH_SCALE = 1.48                       # solvePnP tvec[z] 가 실측보다 짧게(0.118 vs 0.175) → 보정
-MARKER_WORLD = {0: (0.11, 0.635), 1: (0.28, 0.635)}  # dock1/standby1/마커 일직선 x=0.11, 마커y=0.635
+# ── reverse_docking.yaml 에서 직접 읽어옴(노드와 동일 값 유지) ───────────
 DOCK = {0: (0.11, 0.10), 1: (0.28, 0.10)}            # marker_id -> dock (x, y) 참고용
-FLIP_180 = True
 CAM_W, CAM_H = 1280, 720
+
+
+def load_dock_params():
+    """reverse_docking.yaml 의 ros__parameters 를 읽어 노드와 같은 보정값 사용."""
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        base = get_package_share_directory("pinky_amr_1")
+        path = os.path.join(base, "params", "reverse_docking.yaml")
+    except Exception:
+        path = os.path.expanduser(
+            "~/just_pick_it/src/just_pick_it/pinky_amr_1/params/reverse_docking.yaml"
+        )
+    with open(path) as f:
+        d = yaml.safe_load(f)
+    # 최상위 키가 '/**/reverse_docking' 형태 → 그 안의 ros__parameters
+    node = next(iter(d.values()))
+    p = node["ros__parameters"]
+    ids = p["marker_ids"]
+    mwx = p["marker_world_x"]
+    mwy = p["marker_world_y"]
+    marker_world = {int(i): (float(x), float(y)) for i, x, y in zip(ids, mwx, mwy)}
+    print(f"[params] {path}\n  yaw_offset={p['marker_yaw_offset_deg']}deg "
+          f"lat_offset={p['marker_lat_offset_m']} depth_scale={p['depth_scale']} "
+          f"lateral_scale={p['lateral_scale']}")
+    return {
+        "MARKER_SIZE": float(p["marker_size_m"]),
+        "CAM_FWD": float(p["camera_forward_offset_m"]),
+        "DEPTH_SCALE": float(p["depth_scale"]),
+        "LATERAL_SCALE": float(p["lateral_scale"]),
+        "LAT_OFFSET": float(p["marker_lat_offset_m"]),
+        "YAW_OFFSET_DEG": float(p["marker_yaw_offset_deg"]),
+        "FLIP_180": bool(p.get("flip_camera_180", True)),
+        "MARKER_WORLD": marker_world,
+    }
 
 
 def load_calib():
@@ -48,6 +77,15 @@ def load_calib():
 
 
 def main():
+    P = load_dock_params()
+    MARKER_SIZE = P["MARKER_SIZE"]
+    CAM_FWD = P["CAM_FWD"]
+    DEPTH_SCALE = P["DEPTH_SCALE"]
+    LATERAL_SCALE = P["LATERAL_SCALE"]
+    LAT_OFFSET = P["LAT_OFFSET"]
+    YAW_OFFSET = math.radians(P["YAW_OFFSET_DEG"])
+    FLIP_180 = P["FLIP_180"]
+    MARKER_WORLD = P["MARKER_WORLD"]
     K, dist = load_calib()
     h = MARKER_SIZE / 2.0
     obj = np.array([[-h, h, 0], [h, h, 0], [h, -h, 0], [-h, -h, 0]], dtype=np.float64)
@@ -104,6 +142,14 @@ def main():
                             f"psi={math.degrees(psi):+.1f}deg "
                             f"robot_x: simple={rx_simple:.3f} dec+={rx_dec:.3f} dec-={rx_dec2:.3f} "
                             f"(실제 dock_x {DOCK.get(mid,('?',))[0]})"
+                        )
+                        # ── 보정 후(reverse_docking 노드와 동일 식): psi_n=psi-offset, Δx=측정식 ──
+                        psi_n = psi - YAW_OFFSET
+                        dx = (-(tx * math.cos(psi_n) + tz * math.sin(psi_n)) * LATERAL_SCALE
+                              + LAT_OFFSET)
+                        line += (
+                            f"\n      [보정후] psi_법선기준={math.degrees(psi_n):+.1f}deg(정면시 ~0) "
+                            f"Δx(node)={dx:+.3f} robot_x_est={mwx + dx:.3f} (목표 {mwx:.3f})"
                         )
                     print("  " + line)
             print("-" * 70)
