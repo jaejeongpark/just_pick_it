@@ -23,6 +23,9 @@ def generate_launch_description():
     reverse_docking_params = PathJoinSubstitution(
         [FindPackageShare('pinky_amr_2'), 'params', 'reverse_docking.yaml']
     )
+    move_to_goal_params = PathJoinSubstitution(
+        [FindPackageShare('pinky_amr_2'), 'params', 'move_to_goal.yaml']
+    )
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -42,6 +45,7 @@ def generate_launch_description():
             output='screen',
             parameters=[
                 reverse_docking_params,
+                move_to_goal_params,
                 {
                     'robot_id': robot_id,
                 },

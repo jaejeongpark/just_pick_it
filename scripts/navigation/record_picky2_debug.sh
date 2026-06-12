@@ -1,23 +1,22 @@
 #!/bin/bash
-# PICKY2 주행 문제 재현용 자동 기록 스크립트.
+# PICKY2 주행 문제 재현용 PC-side 자동 기록 스크립트.
 #
 # 기록 내용:
-#   - /picky2 아래 ROS 토픽 rosbag
-#   - CPU/메모리/온도/throttled
-#   - /picky2/odom, /picky2/scan, /picky2/joint_states 주기
-#   - Nav2/action/graph 상태
-#   - 커널 serial/voltage 로그(dmesg, sudo 권한이 있으면 실시간)
-#   - 실행 중 생성된 ~/.ros/log 파일 일부
+#   - Nav2/State/Fleet 분석에 필요한 /picky2 주요 ROS 토픽 rosbag
+#   - /rosout 로그 토픽
+#   - NavigateToPose / ComputePathToPose / FollowPath / MoveCommand action status/feedback
+#   - scan, tf, odom, amcl, cmd_vel, plan, costmap, transition_event
+#   - PC에서 실행 중 생성된 ~/.ros/log 파일 일부(Fleet/RViz/recorder 로그)
 #
 # 사용법:
 #   bash scripts/navigation/record_picky2_debug.sh
-#   bash scripts/navigation/record_picky2_debug.sh picky2_motor_fail_001
+#   bash scripts/navigation/record_picky2_debug.sh picky2_nav_fail_001
 #
 # 옵션:
-#   PICKY2_DEBUG_BASE=./bags            저장 루트 변경
-#   PICKY2_DEBUG_SYSTEM_INTERVAL=1      시스템 로그 주기(초)
-#   PICKY2_DEBUG_RECORD_CAMERA=1        /picky2/camera 계열 토픽도 bag에 포함
-#   PICKY2_DEBUG_EXTRA_CLI=1            topic hz/echo/graph watch도 추가 실행(부하 큼)
+#   PICKY2_DEBUG_BASE=./bags              저장 루트 변경
+#   PICKY2_DEBUG_MAX_BAG_DURATION=600     bag 자동 split 시간(초)
+#   PICKY2_DEBUG_RECORD_CAMERA=1          /picky2/camera 계열 토픽도 bag에 포함
+#   PICKY2_DEBUG_WITH_PC_MONITOR=1        PC CPU/메모리 감시 로그 추가
 #
 # ROS setup.bash 는 내부에서 비어 있을 수 있는 환경 변수를 참조하므로, source 전에는
 # nounset(-u)을 켜지 않는다.
@@ -33,9 +32,9 @@ set -u
 RUN_NAME="${1:-picky2_debug_$(date +%Y%m%d_%H%M%S)}"
 BASE_DIR="${PICKY2_DEBUG_BASE:-$WS_ROOT/bags}"
 OUT_DIR="$BASE_DIR/$RUN_NAME"
-SYSTEM_INTERVAL="${PICKY2_DEBUG_SYSTEM_INTERVAL:-1}"
+MAX_BAG_DURATION="${PICKY2_DEBUG_MAX_BAG_DURATION:-600}"
 RECORD_CAMERA="${PICKY2_DEBUG_RECORD_CAMERA:-0}"
-EXTRA_CLI="${PICKY2_DEBUG_EXTRA_CLI:-0}"
+WITH_PC_MONITOR="${PICKY2_DEBUG_WITH_PC_MONITOR:-0}"
 
 if [[ -e "$OUT_DIR" ]]; then
     OUT_DIR="${BASE_DIR}/${RUN_NAME}_$(date +%Y%m%d_%H%M%S)"
@@ -169,76 +168,39 @@ trap cleanup INT TERM EXIT
     git -C "$WS_ROOT" status --short 2>/dev/null || true
 } >"$OUT_DIR/manifest.txt"
 
-EXCLUDE_REGEX='/picky2/camera/.*|/picky2/.*image.*'
+TOPIC_REGEX='^(/rosout|/diagnostics|/parameter_events|/picky2/(amcl_pose|battery/(percent|voltage)|behavior_tree_log|clicked_point|cmd_vel|cmd_vel_nav|cmd_vel_teleop|controller_selector|curvature_lookahead_point|goal_pose|initialpose|is_rotating_to_heading|joint_states|lookahead_collision_arc|lookahead_point|map|map_updates|odom|particle_cloud|picky_state|plan|plan_smoothed|planner_selector|preempt_teleop|received_global_plan|robot_description|scan|speed_limit|tf|tf_static|waypoints|.*transition_event|local_costmap/(costmap|costmap_updates|costmap_raw|costmap_raw_updates|footprint|published_footprint|obstacle_layer|obstacle_layer_updates|obstacle_layer_raw|obstacle_layer_raw_updates|local_costmap/transition_event)|global_costmap/(costmap|costmap_updates|costmap_raw|costmap_raw_updates|footprint|published_footprint|obstacle_layer|obstacle_layer_updates|obstacle_layer_raw|obstacle_layer_raw_updates|static_layer|static_layer_updates|static_layer_raw|static_layer_raw_updates|global_costmap/transition_event)|[^/]+/_action/(status|feedback)))$'
+
 if [[ "$RECORD_CAMERA" == "1" ]]; then
-    EXCLUDE_REGEX='^$'
+    TOPIC_REGEX='^(/rosout|/diagnostics|/parameter_events|/picky2/(camera/.*|.*image.*|amcl_pose|battery/(percent|voltage)|behavior_tree_log|clicked_point|cmd_vel|cmd_vel_nav|cmd_vel_teleop|controller_selector|curvature_lookahead_point|goal_pose|initialpose|is_rotating_to_heading|joint_states|lookahead_collision_arc|lookahead_point|map|map_updates|odom|particle_cloud|picky_state|plan|plan_smoothed|planner_selector|preempt_teleop|received_global_plan|robot_description|scan|speed_limit|tf|tf_static|waypoints|.*transition_event|local_costmap/(costmap|costmap_updates|costmap_raw|costmap_raw_updates|footprint|published_footprint|obstacle_layer|obstacle_layer_updates|obstacle_layer_raw|obstacle_layer_raw_updates|local_costmap/transition_event)|global_costmap/(costmap|costmap_updates|costmap_raw|costmap_raw_updates|footprint|published_footprint|obstacle_layer|obstacle_layer_updates|obstacle_layer_raw|obstacle_layer_raw_updates|static_layer|static_layer_updates|static_layer_raw|static_layer_raw_updates|global_costmap/transition_event)|[^/]+/_action/(status|feedback)))$'
 fi
 
 start_bg \
     "rosbag_record" \
     ros2 bag record \
-        --regex '^/picky2/(odom|joint_states|scan|tf|tf_static|battery/percent|battery/voltage|picky_state|cmd_vel|cmd_vel_nav|amcl_pose|plan|received_global_plan|local_costmap/costmap|local_costmap/costmap_updates|global_costmap/costmap|global_costmap/costmap_updates|.*transition_event)$' \
-        --exclude-regex "$EXCLUDE_REGEX" \
+        --include-hidden-topics \
+        --regex "$TOPIC_REGEX" \
         --storage mcap \
         --storage-preset-profile fastwrite \
-        --max-bag-duration 300 \
+        --max-bag-duration "$MAX_BAG_DURATION" \
         -o "$BAG_DIR"
 
 snapshot_ros_graph "initial" || true
 
-start_shell_bg "system_monitor" "
+if [[ "$WITH_PC_MONITOR" == "1" ]]; then
+    start_shell_bg "pc_monitor" "
 while true; do
     echo '=== '\"\$(date '+%F %T.%3N %z')\"' ==='
-    vcgencmd measure_temp 2>&1 || true
-    vcgencmd get_throttled 2>&1 || true
     uptime 2>&1 || true
     free -h 2>&1 || true
     ps -eo pid,comm,%cpu,%mem,rss,args --sort=-%cpu | head -30 2>&1 || true
     echo
-    sleep '$SYSTEM_INTERVAL'
+    sleep 1
 done
 "
-
-if [[ "$EXTRA_CLI" == "1" ]]; then
-    start_shell_bg "ros_graph_watch" "
-while true; do
-    echo '=== '\"\$(date '+%F %T.%3N %z')\"' ==='
-    echo '-- nodes --'
-    timeout 5s ros2 node list 2>&1 || true
-    echo '-- actions --'
-    timeout 5s ros2 action list -t 2>&1 || true
-    echo
-    sleep 10
-done
-"
-
-    for topic in /picky2/odom /picky2/scan /picky2/joint_states /picky2/cmd_vel /picky2/cmd_vel_nav; do
-        safe_name="${topic#/}"
-        safe_name="${safe_name//\//_}"
-        start_bg "hz_${safe_name}" ros2 topic hz "$topic"
-    done
-
-    for topic in /picky2/picky_state /picky2/battery/percent /picky2/amcl_pose; do
-        safe_name="${topic#/}"
-        safe_name="${safe_name//\//_}"
-        start_bg "echo_${safe_name}" ros2 topic echo "$topic"
-    done
-fi
-
-if sudo -n true 2>/dev/null; then
-    start_shell_bg "dmesg_filtered" \
-        "sudo dmesg -Tw | grep --line-buffered -iE 'ttyAMA5|ttyS0|serial|dynamixel|voltage|under|reset|disconnect|over-current|thrott'"
-else
-    {
-        echo "sudo -n unavailable. Run this in another terminal if kernel log is needed:"
-        echo "  sudo dmesg -Tw | grep -iE 'ttyAMA5|ttyS0|serial|dynamixel|voltage|under|reset|disconnect|over-current|thrott'"
-        echo
-        dmesg -Tw 2>&1 | grep -iE 'ttyAMA5|ttyS0|serial|dynamixel|voltage|under|reset|disconnect|over-current|thrott' || true
-    } >"$OUT_DIR/dmesg_filtered.log"
 fi
 
 log "recording to $OUT_DIR"
-log "stop with Ctrl+C after the issue happens"
+log "start this before placing an order; stop with Ctrl+C after the issue happens"
 
 while true; do
     sleep 3600

@@ -47,7 +47,7 @@ VALUES (
     (
         'PRODUCT_ZONE_1',
         'PRODUCT',
-        0.64,
+        0.63,
         0.60,
         0.00,
         0.00
@@ -55,7 +55,7 @@ VALUES (
     (
         'PRODUCT_ZONE_2',
         'PRODUCT',
-        1.05,
+        1.04,
         0.60,
         0.00,
         0.00
@@ -63,7 +63,7 @@ VALUES (
     (
         'PRODUCT_ZONE_3',
         'PRODUCT',
-        1.48,
+        1.47,
         0.60,
         0.00,
         0.00
@@ -71,7 +71,7 @@ VALUES (
     (
         'PRODUCT_ZONE_4',
         'PRODUCT',
-        0.64,
+        0.63,
         0.36,
         0.00,
         0.00
@@ -79,7 +79,7 @@ VALUES (
     (
         'PRODUCT_ZONE_5',
         'PRODUCT',
-        1.05,
+        1.04,
         0.36,
         0.00,
         0.00
@@ -87,7 +87,7 @@ VALUES (
     (
         'PRODUCT_ZONE_6',
         'PRODUCT',
-        1.48,
+        1.47,
         0.36,
         0.00,
         0.00
@@ -144,7 +144,7 @@ VALUES (
         'PICKUP_ZONE_1',
         'PICKUP',
         1.80,
-        0.85,
+        0.82,
         0.00,
         3.14
     ),
@@ -152,7 +152,7 @@ VALUES (
         'PICKUP_ZONE_2',
         'PICKUP',
         1.80,
-        0.15,
+        0.18,
         0.00,
         3.14
     ),
@@ -194,7 +194,7 @@ VALUES (
     (
         'TRAFFIC_T1',
         'TRAFFIC',
-        0.64,
+        0.63,
         0.85,
         0.00,
         0.00
@@ -202,7 +202,7 @@ VALUES (
     (
         'TRAFFIC_T2',
         'TRAFFIC',
-        1.05,
+        1.04,
         0.85,
         0.00,
         0.00
@@ -210,7 +210,7 @@ VALUES (
     (
         'TRAFFIC_T3',
         'TRAFFIC',
-        1.48,
+        1.47,
         0.85,
         0.00,
         0.00
@@ -218,7 +218,7 @@ VALUES (
     (
         'TRAFFIC_B1',
         'TRAFFIC',
-        0.64,
+        0.63,
         0.15,
         0.00,
         0.00
@@ -226,7 +226,7 @@ VALUES (
     (
         'TRAFFIC_B2',
         'TRAFFIC',
-        1.05,
+        1.04,
         0.15,
         0.00,
         0.00
@@ -234,7 +234,7 @@ VALUES (
     (
         'TRAFFIC_B3',
         'TRAFFIC',
-        1.48,
+        1.47,
         0.15,
         0.00,
         0.00

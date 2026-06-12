@@ -123,7 +123,7 @@ controller_server:
       # 소형 아레나(2x1m): 벽 충돌 검사로 인한 잦은 정지를 막는다. 경로는 global
       # planner 가 충돌 회피하므로 RPP 는 그 경로를 따라가기만 한다.
       use_collision_detection: true
-      max_allowed_time_to_collision_up_to_carrot: 0.4
+      max_allowed_time_to_collision_up_to_carrot: 0.5
       use_interpolation: true
 
       # ========= 회전 우선 관련 핵심 파라미터 =========
@@ -163,6 +163,7 @@ controller_server:
 local_costmap:
   local_costmap:
     ros__parameters:
+      footprint_padding: 0.0
       update_frequency: 5.0
       publish_frequency: 2.0
       global_frame: odom
@@ -231,7 +232,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.03
+        inflation_radius: 0.05
       always_send_full_costmap: False
 
 # The yaml_filename does not need to be specified since it going to be set by defaults in launch.
@@ -255,7 +256,7 @@ planner_server:
     costmap_update_timeout: 1.0
     GridBased:
       plugin: "nav2_navfn_planner::NavfnPlanner"
-      tolerance: 0.10
+      tolerance: 0.03
       use_astar: false
       allow_unknown: true
 

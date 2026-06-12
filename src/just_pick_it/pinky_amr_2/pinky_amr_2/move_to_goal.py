@@ -14,6 +14,7 @@ import time
 import threading
 
 import rclpy
+from action_msgs.msg import GoalStatus
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.time import Time
@@ -48,6 +49,21 @@ STOP_NEAREST_Y = "NEAREST_Y"    # +y/-y 중 회전이 적은 쪽 (MOVE_TO_PRODUC
 STOP_PLUS_Y = "PLUS_Y"          # 월드 +y 고정 (RETURN_HOME, standby)
 STOP_PLUS_X = "PLUS_X"          # 월드 +x 고정 (MOVE_TO_STOCK)
 STOP_MINUS_X = "MINUS_X"        # 월드 -x 고정 (MOVE_TO_PICKUP)
+
+
+GOAL_STATUS_NAMES = {
+    GoalStatus.STATUS_UNKNOWN: "UNKNOWN",
+    GoalStatus.STATUS_ACCEPTED: "ACCEPTED",
+    GoalStatus.STATUS_EXECUTING: "EXECUTING",
+    GoalStatus.STATUS_CANCELING: "CANCELING",
+    GoalStatus.STATUS_SUCCEEDED: "SUCCEEDED",
+    GoalStatus.STATUS_CANCELED: "CANCELED",
+    GoalStatus.STATUS_ABORTED: "ABORTED",
+}
+
+
+def goal_status_name(status: int) -> str:
+    return GOAL_STATUS_NAMES.get(status, f"UNKNOWN({status})")
 
 
 class MoveToGoal(Node):
@@ -180,21 +196,30 @@ class MoveToGoal(Node):
                 return False
             time.sleep(0.05)
 
-        goal_handle = send_future.result()
+        try:
+            goal_handle = send_future.result()
+        except Exception as exc:
+            self.get_logger().error(f"Nav2 goal send failed: {exc}")
+            return False
+
         if not goal_handle or not goal_handle.accepted:
             self.get_logger().error("Nav2 goal rejected")
             return False
         with self._lock:
             self._active_goal_handle = goal_handle
 
+        result_future = goal_handle.get_result_async()
+        self.get_logger().info(
+            f"Nav2 goal accepted — target=({x:.3f},{y:.3f}), "
+            f"reach_dist={reach_dist:.3f}m"
+        )
+
         deadline = time.time() + self._nav_timeout
         while time.time() < deadline:
             if self._is_cancel_requested():
                 goal_handle.cancel_goal_async()
                 self._stop_robot()
-                with self._lock:
-                    if self._active_goal_handle is goal_handle:
-                        self._active_goal_handle = None
+                self._clear_active_goal(goal_handle)
                 return False
 
             with self._lock:
@@ -214,20 +239,58 @@ class MoveToGoal(Node):
                 self.get_logger().info(
                     f"Nav2 phase done — dist={dist:.3f}m, switching to precision"
                 )
-                with self._lock:
-                    if self._active_goal_handle is goal_handle:
-                        self._active_goal_handle = None
+                self._clear_active_goal(goal_handle)
                 return True
+
+            if result_future.done():
+                if self._handle_nav2_result(result_future, goal_handle, dist):
+                    return True
+                return False
 
             time.sleep(0.1)
 
         # 타임아웃 — Nav2 취소
         goal_handle.cancel_goal_async()
+        self._stop_robot()
+        self._clear_active_goal(goal_handle)
+        self.get_logger().warn("Nav2 navigation timeout")
+        return False
+
+    def _handle_nav2_result(self, result_future, goal_handle, dist: float) -> bool:
+        """Nav2 action result를 state_machine이 판단할 수 있는 bool로 변환한다."""
+        try:
+            response = result_future.result()
+        except Exception as exc:
+            self._stop_robot()
+            self._clear_active_goal(goal_handle)
+            self.get_logger().error(f"Nav2 result read failed: {exc}")
+            return False
+
+        status = response.status
+        status_name = goal_status_name(status)
+        nav_result = getattr(response, "result", None)
+        error_code = getattr(nav_result, "error_code", None)
+        error_msg = getattr(nav_result, "error_msg", "")
+
+        self._stop_robot()
+        self._clear_active_goal(goal_handle)
+
+        if status == GoalStatus.STATUS_SUCCEEDED:
+            self.get_logger().info(f"Nav2 result SUCCEEDED — dist={dist:.3f}m")
+            return True
+
+        detail = f"status={status_name}, dist={dist:.3f}m"
+        if error_code is not None:
+            detail += f", error_code={error_code}"
+        if error_msg:
+            detail += f", error_msg={error_msg}"
+        self.get_logger().error(f"Nav2 result failed — {detail}")
+        return False
+
+    def _clear_active_goal(self, goal_handle) -> None:
         with self._lock:
             if self._active_goal_handle is goal_handle:
                 self._active_goal_handle = None
-        self.get_logger().warn("Nav2 navigation timeout")
-        return False
 
     def _precision_approach(self, tx: float, ty: float) -> bool:
         """저속 직진으로 목표 xy 오차 이하까지 접근."""
