@@ -282,8 +282,6 @@ class ReverseDocking(Node):
             [ h, -h, 0.0],
             [-h, -h, 0.0],
         ], dtype=np.float64)
-        # ±π 평면 모호성 해소용: 직전에 채택한 psi(시간연속성으로 8° 튐 거름). 도킹 시작 시 리셋.
-        self._last_psi = None
 
         # ── PID (정밀 정렬용 라인 lateral/yaw) ──────────────────────────
         self._lane_lat_pid = PID(self._lane_lat_kp, 0.0, 0.0005)
@@ -342,7 +340,6 @@ class ReverseDocking(Node):
         )
         self._lane_lat_pid.reset()
         self._lane_yaw_pid.reset()
-        self._last_psi = None   # 모호성 해소 시간연속성 초기화(첫 검출은 재투영오차로)
 
         # picamera2 모드는 도킹 동안만 카메라를 열고, 끝나면(성공/실패 무관) 반납한다.
         self._open_camera()
@@ -353,16 +350,15 @@ class ReverseDocking(Node):
                 self.get_logger().error("reverse_dock: FAILED — 마커 미획득")
                 return False
 
-            # 2) 흐름(사용자 지정): 초기 recenter → [법선정렬(yaw_align) → 측정 → arc →
-            #    마커방향정렬(recenter)] × N → 최종 법선정렬(yaw_align) → 후진. 매 보정 후
-            #    마커 방향으로 다시 정렬(recenter)한 뒤 다음 법선정렬을 한다.
-            #    후진은 reverse_insert 가 정렬된 헤딩을 odom 으로 앵커링·유지(후진 중 마커 이탈).
+            # 2) 정렬 반복. 핵심: 측정 전에 똑바로 세운다(psi≈0) → Δx 가 phantom 없이 깨끗.
+            #    순서: 초기 recenter → [똑바로세움 → 측정 → arc → recenter] × N.
             if not self._recenter_on_marker(marker_id, 0.0):
                 self._stop()
                 self.get_logger().error("reverse_dock: FAILED — 초기 재정렬")
                 return False
             for p in range(self._align_passes):
-                self._align_yaw_to_normal(marker_id)   # 법선 정렬(측정 전 똑바로)
+                # 측정 전 똑바로 세움(법선 정면) → 측정이 깨끗해짐.
+                self._align_yaw_to_normal(marker_id)
                 dx = self._measure_lateral_offset(marker_id)
                 if dx is None:
                     self._stop()
@@ -371,27 +367,35 @@ class ReverseDocking(Node):
                 self.get_logger().info(
                     f"정렬 {p + 1}/{self._align_passes}차: Δx={dx:+.3f}m"
                 )
+                # 수렴 종료: Δx 가 허용오차보다 작으면 정렬된 것으로 보고 종료. 허용오차를
+                # 보수적으로(작게) 둬야 off 인데 작게 측정돼 건너뛰고 후진하는 걸 줄인다.
                 if abs(dx) < self._align_conv_tol:
                     self.get_logger().info(
                         f"정렬 수렴 (|Δx|={abs(dx):.3f} < {self._align_conv_tol}) → 반복 종료"
                     )
                     break
+                # 보정 게인: 1차는 first_pass_gain(0.8), 2차+ 는 arc_refine_gain(0.3) 만
+                # 이동해 과보정으로 법선을 지나치는 것을 막는다.
                 gain = self._first_pass_gain if p == 0 else self._arc_refine_gain
                 move_dx = dx * gain
                 self.get_logger().info(
                     f"  보정: Δx {dx:+.3f} 의 {gain}배 = {move_dx:+.3f}m 이동"
                 )
+                # 부드러운 후진 arc 로 법선 진입(open-loop, odom 으로 종료판단). dx>0 → 서쪽.
                 if not self._arc_into_line(move_dx):
                     self._stop()
                     self.get_logger().error("reverse_dock: FAILED — arc 진입")
                     return False
-                if not self._recenter_on_marker(marker_id, move_dx):   # 마커 방향 정렬
+                # arc 회전 후 마커 다시 중앙으로(이동 부호로 탐색방향 힌트).
+                if not self._recenter_on_marker(marker_id, move_dx):
                     self._stop()
                     self.get_logger().error("reverse_dock: FAILED — 마커 재정렬")
                     return False
 
-            # 3) 후진 전 최종 법선 정렬(이 헤딩을 reverse_insert 가 odom 으로 앵커링·유지).
+            # 3) 후진 전 똑바로 세움(이 헤딩을 odom θ_ref 로 앵커링해 후진 내내 유지).
             self._align_yaw_to_normal(marker_id)
+
+            # 4) 그대로 직진 후진 + 마커 깊이로 정지.
             if not self._reverse_insert(marker_id, marker_y, dock_map_y):
                 self._stop()
                 self.get_logger().error("reverse_dock: FAILED — 후진 도킹")
@@ -462,7 +466,6 @@ class ReverseDocking(Node):
         marker_id: int,
         marker_world_y: float,
         dock_y: float,
-        theta_ref: float = None,
     ) -> bool:
         """후진 도킹 + 마커 깊이 정지. 진입 시 로봇은 이미 법선 정렬·마커 정면 상태.
 
@@ -475,13 +478,11 @@ class ReverseDocking(Node):
         deadline = time.time() + self._insert_to
         last_tx = 0.0
         last_log = 0.0
-        # 후진 헤딩(법선): 방법B 가 캡처한 θ_ref 를 받으면 그걸 유지(측정·정렬과 동일 기준).
-        # 못 받으면(None) 진입 직후 odom yaw 로 앵커링(하위호환).
-        if theta_ref is None:
-            od0 = self._get_odom()
-            theta_ref = od0[2] if od0 is not None else None
+        # 후진 시작 헤딩(법선)을 odom 으로 앵커링 → 이 헤딩을 유지한다.
+        od0 = self._get_odom()
+        theta_ref = od0[2] if od0 is not None else None
         if theta_ref is not None:
-            self.get_logger().info(f"Insert: odom 헤딩 θ_ref={math.degrees(theta_ref):+.1f}deg 유지")
+            self.get_logger().info(f"Insert: odom 헤딩 앵커 θ_ref={math.degrees(theta_ref):+.1f}deg")
 
         while time.time() < deadline:
             if self._emergency.is_stopped():
@@ -625,39 +626,32 @@ class ReverseDocking(Node):
                 self._stop()
                 deadline += self._wait_if_paused()
                 continue
-            psis = []
-            for _ in range(15):   # 프레임별 psi 수집 후 median → flip(±π) outlier 제거.
+            nxs, nzs = [], []
+            for _ in range(3):
                 f = self._get_latest_frame()
                 if f is not None:
                     m = self._detect_aruco(f, marker_id)
                     if m is not None:
                         R, _ = cv2.Rodrigues(
                             np.asarray(m[1], dtype=np.float64).reshape(3, 1))
-                        psis.append(math.atan2(float(R[0, 2]), -float(R[2, 2])))
+                        nxs.append(float(R[0, 2]))
+                        nzs.append(float(R[2, 2]))
                 time.sleep(0.02)
-            if not psis:
+            if not nxs:
                 self._stop()
                 self.get_logger().info("YawAlign: 마커 미검출 → 현 정렬 유지")
                 return True
-            # median: 평균은 flip 한두개에 편향되지만 중앙값은 강건(θ_ref 정확도 핵심).
-            psis.sort()
-            psi = psis[len(psis) // 2]
-            # 마커 장착 미세 기울기 보정: 실제 법선 정면은 psi=marker_yaw_offset 일 때이므로
-            # 그 기준으로 정렬(psi_err→0). (마커 fronto-parallel psi=0 이 실제 법선이 아님)
-            psi_err = psi - self._marker_yaw_offset
-            if abs(psi_err) < self._yaw_align_tol:
+            psi = math.atan2(sum(nxs) / len(nxs), -sum(nzs) / len(nzs))
+            if abs(psi) < self._yaw_align_tol:
                 self._stop()
-                self.get_logger().info(
-                    f"YawAlign: 완료 (psi={math.degrees(psi):+.1f}deg, "
-                    f"법선기준 err={math.degrees(psi_err):+.1f}deg)"
-                )
+                self.get_logger().info(f"YawAlign: 완료 (psi={math.degrees(psi):+.1f}deg)")
                 return True
-            if prev_abs is not None and abs(psi_err) > prev_abs + 0.03:
+            if prev_abs is not None and abs(psi) > prev_abs + 0.03:
                 omega_sign = -omega_sign
                 self.get_logger().warn("YawAlign: 방향 반대 감지 → 부호 반전")
-            prev_abs = abs(psi_err)
+            prev_abs = abs(psi)
             twist = Twist()
-            twist.angular.z = self._clamp(omega_sign * self._recenter_kp * psi_err)
+            twist.angular.z = self._clamp(omega_sign * self._recenter_kp * psi)
             self._cmd_pub.publish(twist)
             if time.time() - last_log > 0.5:
                 self.get_logger().info(f"YawAlign: psi={math.degrees(psi):+.1f}deg")
@@ -675,7 +669,7 @@ class ReverseDocking(Node):
         성분(R[0,2], R[2,2])을 평균해 한 번만 psi 를 구한다(노이즈·flip 완화).
         Δx>0 이면 로봇이 법선보다 +x(동)쪽 → 서쪽으로 이동해야 함. 실패 시 None.
         """
-        txs, tzs, psis = [], [], []
+        txs, tzs, nxs, nzs = [], [], [], []
         deadline = time.time() + 3.0
         while len(txs) < self._measure_frames and time.time() < deadline:
             frame = self._get_latest_frame()
@@ -690,26 +684,23 @@ class ReverseDocking(Node):
             R, _ = cv2.Rodrigues(np.asarray(rvec, dtype=np.float64).reshape(3, 1))
             txs.append(float(tvec[0]))
             tzs.append(float(tvec[2]))
-            psis.append(math.atan2(float(R[0, 2]), -float(R[2, 2])))
+            nxs.append(float(R[0, 2]))
+            nzs.append(float(R[2, 2]))
             time.sleep(0.03)
         if len(txs) < 3:
             self.get_logger().warn("Measure: 마커 샘플 부족")
             return None
-        # median: flip(±π) outlier 제거(평균은 flip 한두개에 편향).
-        tx = sorted(txs)[len(txs) // 2]
-        tz = sorted(tzs)[len(tzs) // 2]
-        psis.sort()
-        psi = psis[len(psis) // 2]
-        psi_n = psi - self._marker_yaw_offset
-        # 마커 정면(recenter) 자세에서 측정 → tx≈0, 횡오차는 tz·sin(psi_n) 에 담긴다.
-        # 법선 자세는 off-line 시 마커가 화각을 벗어나 검출 불가라 부득이 마커 정면에서 측정.
-        # 그래서 디커플링 전체식 사용(psi 노이즈는 median + 모호성해소로 완화).
-        dx = (-(tx * math.cos(psi_n) + tz * math.sin(psi_n)) * self._lateral_scale
+        tx = sum(txs) / len(txs)
+        tz = sum(tzs) / len(tzs)
+        psi = math.atan2(sum(nxs) / len(nxs), -sum(nzs) / len(nzs))
+        # solvePnP tvec 이 실측보다 짧게 나오므로 lateral_scale(측정거리 기준 ~1.48)을 곱해
+        # 실제 거리(m)로. 깊이정지(원거리)용 depth_scale 과 분리(측정·정지 거리가 달라 비율 다름).
+        dx = (-(tx * math.cos(psi) + tz * math.sin(psi)) * self._lateral_scale
               + self._marker_lat_offset)
         self.get_logger().info(
             f"Measure: Δx={dx:+.3f}m (tx={tx:.3f} tz={tz:.3f} "
-            f"psi={math.degrees(psi):+.1f}deg(법선기준 {math.degrees(psi_n):+.1f}), "
-            f"lat_scale={self._lateral_scale}, offset={self._marker_lat_offset}, n={len(txs)})"
+            f"psi={math.degrees(psi):+.1f}deg, lat_scale={self._lateral_scale}, "
+            f"offset={self._marker_lat_offset}, n={len(txs)})"
         )
         return dx
 
@@ -790,54 +781,12 @@ class ReverseDocking(Node):
         with self._odom_lock:
             return self._odom
 
-    def _rotate_to_odom_yaw(self, theta_target: float,
-                            tol: float = 0.01, timeout: float = 4.0) -> bool:
-        """odom yaw 를 theta_target 으로 제자리 회전(P제어).
-
-        부호가 표준이라 psi 의 ±π/부호 혼란이 없다: odom yaw 는 CCW 로 증가하고
-        angular.z>0 도 CCW 이므로 err=target-cur>0 이면 ω>0(CCW)로 좁힌다. odom 은
-        단기적으로 정밀해 헤딩오차 δ 를 ~0 으로 만든다(횡 측정의 D·sin(δ) 누설 차단).
-        odom 없으면 즉시 True(best-effort, 현 헤딩 유지).
-        """
-        deadline = time.time() + timeout
-        last_log = 0.0
-        while time.time() < deadline:
-            if self._emergency.is_stopped():
-                self._stop()
-                deadline += self._wait_if_paused()
-                continue
-            od = self._get_odom()
-            if od is None:
-                self._stop()
-                self.get_logger().warn("OdomYaw: odom 없음 → 현 헤딩 유지")
-                return True
-            err = math.atan2(math.sin(theta_target - od[2]),
-                             math.cos(theta_target - od[2]))
-            if abs(err) < tol:
-                self._stop()
-                return True
-            twist = Twist()
-            twist.angular.z = self._clamp(self._yaw_hold_kp * err)   # err>0 → CCW(+)
-            self._cmd_pub.publish(twist)
-            if time.time() - last_log > 0.5:
-                self.get_logger().info(
-                    f"OdomYaw: 법선 복귀 중 err={math.degrees(err):+.1f}deg "
-                    f"(target={math.degrees(theta_target):+.1f}deg)"
-                )
-                last_log = time.time()
-            time.sleep(0.05)
-        self._stop()
-        self.get_logger().info("OdomYaw: timeout → 현 헤딩 유지")
-        return True
-
     # ====================================================================== #
     # 검출
     # ====================================================================== #
 
     def _detect_aruco(self, frame, target_id: int):
-        """IPPE_SQUARE 기반 ArUco pose. 평면 ±π 모호성을 두 해 중 직전 psi 와 가장
-        가까운 해(시간연속성)로 골라 해소한다. 첫 검출은 재투영오차 작은 해.
-        (tvec[3], rvec[3]) 또는 None."""
+        """IPPE_SQUARE solvePnP 기반 ArUco pose. (tvec[3], rvec[3]) 또는 None."""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         corners, ids, _ = self._detector.detectMarkers(gray)
         if ids is None:
@@ -846,32 +795,15 @@ class ReverseDocking(Node):
         for i, mid in enumerate(ids.flatten()):
             if mid != target_id:
                 continue
-            n, rvecs, tvecs, errs = cv2.solvePnPGeneric(
+            ok, rvec, tvec = cv2.solvePnP(
                 self._marker_obj_pts,
                 corners[i][0].astype(np.float64),
                 self._cam_matrix,
                 self._dist_coeffs,
-                flags=cv2.SOLVEPNP_IPPE_SQUARE,   # 평면 정사각 마커: 최대 2해 반환
+                flags=cv2.SOLVEPNP_IPPE_SQUARE,   # 평면 정사각 마커 ambiguity 처리
             )
-            if n < 1:
-                return None
-            # 각 해의 psi(법선기준 헤딩) 계산
-            cands = []
-            for si in range(n):
-                R, _ = cv2.Rodrigues(rvecs[si])
-                psi = math.atan2(float(R[0, 2]), -float(R[2, 2]))
-                e = float(errs[si][0]) if errs is not None else 0.0
-                cands.append((psi, e, rvecs[si], tvecs[si]))
-            # ±π 모호성 해소: 직전 psi 가 있으면 그와 가장 가까운 해(8° 튐 거름),
-            # 없으면(첫 검출) 재투영오차 작은 해. 정면 근처서 두 오차가 비슷해도
-            # 시간연속성으로 한 군집에 고정된다.
-            if self._last_psi is not None and n > 1:
-                psi, _, rvec, tvec = min(
-                    cands, key=lambda c: abs(c[0] - self._last_psi))
-            else:
-                psi, _, rvec, tvec = min(cands, key=lambda c: c[1])
-            self._last_psi = psi
-            return tvec.flatten(), rvec.flatten()
+            if ok:
+                return tvec.flatten(), rvec.flatten()
 
         return None
 
