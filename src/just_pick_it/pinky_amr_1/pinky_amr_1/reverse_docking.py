@@ -353,15 +353,30 @@ class ReverseDocking(Node):
                 self.get_logger().error("reverse_dock: FAILED — 마커 미획득")
                 return False
 
-            # 2) 정렬 반복. 핵심: 측정 전에 똑바로 세운다(psi≈0) → Δx 가 phantom 없이 깨끗.
-            #    순서: 초기 recenter → [똑바로세움 → 측정 → arc → recenter] × N.
+            # 2) 법선 헤딩 1회 확립 후 odom 캡처(방법B).
+            #    초기 recenter(거친 마커 중심) → yaw_align(psi 1회로 법선 근처) →
+            #    그 헤딩을 odom θ_ref 로 박는다. 이후 정렬·측정·후진은 psi 재정렬을
+            #    안 쓰고 odom 으로 θ_ref 를 정밀 유지한다(psi ±2° 가 D·sin 으로 depth
+            #    증폭되던 횡오차를 odom 정밀 헤딩으로 차단).
             if not self._recenter_on_marker(marker_id, 0.0):
                 self._stop()
                 self.get_logger().error("reverse_dock: FAILED — 초기 재정렬")
                 return False
+            self._align_yaw_to_normal(marker_id)   # psi 로 법선 1회 정렬(헤딩 기준 확립)
+            od0 = self._get_odom()
+            if od0 is None:
+                self._stop()
+                self.get_logger().error("reverse_dock: FAILED — odom 없음(방법B 헤딩 캡처 불가)")
+                return False
+            theta_ref = od0[2]
+            self.get_logger().info(
+                f"방법B: 법선 헤딩 odom 캡처 θ_ref={math.degrees(theta_ref):+.1f}deg → 이후 odom 유지"
+            )
+
+            # 3) 횡 정렬 반복: 매 측정 전 odom 으로 θ_ref(법선) 복귀 → 측정 → arc.
+            #    psi 재정렬 안 씀(헤딩 δ≈0 을 odom 으로 보장 → 측정이 depth 독립).
             for p in range(self._align_passes):
-                # 측정 전 똑바로 세움(법선 정면) → 측정이 깨끗해짐.
-                self._align_yaw_to_normal(marker_id)
+                self._rotate_to_odom_yaw(theta_ref)
                 dx = self._measure_lateral_offset(marker_id)
                 if dx is None:
                     self._stop()
@@ -370,36 +385,26 @@ class ReverseDocking(Node):
                 self.get_logger().info(
                     f"정렬 {p + 1}/{self._align_passes}차: Δx={dx:+.3f}m"
                 )
-                # 수렴 종료: Δx 가 허용오차보다 작으면 정렬된 것으로 보고 종료. 허용오차를
-                # 보수적으로(작게) 둬야 off 인데 작게 측정돼 건너뛰고 후진하는 걸 줄인다.
                 if abs(dx) < self._align_conv_tol:
                     self.get_logger().info(
                         f"정렬 수렴 (|Δx|={abs(dx):.3f} < {self._align_conv_tol}) → 반복 종료"
                     )
                     break
-                # 보정 게인: 1차는 first_pass_gain(0.8), 2차+ 는 arc_refine_gain(0.3) 만
-                # 이동해 과보정으로 법선을 지나치는 것을 막는다.
                 gain = self._first_pass_gain if p == 0 else self._arc_refine_gain
                 move_dx = dx * gain
                 self.get_logger().info(
                     f"  보정: Δx {dx:+.3f} 의 {gain}배 = {move_dx:+.3f}m 이동"
                 )
-                # 부드러운 후진 arc 로 법선 진입(open-loop, odom 으로 종료판단). dx>0 → 서쪽.
+                # arc 로 횡 진입(open-loop). arc 후 헤딩이 틀어지지만 다음 루프 상단의
+                # _rotate_to_odom_yaw 가 θ_ref 로 다시 정밀 복귀시킨다(recenter 불필요).
                 if not self._arc_into_line(move_dx):
                     self._stop()
                     self.get_logger().error("reverse_dock: FAILED — arc 진입")
                     return False
-                # arc 회전 후 마커 다시 중앙으로(이동 부호로 탐색방향 힌트).
-                if not self._recenter_on_marker(marker_id, move_dx):
-                    self._stop()
-                    self.get_logger().error("reverse_dock: FAILED — 마커 재정렬")
-                    return False
 
-            # 3) 후진 전 똑바로 세움(이 헤딩을 odom θ_ref 로 앵커링해 후진 내내 유지).
-            self._align_yaw_to_normal(marker_id)
-
-            # 4) 그대로 직진 후진 + 마커 깊이로 정지.
-            if not self._reverse_insert(marker_id, marker_y, dock_map_y):
+            # 4) 후진 전 odom 으로 법선(θ_ref) 정렬 후, θ_ref 유지하며 후진.
+            self._rotate_to_odom_yaw(theta_ref)
+            if not self._reverse_insert(marker_id, marker_y, dock_map_y, theta_ref):
                 self._stop()
                 self.get_logger().error("reverse_dock: FAILED — 후진 도킹")
                 return False
@@ -469,6 +474,7 @@ class ReverseDocking(Node):
         marker_id: int,
         marker_world_y: float,
         dock_y: float,
+        theta_ref: float = None,
     ) -> bool:
         """후진 도킹 + 마커 깊이 정지. 진입 시 로봇은 이미 법선 정렬·마커 정면 상태.
 
@@ -481,11 +487,13 @@ class ReverseDocking(Node):
         deadline = time.time() + self._insert_to
         last_tx = 0.0
         last_log = 0.0
-        # 후진 시작 헤딩(법선)을 odom 으로 앵커링 → 이 헤딩을 유지한다.
-        od0 = self._get_odom()
-        theta_ref = od0[2] if od0 is not None else None
+        # 후진 헤딩(법선): 방법B 가 캡처한 θ_ref 를 받으면 그걸 유지(측정·정렬과 동일 기준).
+        # 못 받으면(None) 진입 직후 odom yaw 로 앵커링(하위호환).
+        if theta_ref is None:
+            od0 = self._get_odom()
+            theta_ref = od0[2] if od0 is not None else None
         if theta_ref is not None:
-            self.get_logger().info(f"Insert: odom 헤딩 앵커 θ_ref={math.degrees(theta_ref):+.1f}deg")
+            self.get_logger().info(f"Insert: odom 헤딩 θ_ref={math.degrees(theta_ref):+.1f}deg 유지")
 
         while time.time() < deadline:
             if self._emergency.is_stopped():
@@ -792,6 +800,46 @@ class ReverseDocking(Node):
     def _get_odom(self):
         with self._odom_lock:
             return self._odom
+
+    def _rotate_to_odom_yaw(self, theta_target: float,
+                            tol: float = 0.01, timeout: float = 4.0) -> bool:
+        """odom yaw 를 theta_target 으로 제자리 회전(P제어).
+
+        부호가 표준이라 psi 의 ±π/부호 혼란이 없다: odom yaw 는 CCW 로 증가하고
+        angular.z>0 도 CCW 이므로 err=target-cur>0 이면 ω>0(CCW)로 좁힌다. odom 은
+        단기적으로 정밀해 헤딩오차 δ 를 ~0 으로 만든다(횡 측정의 D·sin(δ) 누설 차단).
+        odom 없으면 즉시 True(best-effort, 현 헤딩 유지).
+        """
+        deadline = time.time() + timeout
+        last_log = 0.0
+        while time.time() < deadline:
+            if self._emergency.is_stopped():
+                self._stop()
+                deadline += self._wait_if_paused()
+                continue
+            od = self._get_odom()
+            if od is None:
+                self._stop()
+                self.get_logger().warn("OdomYaw: odom 없음 → 현 헤딩 유지")
+                return True
+            err = math.atan2(math.sin(theta_target - od[2]),
+                             math.cos(theta_target - od[2]))
+            if abs(err) < tol:
+                self._stop()
+                return True
+            twist = Twist()
+            twist.angular.z = self._clamp(self._yaw_hold_kp * err)   # err>0 → CCW(+)
+            self._cmd_pub.publish(twist)
+            if time.time() - last_log > 0.5:
+                self.get_logger().info(
+                    f"OdomYaw: 법선 복귀 중 err={math.degrees(err):+.1f}deg "
+                    f"(target={math.degrees(theta_target):+.1f}deg)"
+                )
+                last_log = time.time()
+            time.sleep(0.05)
+        self._stop()
+        self.get_logger().info("OdomYaw: timeout → 현 헤딩 유지")
+        return True
 
     # ====================================================================== #
     # 검출
