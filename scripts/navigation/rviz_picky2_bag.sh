@@ -13,33 +13,15 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source /opt/ros/jazzy/setup.bash
 source "$SCRIPT_DIR/../../install/setup.bash"
-export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-25}"
 
-RVIZ_CONFIG="$SCRIPT_DIR/picky2.rviz"
+RVIZ_CONFIG="$(ros2 pkg prefix pinky_navigation)/share/pinky_navigation/rviz/nav2_view.rviz"
 NS=/picky2
+RVIZ_RUN="${TMPDIR:-/tmp}/picky2_nav_view_bag.rviz"
 
-exec ros2 run rviz2 rviz2 -d "$RVIZ_CONFIG" --ros-args \
+sed "s#Value: /#Value: $NS/#" "$RVIZ_CONFIG" > "$RVIZ_RUN"
+
+exec ros2 run rviz2 rviz2 -d "$RVIZ_RUN" --ros-args \
   -p use_sim_time:=true \
+  -r __ns:=$NS \
   -r /tf:=$NS/tf \
-  -r /tf_static:=$NS/tf_static \
-  -r /scan:=$NS/scan \
-  -r /map:=$NS/map \
-  -r /map_updates:=$NS/map_updates \
-  -r /initialpose:=$NS/initialpose \
-  -r /goal_pose:=$NS/goal_pose \
-  -r /clicked_point:=$NS/clicked_point \
-  -r /particle_cloud:=$NS/particle_cloud \
-  -r /plan:=$NS/plan \
-  -r /local_plan:=$NS/local_plan \
-  -r /waypoints:=$NS/waypoints \
-  -r /marker:=$NS/marker \
-  -r /global_costmap/costmap:=$NS/global_costmap/costmap \
-  -r /global_costmap/costmap_updates:=$NS/global_costmap/costmap_updates \
-  -r /global_costmap/published_footprint:=$NS/global_costmap/published_footprint \
-  -r /global_costmap/voxel_marked_cloud:=$NS/global_costmap/voxel_marked_cloud \
-  -r /local_costmap/costmap:=$NS/local_costmap/costmap \
-  -r /local_costmap/costmap_updates:=$NS/local_costmap/costmap_updates \
-  -r /local_costmap/published_footprint:=$NS/local_costmap/published_footprint \
-  -r /local_costmap/voxel_marked_cloud:=$NS/local_costmap/voxel_marked_cloud \
-  -r /downsampled_costmap:=$NS/downsampled_costmap \
-  -r /downsampled_costmap_updates:=$NS/downsampled_costmap_updates
+  -r /tf_static:=$NS/tf_static

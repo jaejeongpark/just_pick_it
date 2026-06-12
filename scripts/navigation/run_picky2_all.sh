@@ -26,7 +26,6 @@ fi
 tmux new-session -d -s "$SESSION" -n bringup "bash '$SCRIPT_DIR/headless_picky2_bringup.sh'"
 tmux new-window  -t "$SESSION"   -n nav      "bash '$SCRIPT_DIR/headless_picky2_nav.sh'"
 tmux new-window  -t "$SESSION"   -n state    "bash '$SCRIPT_DIR/headless_picky2_state.sh'"
-
 tmux set-option -t "$SESSION" remain-on-exit on
 tmux select-window -t "$SESSION:bringup"
 

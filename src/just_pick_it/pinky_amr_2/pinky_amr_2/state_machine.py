@@ -23,7 +23,14 @@ from just_pick_it_interfaces.action import DockCommand, MoveCommand
 from just_pick_it_interfaces.srv import EmergencyControl
 
 from pinky_amr_2.emergency_guard import Amr2EmergencyGuard
-from pinky_amr_2.move_to_goal import MoveToGoal
+from pinky_amr_2.move_to_goal import (
+    MoveToGoal,
+    STOP_NEAREST_90,
+    STOP_NEAREST_Y,
+    STOP_PLUS_Y,
+    STOP_PLUS_X,
+    STOP_MINUS_X,
+)
 from pinky_amr_2.reverse_docking import ReverseDocking
 
 
@@ -44,6 +51,17 @@ ARRIVAL_STATE = {
     'MOVE_TO_STOCK':   'WAITING_FOR_COBOT',
     'MOVE_TO_DISPLAY': 'WAITING_FOR_COBOT',
     'RETURN_HOME':     'STANDBY',
+}
+
+# task_type 별 최종 목적지 정지 자세(yaw) 정책. move_to_goal 의 final_mode 로 전달한다.
+# MOVE_TO_PRODUCT/DISPLAY = +y/-y 중 회전 적은 쪽, PICKUP = -x, STOCK = +x,
+# RETURN_HOME(standby) = +y. 그 외/미지정은 nearest-90 축 정렬 스냅.
+STOP_MODE_BY_TASK = {
+    'MOVE_TO_PRODUCT': STOP_NEAREST_Y,
+    'MOVE_TO_DISPLAY': STOP_NEAREST_Y,
+    'MOVE_TO_PICKUP':  STOP_MINUS_X,
+    'MOVE_TO_STOCK':   STOP_PLUS_X,
+    'RETURN_HOME':     STOP_PLUS_Y,
 }
 
 # 충전 중 배터리가 이 값(%)을 넘으면 picky_state 를 CHARGING -> STANDBY 로 바꾼다.
@@ -279,14 +297,19 @@ class Amr2StateMachine(Node):
             x = wp.pose.position.x
             y = wp.pose.position.y
             # zone 의 theta 는 쓰지 않는다. 중간 경유지는 통과만 하고, 마지막
-            # 목적지에서만 도착 heading 기준 가장 가까운 90° 로 정지 자세를 잡는다.
+            # 목적지에서만 task_type 별 정책(STOP_MODE_BY_TASK)으로 정지 자세를 잡는다.
             is_final = (i == len(waypoints) - 1)
-
-            self.get_logger().info(
-                f'[PATHTRACE][StateMachine->MoveToGoal] idx={i} 좌표=({x:.3f}, {y:.3f}) final={is_final}'
+            final_mode = (
+                STOP_MODE_BY_TASK.get(task_type, STOP_NEAREST_90)
+                if is_final else STOP_NEAREST_90
             )
 
-            if not self._move.move_to_goal(x, y, final=is_final):
+            self.get_logger().info(
+                f'[PATHTRACE][StateMachine->MoveToGoal] idx={i} 좌표=({x:.3f}, {y:.3f}) '
+                f'final={is_final} final_mode={final_mode}'
+            )
+
+            if not self._move.move_to_goal(x, y, final=is_final, final_mode=final_mode):
                 if goal_handle.is_cancel_requested:
                     self._move.cancel_navigation()
                     goal_handle.canceled()
