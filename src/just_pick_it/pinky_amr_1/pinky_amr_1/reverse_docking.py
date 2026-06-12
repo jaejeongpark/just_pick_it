@@ -353,30 +353,16 @@ class ReverseDocking(Node):
                 self.get_logger().error("reverse_dock: FAILED — 마커 미획득")
                 return False
 
-            # 2) 법선 헤딩 1회 확립 후 odom 캡처(방법B).
-            #    초기 recenter(거친 마커 중심) → yaw_align(psi 1회로 법선 근처) →
-            #    그 헤딩을 odom θ_ref 로 박는다. 이후 정렬·측정·후진은 psi 재정렬을
-            #    안 쓰고 odom 으로 θ_ref 를 정밀 유지한다(psi ±2° 가 D·sin 으로 depth
-            #    증폭되던 횡오차를 odom 정밀 헤딩으로 차단).
+            # 2) 1차 법선정렬(어제 방식, 정확): recenter → [yaw_align(psi) → 측정 → arc →
+            #    recenter] × N → 최종 yaw_align. 마커가 보이는 이 단계에서 psi 로 법선을 맞춘다.
+            #    후진은 reverse_insert 가 진입 시 odom θ_ref 를 앵커링해 유지한다(후진하면
+            #    마커가 화각을 벗어나므로 헤딩은 odom 으로만 유지 가능).
             if not self._recenter_on_marker(marker_id, 0.0):
                 self._stop()
                 self.get_logger().error("reverse_dock: FAILED — 초기 재정렬")
                 return False
-            self._align_yaw_to_normal(marker_id)   # psi 로 법선 1회 정렬(헤딩 기준 확립)
-            od0 = self._get_odom()
-            if od0 is None:
-                self._stop()
-                self.get_logger().error("reverse_dock: FAILED — odom 없음(방법B 헤딩 캡처 불가)")
-                return False
-            theta_ref = od0[2]
-            self.get_logger().info(
-                f"방법B: 법선 헤딩 odom 캡처 θ_ref={math.degrees(theta_ref):+.1f}deg → 이후 odom 유지"
-            )
-
-            # 3) 횡 정렬 반복: 매 측정 전 odom 으로 θ_ref(법선) 복귀 → 측정 → arc.
-            #    psi 재정렬 안 씀(헤딩 δ≈0 을 odom 으로 보장 → 측정이 depth 독립).
             for p in range(self._align_passes):
-                self._rotate_to_odom_yaw(theta_ref)
+                self._align_yaw_to_normal(marker_id)   # 측정 전 법선 정면(psi 정렬)
                 dx = self._measure_lateral_offset(marker_id)
                 if dx is None:
                     self._stop()
@@ -395,16 +381,18 @@ class ReverseDocking(Node):
                 self.get_logger().info(
                     f"  보정: Δx {dx:+.3f} 의 {gain}배 = {move_dx:+.3f}m 이동"
                 )
-                # arc 로 횡 진입(open-loop). arc 후 헤딩이 틀어지지만 다음 루프 상단의
-                # _rotate_to_odom_yaw 가 θ_ref 로 다시 정밀 복귀시킨다(recenter 불필요).
                 if not self._arc_into_line(move_dx):
                     self._stop()
                     self.get_logger().error("reverse_dock: FAILED — arc 진입")
                     return False
+                if not self._recenter_on_marker(marker_id, move_dx):
+                    self._stop()
+                    self.get_logger().error("reverse_dock: FAILED — 마커 재정렬")
+                    return False
 
-            # 4) 후진 전 odom 으로 법선(θ_ref) 정렬 후, θ_ref 유지하며 후진.
-            self._rotate_to_odom_yaw(theta_ref)
-            if not self._reverse_insert(marker_id, marker_y, dock_map_y, theta_ref):
+            # 3) 후진 전 최종 법선 정렬(이 헤딩을 reverse_insert 가 odom 으로 앵커링·유지).
+            self._align_yaw_to_normal(marker_id)
+            if not self._reverse_insert(marker_id, marker_y, dock_map_y):
                 self._stop()
                 self.get_logger().error("reverse_dock: FAILED — 후진 도킹")
                 return False

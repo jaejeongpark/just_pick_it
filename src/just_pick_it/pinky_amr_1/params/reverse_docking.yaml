@@ -37,9 +37,10 @@
     acquire_rotate_speed: 0.3     # 마커 탐색 제자리 회전 (rad/s)
     marker_lat_kp: 0.6            # coarse 횡 게인 (tvec[0] 기반) — 진동 완화로 하향
     marker_yaw_kp: 0.6            # coarse yaw 게인 (rvec[1] 기반)
-    # 모호성 해소 후 참 법선 psi≈-2. -2 가 측정·yaw 균형점(-3 은 측정 디커플링 깨져 Δx 부호 반전).
-    # 남은 ~1° 좌 잔차는 psi 군집내 노이즈(±1~2°)라 이 공유 offset 으로는 못 줄임(yaw_offset 분리 필요).
-    marker_yaw_offset_deg: -2.0
+    # 이제 측정은 tx 만(offset 무관), offset 은 yaw_align(psi->offset) 에만 영향.
+    # -2 면 법선보다 1~2° 더 좌로 과회전 → 어제 정확했던 0(psi->0=마커 정면)으로 복귀.
+    # 후진이 좌/우로 남으면 여기서 ±1 미세조정.
+    marker_yaw_offset_deg: 0.0
 
     # 시퀀스1: 마커로 법선 횡오차 1회 측정 → 부드러운 후진 arc 로 진입(odom 으로 종료판단).
     arc_omega: 0.25            # arc 회전율(rad/s). 작을수록 큰 반경(회전 적고 후진 많음).
