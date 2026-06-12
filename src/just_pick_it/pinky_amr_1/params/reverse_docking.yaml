@@ -56,8 +56,10 @@
     # 시퀀스2 라인 횡조향 사용 여부. false=직진 후진(마커는 깊이 정지만). 라인검출이
     # 이 거리에서 불안정해 기본 off. 라인 품질 개선되면 true.
     use_lane_steering: false
-    # [측정→arc→재정렬] 반복 횟수. 최종 yaw 정렬 허용오차(rad). 후진 중 odom 헤딩유지 게인.
-    align_passes: 2
+    # [측정→arc→재정렬] 반복 횟수. 1 로: 1차는 oblique 뷰라 psi 안정해 정확하지만, 1차가
+    # 법선에 들여놓으면(fronto-parallel) 2차 측정 psi 가 ±π 모호성으로 튀어 dx 가 완전히
+    # 어긋나 좋은 1차 위치를 망침. 그래서 신뢰 가능한 1차만 하고 2차 측정 제거.
+    align_passes: 1
     yaw_align_tol_rad: 0.01    # ≈0.57°. 많이 좁힘: recenter 로 틀어진 채 후진 못하게(틀어지면 재정렬). timeout 시 재완화 고려
     yaw_hold_kp: 1.0
     # 마커 상실/재정렬 시 제자리 회전 재중심. kp=중심 정렬 게인, tol=중앙 허용 bearing(rad).
