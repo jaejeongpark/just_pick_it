@@ -38,7 +38,7 @@ def normalize_angle(a: float) -> float:
 
 
 # 최종 목적지 정지 자세(사방향 90° 스냅) 회전 파라미터
-STOP_ROTATE_SPEED = 0.8        # [rad/s]
+STOP_ROTATE_SPEED = 0.4        # [rad/s] 정지자세 제자리회전. 빠르면(0.8) 슬립으로 밀려 벽/진열대 swing
 STOP_ROTATE_TOL = 0.05         # [rad] 약 3도
 STOP_ROTATE_TIMEOUT = 8.0      # [s]
 
@@ -68,7 +68,7 @@ class MoveToGoal(Node):
         self.declare_parameter("precision_approach_distance", 0.3)
         # 중간 경유지 도달 판정 거리. 이 거리 안에 들면 다음 경유지로 넘어간다.
         # 작을수록 경유지에 더 근접한 뒤 꺾는다(최종 목적지는 precision_approach_distance 사용).
-        self.declare_parameter("waypoint_reach_distance", 0.15)
+        self.declare_parameter("waypoint_reach_distance", 0.12)
         self.declare_parameter("xy_goal_tolerance", 0.01)
         self.declare_parameter("yaw_goal_tolerance", 0.05)
         self.declare_parameter("nav_timeout_sec", 120.0)
