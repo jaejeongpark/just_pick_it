@@ -632,22 +632,20 @@ class ReverseDocking(Node):
                 self._stop()
                 deadline += self._wait_if_paused()
                 continue
-            nxs, nzs = [], []
-            for _ in range(3):
+            psis = []
+            for _ in range(20):   # 신뢰각: 모호성 해소한 psi 20프레임 수집 → median.
                 f = self._get_latest_frame()
                 if f is not None:
-                    m = self._detect_aruco(f, marker_id)
-                    if m is not None:
-                        R, _ = cv2.Rodrigues(
-                            np.asarray(m[1], dtype=np.float64).reshape(3, 1))
-                        nxs.append(float(R[0, 2]))
-                        nzs.append(float(R[2, 2]))
+                    p = self._psi_disambiguated(f, marker_id)
+                    if p is not None:
+                        psis.append(p)
                 time.sleep(0.02)
-            if not nxs:
+            if not psis:
                 self._stop()
                 self.get_logger().info("YawAlign: 마커 미검출 → 현 정렬 유지")
                 return True
-            psi = math.atan2(sum(nxs) / len(nxs), -sum(nzs) / len(nzs))
+            psis.sort()
+            psi = psis[len(psis) // 2]   # median: ±π flip outlier 제거(평균은 flip 에 편향)
             if abs(psi) < self._yaw_align_tol:
                 self._stop()
                 self.get_logger().info(f"YawAlign: 완료 (psi={math.degrees(psi):+.1f}deg)")
@@ -666,6 +664,35 @@ class ReverseDocking(Node):
         self._stop()
         self.get_logger().info("YawAlign: timeout → 현 정렬 유지")
         return True
+
+    def _psi_disambiguated(self, frame, marker_id: int):
+        """한 프레임에서 평면 ±π 모호성을 해소한 psi(법선기준 헤딩) 또는 None.
+
+        solvePnPGeneric 으로 두 해를 받아 재투영오차 작은 해를 택한다. yaw 정렬 전용이라
+        측정용 _detect_aruco(plain solvePnP) 와 분리 — x 측정에는 영향이 없다.
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        corners, ids, _ = self._detector.detectMarkers(gray)
+        if ids is None:
+            return None
+        for i, mid in enumerate(ids.flatten()):
+            if int(mid) != marker_id:
+                continue
+            n, rvecs, _tvecs, errs = cv2.solvePnPGeneric(
+                self._marker_obj_pts,
+                corners[i][0].astype(np.float64),
+                self._cam_matrix,
+                self._dist_coeffs,
+                flags=cv2.SOLVEPNP_IPPE_SQUARE,
+            )
+            if n < 1:
+                return None
+            best = 0
+            if errs is not None and n > 1:
+                best = 0 if float(errs[0][0]) <= float(errs[1][0]) else 1
+            R, _ = cv2.Rodrigues(rvecs[best])
+            return math.atan2(float(R[0, 2]), -float(R[2, 2]))
+        return None
 
     def _measure_lateral_offset(self, marker_id: int):
         """마커를 여러 프레임 평균내어 법선(마커 x선)까지의 횡오차 Δx 를 1회 계산.
