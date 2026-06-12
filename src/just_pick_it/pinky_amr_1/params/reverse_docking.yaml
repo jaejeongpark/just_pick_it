@@ -60,7 +60,7 @@
     # 법선에 들여놓으면(fronto-parallel) 2차 측정 psi 가 ±π 모호성으로 튀어 dx 가 완전히
     # 어긋나 좋은 1차 위치를 망침. 그래서 신뢰 가능한 1차만 하고 2차 측정 제거.
     align_passes: 1
-    yaw_align_tol_rad: 0.01    # ≈0.57°. 많이 좁힘: recenter 로 틀어진 채 후진 못하게(틀어지면 재정렬). timeout 시 재완화 고려
+    yaw_align_tol_rad: 0.04    # ≈2.3°. 0.01 은 psi 노이즈(±4°)보다 작아 영영 수렴 못하고 flail->마커상실->측정실패. 노이즈 위로 복원
     yaw_hold_kp: 1.0
     # 마커 상실/재정렬 시 제자리 회전 재중심. kp=중심 정렬 게인, tol=중앙 허용 bearing(rad).
     recenter_kp: 0.8
