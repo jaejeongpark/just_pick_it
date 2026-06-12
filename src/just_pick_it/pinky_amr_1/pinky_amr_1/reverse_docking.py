@@ -642,16 +642,22 @@ class ReverseDocking(Node):
                 self.get_logger().info("YawAlign: 마커 미검출 → 현 정렬 유지")
                 return True
             psi = math.atan2(sum(nxs) / len(nxs), -sum(nzs) / len(nzs))
-            if abs(psi) < self._yaw_align_tol:
+            # 마커 장착 미세 기울기 보정: 실제 법선 정면은 psi=marker_yaw_offset 일 때이므로
+            # 그 기준으로 정렬(psi_err→0). (마커 fronto-parallel psi=0 이 실제 법선이 아님)
+            psi_err = psi - self._marker_yaw_offset
+            if abs(psi_err) < self._yaw_align_tol:
                 self._stop()
-                self.get_logger().info(f"YawAlign: 완료 (psi={math.degrees(psi):+.1f}deg)")
+                self.get_logger().info(
+                    f"YawAlign: 완료 (psi={math.degrees(psi):+.1f}deg, "
+                    f"법선기준 err={math.degrees(psi_err):+.1f}deg)"
+                )
                 return True
-            if prev_abs is not None and abs(psi) > prev_abs + 0.03:
+            if prev_abs is not None and abs(psi_err) > prev_abs + 0.03:
                 omega_sign = -omega_sign
                 self.get_logger().warn("YawAlign: 방향 반대 감지 → 부호 반전")
-            prev_abs = abs(psi)
+            prev_abs = abs(psi_err)
             twist = Twist()
-            twist.angular.z = self._clamp(omega_sign * self._recenter_kp * psi)
+            twist.angular.z = self._clamp(omega_sign * self._recenter_kp * psi_err)
             self._cmd_pub.publish(twist)
             if time.time() - last_log > 0.5:
                 self.get_logger().info(f"YawAlign: psi={math.degrees(psi):+.1f}deg")
@@ -693,14 +699,17 @@ class ReverseDocking(Node):
         tx = sum(txs) / len(txs)
         tz = sum(tzs) / len(tzs)
         psi = math.atan2(sum(nxs) / len(nxs), -sum(nzs) / len(nzs))
+        # 마커 장착 미세 기울기 보정: 실제 법선 기준 헤딩은 psi - marker_yaw_offset.
+        # yaw정렬과 같은 기준을 써야 정렬 후 Δx≈0 으로 일관(안 그러면 arc 가 tz·sin(offset) 만큼 헛감).
+        psi_n = psi - self._marker_yaw_offset
         # solvePnP tvec 이 실측보다 짧게 나오므로 lateral_scale(측정거리 기준 ~1.48)을 곱해
         # 실제 거리(m)로. 깊이정지(원거리)용 depth_scale 과 분리(측정·정지 거리가 달라 비율 다름).
-        dx = (-(tx * math.cos(psi) + tz * math.sin(psi)) * self._lateral_scale
+        dx = (-(tx * math.cos(psi_n) + tz * math.sin(psi_n)) * self._lateral_scale
               + self._marker_lat_offset)
         self.get_logger().info(
             f"Measure: Δx={dx:+.3f}m (tx={tx:.3f} tz={tz:.3f} "
-            f"psi={math.degrees(psi):+.1f}deg, lat_scale={self._lateral_scale}, "
-            f"offset={self._marker_lat_offset}, n={len(txs)})"
+            f"psi={math.degrees(psi):+.1f}deg(법선기준 {math.degrees(psi_n):+.1f}), "
+            f"lat_scale={self._lateral_scale}, offset={self._marker_lat_offset}, n={len(txs)})"
         )
         return dx
 
