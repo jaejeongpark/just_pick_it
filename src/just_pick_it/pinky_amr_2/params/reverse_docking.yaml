@@ -2,71 +2,57 @@
   ros__parameters:
 
     # ------------------------------------------------------------------ #
-    # ArUco
+    # Marker
     # ------------------------------------------------------------------ #
-    aruco_marker_dict: 0          # cv2.aruco.DICT_4X4_50
-    marker_size_m: 0.10           # 마커 실측 한 변 길이 (m)
+    # PICKY1과 같은 담당자 출력물 기준. 마커 ID는 패턴에 들어 있고,
+    # 실제 map 좌표/도크 좌표는 state_machine/reverse_docking 설정이 해석한다.
+    aruco_marker_dict: "DICT_APRILTAG_36h11"
+    marker_size_m: 0.05
 
     # ------------------------------------------------------------------ #
-    # 카메라 — 비전팀 캘리브레이션 실측값 적용
-    # PICKY2: just_pick_it_perception/result/picky_2/camera_calibration.yaml (해상도 1280x720)
-    # 주의: camera/image_raw 가 1280x720 으로 발행돼야 이 intrinsic 이 유효하다.
+    # Camera
     # ------------------------------------------------------------------ #
-    # 3x3 내부 파라미터를 행 우선(row-major) 9개 실수로 평탄화한 값.
-    # 코드(reverse_docking.py)가 DOUBLE_ARRAY 9개를 기대하므로 반드시 한 줄
-    # 리스트로 적는다. 줄마다 따옴표 없이 쉼표를 쓰면 문자열로 파싱되어
-    # STRING_ARRAY 가 되니 주의한다.
+    # 평소 주행 중에는 카메라를 끄고, DOCK_IN 중 reverse_docking이 Picamera2를
+    # 직접 열었다가 끝나면 닫는다. 외부 camera/image_raw 노드로 테스트할 때만
+    # camera_source를 ros_topic으로 바꾼다.
+    camera_source: "picamera2"
+    camera_topic: "camera/image_raw"
+    camera_width: 1280
+    camera_height: 720
+    flip_camera_180: false
+
+    # PICKY2: just_pick_it_perception/result/picky_2/camera_calibration.yaml
+    # 해상도 1280x720 기준 intrinsic.
     camera_matrix: [1564.8861778174316,                0.0, 634.6279547011992,
                                    0.0, 1557.9751956153086, 386.3538829840184,
                                    0.0,                0.0,               1.0]
-    dist_coeffs: [-0.03862007925270209, 1.9953590527035414, -0.004035341465584413, 0.007809686398255311, -10.752768150812287]   # [k1, k2, p1, p2, k3]
-    camera_topic: "camera/image_raw"
+    dist_coeffs: [-0.03862007925270209, 1.9953590527035414, -0.004035341465584413, 0.007809686398255311, -10.752768150812287]
 
     # ------------------------------------------------------------------ #
-    # 거리 임계값
+    # Phase timing
     # ------------------------------------------------------------------ #
-    dock_switch_distance: 0.20    # Phase 2->3 전환 거리 (m), ArUco 불안정 구간 진입
+    marker_timeout_sec: 15.0
+    align_timeout_sec: 10.0
+    reverse_timeout_sec: 20.0
+    odom_timeout_sec: 5.0
+    settle_sec: 0.3
 
     # ------------------------------------------------------------------ #
-    # Phase 0: 마커 탐색 및 yaw 정렬
+    # Marker alignment
     # ------------------------------------------------------------------ #
-    rotate_kp: 1.5
-    rotate_ki: 0.0
-    rotate_kd: 0.1
-    rotate_thresh_rad: 0.05       # rvec[1] 허용 오차 (rad, 약 3도)
+    acquire_rotate_speed: 0.25
+    align_lateral_tolerance_m: 0.02
+    align_stable_frames: 3
+    align_kp: 1.2
+    max_angular_vel: 0.35
 
     # ------------------------------------------------------------------ #
-    # Phase 1: 횡방향 pre-alignment
+    # Reverse insertion
     # ------------------------------------------------------------------ #
-    prealign_kp: 1.2
-    prealign_thresh_m: 0.03       # tvec[0] 허용 오차 (m)
-
-    # ------------------------------------------------------------------ #
-    # Phase 2: ArUco 후진 PID
-    # 제어 부호 반전 주의: 후진 시 lateral/yaw 보정 방향이 전진과 반대
-    # ------------------------------------------------------------------ #
-    lat_kp: 1.0                   # tvec[0] 횡방향 오차 게인
-    lat_ki: 0.0
-    lat_kd: 0.05
-    yaw_kp: 0.8                   # rvec[1] yaw 오차 게인
-    yaw_ki: 0.0
-    yaw_kd: 0.05
-    reverse_speed: 0.05           # 최대 후진 속도 (m/s)
-
-    # ------------------------------------------------------------------ #
-    # Phase 3: 주차라인 중심 추종 + 파란 정지선 감지
-    # ------------------------------------------------------------------ #
-    lane_kp: 0.003                # 주차라인 횡방향 오차 게인 (pixel 기반)
-    final_speed: 0.03             # 최종 접근 후진 속도 (m/s)
-
-    # 파란 마킹테이프 정지선 (HSV, OpenCV 기준 H: 0-179)
-    # 실내 조명 변화 시 S/V 하한 조정 필요
-    tape_hsv_lower: [100, 100, 50]
-    tape_hsv_upper: [130, 255, 255]
-    tape_coverage_thresh: 0.5     # 가로 픽셀의 50% 이상 덮이면 정지
-
-    # ------------------------------------------------------------------ #
-    # 공통
-    # ------------------------------------------------------------------ #
-    max_angular_vel: 0.4          # 모든 단계 angular.z 상한 (rad/s)
-    aruco_timeout_sec: 30.0       # Phase 0 마커 탐색 최대 대기 시간 (s)
+    # STANDBY_ZONE_2 y=0.40 -> CHARGING_DOCK_2 y=0.08 기준 약 0.32m.
+    # 첫 버전은 odom yaw hold만 사용하고, lateral drift가 로그로 확인되면
+    # reverse_marker_lat_kp를 0보다 크게 올려 마커 tvec[0] 보정을 추가한다.
+    reverse_speed: 0.035
+    reverse_distance_m: 0.32
+    yaw_hold_kp: 1.2
+    reverse_marker_lat_kp: 0.0

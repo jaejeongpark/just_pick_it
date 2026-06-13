@@ -3,7 +3,7 @@
 <package format="3">
   <name>pinky_amr_2</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>PICKY2 AMR state machine, launch files, and tuning parameters.</description>
   <maintainer email="mjzizou@naver.com">mjzizou</maintainer>
   <license>Apache-2.0</license>
 

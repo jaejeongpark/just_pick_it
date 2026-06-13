@@ -3,7 +3,7 @@
 
 Fleet Manager가 보내는 MoveCommand / DockCommand / EmergencyControl 계약을
 PICKY2 namespace 안에서 제공한다. 1차 통합판은 PICKY1에서 검증된 Nav2
-이동과 ArUco/라인 기반 후진 도킹 구현을 사용한다.
+이동과 AprilTag/ArUco 정렬 + odom 거리 기반 후진 도킹 구현을 사용한다.
 """
 
 import math
@@ -110,11 +110,11 @@ class Amr2StateMachine(Node):
         self.declare_parameter('charging_dock_1.marker_id', 0)
         self.declare_parameter('charging_dock_1.map_x', 0.11)
         self.declare_parameter('charging_dock_1.map_y', 0.08)
-        self.declare_parameter('charging_dock_1.map_yaw', 0.0)
+        self.declare_parameter('charging_dock_1.map_yaw', 1.5708)
         self.declare_parameter('charging_dock_2.marker_id', 1)
         self.declare_parameter('charging_dock_2.map_x', 0.28)
         self.declare_parameter('charging_dock_2.map_y', 0.08)
-        self.declare_parameter('charging_dock_2.map_yaw', 0.0)
+        self.declare_parameter('charging_dock_2.map_yaw', 1.5708)
 
         self._robot_id = self.get_parameter('robot_id').value
         self._depart_dist = self.get_parameter('dock_departure_distance').value
@@ -419,7 +419,7 @@ class Amr2StateMachine(Node):
         return CancelResponse.ACCEPT
 
     def _execute_dock(self, goal_handle) -> DockCommand.Result:
-        """DOCK_IN task 수신 시 reverse_docking 으로 ArUco 기반 후진 도킹을 수행한다."""
+        """DOCK_IN task 수신 시 marker 정렬 + odom 거리 기반 후진 도킹을 수행한다."""
         request = goal_handle.request
         dock_name = request.dock_name
         start_zone_name = request.start_zone_name
