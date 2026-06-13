@@ -1,5 +1,11 @@
 # Reverse Docking System
 
+> ⚠️ **개정 안내 (2026-06-11):** 이 문서는 초기 Phase 0~3(시각서보+파란 정지선) 구상 기록이다.
+> 실차 브링업 결과 라인 검출(원거리 불검출)과 마커 rvec yaw(구조적 노이즈)의 한계로 제어를
+> **"마커 1회 측정 + odom 실행(arc 횡 진입 · odom yaw 유지 · 직진 후진)"** 으로 전면 개정했다.
+> **현행 설계·근본원인·수치 변화 표는 `docs/Reverse_Docking_Design.md` §7 / `docs/Reverse_Docking_Summary.md` 참조.**
+> 아래 Phase 구조는 역사적 기록으로 보존.
+
 ## 개요
 
 자율주행 로봇 **Pinky**가 Standby Zone에 도착한 후, ArUco 마커를 기준으로 충전 도크에 정밀 후진 주차하는 시스템이다.

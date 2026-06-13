@@ -43,6 +43,7 @@ require_config_value() {
 
 validate_demo_config() {
   require_config_value DEMO_ROS_DOMAIN_ID
+  require_config_value DEMO_MOCK_PICKY
   require_config_value DEMO_PICKY_LINEAR_SPEED_MPS
   require_config_value DEMO_PICKY_POSE_HZ
   require_config_value DEMO_DOCK_LINEAR_SPEED_MPS
@@ -50,6 +51,7 @@ validate_demo_config() {
   require_config_value DEMO_PICKY_BATTERY_DRAIN_PER_FLOW
   require_config_value DEMO_PICKY_CHARGE_COMPLETE_SECONDS
   require_config_value DEMO_STATE_PUBLISH_INTERVAL_SECONDS
+  require_config_value DEMO_MOCK_COBOT
   require_config_value DEMO_COBOT_SORTING_SECONDS
   require_config_value DEMO_COBOT_LOADING_SECONDS
   require_config_value DEMO_COBOT_INSPECTING_SECONDS
@@ -326,6 +328,7 @@ stop_existing_web_gateway() {
 start_fake_robot_servers() {
   stop_existing_fake_robot_servers
   export ROS_DOMAIN_ID="$DEMO_ROS_DOMAIN_ID"
+  export DEMO_MOCK_PICKY
   export DEMO_PICKY_LINEAR_SPEED_MPS
   export DEMO_PICKY_POSE_HZ
   export DEMO_DOCK_LINEAR_SPEED_MPS
@@ -333,6 +336,7 @@ start_fake_robot_servers() {
   export DEMO_PICKY_BATTERY_DRAIN_PER_FLOW
   export DEMO_PICKY_CHARGE_COMPLETE_SECONDS
   export DEMO_STATE_PUBLISH_INTERVAL_SECONDS
+  export DEMO_MOCK_COBOT
   export DEMO_COBOT_SORTING_SECONDS
   export DEMO_COBOT_LOADING_SECONDS
   export DEMO_COBOT_INSPECTING_SECONDS

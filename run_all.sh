@@ -29,6 +29,12 @@ log() {
   echo "[run-all] $*"
 }
 
+detect_lan_ip() {
+  if command -v hostname >/dev/null 2>&1; then
+    hostname -I 2>/dev/null | awk '{print $1}'
+  fi
+}
+
 source_if_exists() {
   local path="$1"
   [ -f "$path" ] || return 1
@@ -174,6 +180,10 @@ ros2 launch fleet_manager fleet_manager.launch.xml &
 FLEET_PID="$!"
 STARTED_FLEET=1
 wait_for_fleet_api
+LAN_IP="$(detect_lan_ip || true)"
+if [ -n "$LAN_IP" ]; then
+  log "LAN Fleet API: http://${LAN_IP}:8100"
+fi
 
 stop_existing_port_owners "Web Gateway" "$WEB_PORT"
 log "starting Web Gateway"

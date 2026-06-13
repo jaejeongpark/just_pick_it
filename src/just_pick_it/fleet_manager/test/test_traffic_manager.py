@@ -190,17 +190,27 @@ class TestReserveNearestFrom:
 
 
 class TestReserveReturnHomePath:
-    def test_goes_to_nearest_standby_zone(self, traffic):
+    def test_both_docks_empty_targets_dock1_standby(self, traffic):
+        # 둘 다 비어 있으면 최근접(SB2)이 아니라 1번 도크 우선 -> STANDBY_ZONE_1.
         r = traffic.reserve_return_home_path('PICKY1', 1, 'TRAFFIC_T1')
         assert r.ok
-        assert r.waypoints[-1] in STANDBY_ZONES
+        assert r.waypoints[-1] == 'STANDBY_ZONE_1'
+
+    def test_dock1_occupied_targets_dock2_standby(self, traffic):
+        # 1번 도크를 PICKY2 가 점유(충전/도크 내 대기) 중이면 PICKY1 은
+        # 2번 도크의 STANDBY_ZONE_2 로 귀환한다.
+        traffic._robot_dock['PICKY2'] = DOCK_PRIORITY[0][0]  # CHARGING_DOCK_1
+        r = traffic.reserve_return_home_path('PICKY1', 1, 'TRAFFIC_T1')
+        assert r.ok
+        assert r.waypoints[-1] == 'STANDBY_ZONE_2'
 
     def test_does_not_reserve_dock(self, traffic):
         traffic.reserve_return_home_path('PICKY1', 1, 'TRAFFIC_T1')
         assert traffic._robot_dock['PICKY1'] is None
 
-    def test_avoids_occupied_standby_zone(self, traffic):
-        # PICKY2 가 안쪽 STANDBY_ZONE_1 을 점유 중이면 PICKY1 은 바깥 STANDBY_ZONE_2 로 간다.
+    def test_falls_back_when_priority_standby_blocked(self, traffic):
+        # 도크는 둘 다 비었지만 1번 도크의 STANDBY_ZONE_1 을 PICKY2 가 점유 중이면,
+        # 다음 빈 도크의 STANDBY_ZONE_2 로 귀환한다(우선 도크 STANDBY 막힘 처리).
         _set_waiting(traffic, 'PICKY2', 'STANDBY_ZONE_1')
         r = traffic.reserve_return_home_path('PICKY1', 1, 'TRAFFIC_T1')
         assert r.ok
@@ -439,11 +449,20 @@ class TestRaceWindowClosed:
 
 
 class TestNotifyState:
-    def test_idle_state_clears_path_and_reservation(self, traffic):
+    def test_idle_after_active_clears_path_and_reservation(self, traffic):
+        # 이동/점유에서 idle 로 빠져나올 때만 안전망으로 경로/예약을 해제한다.
         traffic.reserve_path('PICKY1', 1, 'TRAFFIC_T1', 'TRAFFIC_T3')
-        traffic.notify_state('PICKY1', 'STANDBY')
+        traffic.notify_state('PICKY1', 'MOVING_TO_PRODUCT')   # active
+        traffic.notify_state('PICKY1', 'STANDBY')             # active -> idle
         assert traffic._robot_paths['PICKY1'] == []
         assert traffic._robot_reservations['PICKY1'] is None
+
+    def test_fresh_reservation_kept_during_idle_telemetry(self, traffic):
+        # 갓 예약한 직후 로봇이 아직 idle(STANDBY) 텔레메트리를 보내도 예약은 유지돼야 한다.
+        # prev 도 idle 이라 안전망이 신선한 예약을 지우면 안 됨('예약 task=None' 레이스 방지).
+        traffic.reserve_path('PICKY1', 1, 'TRAFFIC_T1', 'TRAFFIC_T3')
+        traffic.notify_state('PICKY1', 'STANDBY')
+        assert traffic._robot_reservations['PICKY1'] == 1
 
     def test_moving_state_keeps_reservation(self, traffic):
         traffic.reserve_path('PICKY1', 1, 'TRAFFIC_T1', 'TRAFFIC_T3')
@@ -455,13 +474,14 @@ class TestNotifyState:
         traffic.notify_state('PICKY1', 'WAITING_FOR_COBOT')
         assert traffic._robot_reservations['PICKY1'] == 1
 
-    def test_charging_leaves_dock_on_state_change(self, traffic):
-        # 사전: CHARGING + 도크 점유
+    def test_charging_to_standby_keeps_dock(self, traffic):
+        # 배터리 임계 초과로 CHARGING -> STANDBY 가 돼도 로봇은 도크 안에 있으므로
+        # 도크 점유를 유지해야 한다(빈 도크로 오인 금지).
         traffic._robot_states['PICKY1'] = 'CHARGING'
         traffic._robot_dock['PICKY1'] = 'CHARGING_DOCK_1'
 
-        traffic.notify_state('PICKY1', 'MOVING_TO_PRODUCT')
-        assert traffic._robot_dock['PICKY1'] is None
+        traffic.notify_state('PICKY1', 'STANDBY')
+        assert traffic._robot_dock['PICKY1'] == 'CHARGING_DOCK_1'
 
     def test_charging_to_charging_keeps_dock(self, traffic):
         traffic._robot_states['PICKY1'] = 'CHARGING'
@@ -469,6 +489,28 @@ class TestNotifyState:
 
         traffic.notify_state('PICKY1', 'CHARGING')
         assert traffic._robot_dock['PICKY1'] == 'CHARGING_DOCK_1'
+
+    def test_docking_keeps_dock(self, traffic):
+        # DOCKING 은 도크로 들어오는 중이라 점유를 유지한다.
+        traffic._robot_dock['PICKY1'] = 'CHARGING_DOCK_1'
+        traffic.notify_state('PICKY1', 'DOCKING')
+        assert traffic._robot_dock['PICKY1'] == 'CHARGING_DOCK_1'
+
+    def test_undock_via_move_releases_dock(self, traffic):
+        # 충전 후 STANDBY(도크 내 대기)에서 move task 로 도크를 빠져나갈 때
+        # (MOVING_TO_PRODUCT 등) 비로소 도크 점유를 해제한다.
+        traffic._robot_states['PICKY1'] = 'CHARGING'
+        traffic._robot_dock['PICKY1'] = 'CHARGING_DOCK_1'
+        traffic.notify_state('PICKY1', 'STANDBY')             # 충전 완료, 도크 유지
+        assert traffic._robot_dock['PICKY1'] == 'CHARGING_DOCK_1'
+        traffic.notify_state('PICKY1', 'MOVING_TO_PRODUCT')   # 언도크
+        assert traffic._robot_dock['PICKY1'] is None
+
+    def test_returning_releases_dock(self, traffic):
+        # RETURNING 도 도크를 떠나는 이동 상태라 점유 해제 대상이다.
+        traffic._robot_dock['PICKY1'] = 'CHARGING_DOCK_1'
+        traffic.notify_state('PICKY1', 'RETURNING')
+        assert traffic._robot_dock['PICKY1'] is None
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -500,10 +542,10 @@ class TestConcurrency:
         assert p1.isdisjoint(p2)
 
     def test_concurrent_return_home_serializes(self, traffic):
-        """동시 RETURN_HOME 은 좌측 복도 공유로 인해 한 쪽만 성공한다. 도크 예약 없음.
+        """동시 RETURN_HOME 은 STANDBY_ZONE 공유로 인해 한 쪽만 성공한다. 도크 예약 없음.
 
-        새 맵에서 TRAFFIC_T1, TRAFFIC_B1 양쪽 모두 STANDBY_ZONE 으로 가는 경로가
-        TRAFFIC_L2 를 공유하므로, 동시 호출 시 한 쪽의 path 예약이 다른 쪽을 차단한다.
+        새 맵(2.1)에서 TRAFFIC_T1(상단), TRAFFIC_B1(하단) 양쪽의 최근접 귀환 목적지가
+        모두 STANDBY_ZONE_2 라, 동시 호출 시 한 쪽의 path 예약이 다른 쪽을 차단한다.
         """
         results = []
 
@@ -574,25 +616,24 @@ class TestZoneGraphIntegrity:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 새 맵 토폴로지 (docs/Traffic_node_graph.jpg)
+# 새 맵 토폴로지 (docs/Traffic_node_2.1.jpg)
 # ──────────────────────────────────────────────────────────────────────
 
 
 class TestNewMapTopology:
-    """좌측 수직 복도 도입과 우측 복도 제거 같은 새 맵 구조의 회귀 방지."""
+    """좌측 수직 복도(TRAFFIC_L) 제거 같은 2.1 맵 구조의 회귀 방지."""
 
-    def test_stock_zone_exits_through_left_corridor(self, traffic):
-        # STOCK_ZONE 은 TRAFFIC_L1 으로만 진출. 기존엔 TRAFFIC_T1 직접 인접이었음.
+    def test_stock_zone_exits_through_top_corridor(self, traffic):
+        # 2.1: STOCK_ZONE 은 TRAFFIC_T1 과 직접 인접(좌측 복도 L1 제거).
         r = traffic.reserve_path('PICKY1', 1, 'STOCK_ZONE', 'TRAFFIC_T1')
         assert r.ok
-        assert r.waypoints == ('STOCK_ZONE', 'TRAFFIC_L1', 'TRAFFIC_T1')
+        assert r.waypoints == ('STOCK_ZONE', 'TRAFFIC_T1')
 
-    def test_standby_to_product_via_left_corridor(self, traffic):
-        # 기존엔 STANDBY_ZONE_2 와 PRODUCT_ZONE_1 이 직접 인접 (hop 1) 했지만
-        # 새 맵에서는 TRAFFIC_L2 가 끼어 hop 2 가 된다.
+    def test_standby_to_product_direct(self, traffic):
+        # 2.1: STANDBY_ZONE_2 와 PRODUCT_ZONE_1 이 직접 인접(hop 1, L2 제거).
         r = traffic.reserve_path('PICKY1', 1, 'STANDBY_ZONE_2', 'PRODUCT_ZONE_1')
         assert r.ok
-        assert r.waypoints == ('STANDBY_ZONE_2', 'TRAFFIC_L2', 'PRODUCT_ZONE_1')
+        assert r.waypoints == ('STANDBY_ZONE_2', 'PRODUCT_ZONE_1')
 
     def test_pickup_zone_adjacent_to_corridor_end(self, traffic):
         # PICKUP_ZONE_1 은 TRAFFIC_T3, PICKUP_ZONE_2 는 TRAFFIC_B3 와 직접 인접.
@@ -603,19 +644,57 @@ class TestNewMapTopology:
         assert r2.ok and r2.waypoints == ('TRAFFIC_B3', 'PICKUP_ZONE_2')
 
     def test_removed_nodes_are_unreachable(self, traffic):
-        # 옛 우측 복도(TRAFFIC_R1~R4) 와 PICKUP_ZONE_3/_4 는 새 맵에 존재하지 않음.
+        # 옛 우측 복도(TRAFFIC_R1~R4), PICKUP_ZONE_3/_4, 그리고 2.1 에서 제거한
+        # 좌측 수직 복도(TRAFFIC_L1~L3) 는 새 그래프에 존재하지 않는다.
         for removed in (
             'TRAFFIC_R1', 'TRAFFIC_R2', 'TRAFFIC_R3', 'TRAFFIC_R4',
             'PICKUP_ZONE_3', 'PICKUP_ZONE_4',
+            'TRAFFIC_L1', 'TRAFFIC_L2', 'TRAFFIC_L3',
         ):
             assert removed not in ZONE_GRAPH, f'{removed} 가 새 그래프에 남아 있음'
 
-    def test_left_corridor_connects_stock_to_bottom(self, traffic):
-        # TRAFFIC_L1, L2, L3 가 좌측 수직 복도로 연결되어 있어
-        # STOCK_ZONE 에서 TB1 까지 좌측 한 줄로 갈 수 있다.
+    def test_stock_to_bottom_via_product_column(self, traffic):
+        # 2.1: 좌측 복도가 없으므로 STOCK_ZONE 에서 하단 복도(TB1)로 가려면
+        # 상단 복도 -> 상품 1열(PD1 -> PD4) 을 통해 내려간다.
         r = traffic.reserve_path('PICKY1', 1, 'STOCK_ZONE', 'TRAFFIC_B1')
         assert r.ok
         assert r.waypoints == (
-            'STOCK_ZONE', 'TRAFFIC_L1', 'TRAFFIC_L2',
-            'TRAFFIC_L3', 'TRAFFIC_B1',
+            'STOCK_ZONE', 'TRAFFIC_T1', 'PRODUCT_ZONE_1',
+            'PRODUCT_ZONE_4', 'TRAFFIC_B1',
         )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 콜드 스타트 도크 점유 (assume_docked_at_start)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestColdStartDockOccupancy:
+    def test_default_no_dock_occupancy(self, mock_node):
+        # 기본값(False): 도크 점유 없이 시작 (기존 동작 보존)
+        tm = TrafficManager(node=mock_node, robot_ids=['PICKY1', 'PICKY2'])
+        assert all(d is None for d in tm._robot_dock.values())
+
+    def test_assume_docked_marks_each_robot_dock(self, mock_node):
+        # 콜드 스타트(True): robot_ids 순서대로 DOCK_PRIORITY 도크를 점유로 초기화
+        tm = TrafficManager(
+            node=mock_node, robot_ids=['PICKY1', 'PICKY2'],
+            assume_docked_at_start=True,
+        )
+        assert tm._robot_dock['PICKY1'] == DOCK_PRIORITY[0][0]   # CHARGING_DOCK_1
+        assert tm._robot_dock['PICKY2'] == DOCK_PRIORITY[1][0]   # CHARGING_DOCK_2
+
+    def test_returning_robot_avoids_other_robots_dock(self, mock_node):
+        # 시나리오: 둘 다 도크에서 시작 → PICKY2 가 작업 나갔다(도크 해제) 복귀.
+        # PICKY1 이 dock1 에 그대로 있으므로 PICKY2 는 dock2(STANDBY_ZONE_2)로 귀환해야
+        # 한다(dock1 충돌 방지). 콜드 스타트 점유가 없으면 dock1 을 비었다고 오인한다.
+        tm = TrafficManager(
+            node=mock_node, robot_ids=['PICKY1', 'PICKY2'],
+            assume_docked_at_start=True,
+        )
+        tm.notify_state('PICKY2', 'MOVING_TO_PRODUCT')   # PICKY2 undock → dock2 해제
+        assert tm._robot_dock['PICKY2'] is None
+        assert tm._robot_dock['PICKY1'] == DOCK_PRIORITY[0][0]   # PICKY1 은 dock1 유지
+        r = tm.reserve_return_home_path('PICKY2', 1, 'TRAFFIC_T1')
+        assert r.ok
+        assert r.waypoints[-1] == 'STANDBY_ZONE_2'       # dock1 점유 → dock2 로 귀환

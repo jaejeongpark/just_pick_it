@@ -3,9 +3,10 @@
 # 각 태그를 ID 키 아래에 등록한다. 새 태그를 추가할 때 동일 스키마로 항목을 추가하면
 # 추정기가 자동으로 사용한다.
 #
-# group   : 제품군 이름. 노드의 target_group 파라미터와 일치하는 태그만 처리한다.
+# group   : 태그가 대응하는 논리 위치 이름. 노드의 target_group 파라미터와 일치하는 태그만 처리한다.
 #           생략하면 빈 문자열로 취급되며, target_group=""(기본값)일 때는 모든 태그를 사용한다.
-# pose    : 위치 단위 미터, 월드 프레임 기준. normal을 사용할 경우 R, P, Y는 무시된다.
+# pose    : 위치 단위 미터, 월드 프레임 기준. x/y는 DB seed의 대응 zone 좌표와 맞춘다.
+#           z는 태그 중심의 실제 설치 높이다. normal을 사용할 경우 R, P, Y는 무시된다.
 # normal  : (권장) map 프레임 기준 z_tag 방향 벡터 = 태그 면에서 카메라를 향하는 방향(법선).
 #           이 값이 있으면 y_tag = world up([0,0,1])으로 고정하고 x_tag를 자동 계산한다.
 #           태그가 천장/바닥에 붙어있는 경우처럼 normal이 [0,0,1]에 가까우면 x=[1,0,0]으로 fallback.
@@ -17,13 +18,13 @@ default_size_m: 0.05
 
 tags:
   0:
-    group: CHARGING_DOCK_1
+    group: STANDBY_ZONE_1
     size_m: 0.05
-    pose: { x: 0.12, y: 0.66, z: 0.045 }
+    pose: { x: 0.11, y: 0.40, z: 0.045 }
     normal: [0.0, -1.0, 0.0]   # 태그 면이 -y 방향(원점 쪽, 로봇이 접근하는 방향)을 향함
 
   1:
-    group: CHARGING_DOCK_2
+    group: STANDBY_ZONE_2
     size_m: 0.05
-    pose: { x: 0.29, y: 0.66, z: 0.045 }
+    pose: { x: 0.28, y: 0.40, z: 0.045 }
     normal: [0.0, -1.0, 0.0]   # 태그 면이 -y 방향(원점 쪽, 로봇이 접근하는 방향)을 향함

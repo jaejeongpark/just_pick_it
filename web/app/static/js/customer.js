@@ -5,6 +5,11 @@ const productCount = document.querySelector("#product-count");
 const cartList = document.querySelector("#cart-list");
 const clearCartButton = document.querySelector("#clear-cart-button");
 const orderCountPill = document.querySelector("#order-count-pill");
+const voiceOrderMicButton = document.querySelector("#voice-order-mic-button");
+const voiceOrderRetryButton = document.querySelector("#voice-order-retry-button");
+const voiceOrderStatus = document.querySelector("#voice-order-status");
+const voiceOrderTranscript = document.querySelector("#voice-order-transcript");
+const voiceOrderResult = document.querySelector("#voice-order-result");
 
 let productsById = new Map();
 let cart = new Map();
@@ -12,6 +17,15 @@ let activeOrders = new Map();
 let customerSocket = null;
 let fallbackTimer = null;
 let failedOrderKey = 0;
+let mediaRecorder = null;
+let audioChunks = [];
+let voiceListening = false;
+let voiceOrderSending = false;
+let silenceCheckInterval = null;
+let silenceTimer = null;
+const SILENCE_THRESHOLD = 0.01;
+const SILENCE_DURATION_MS = 1000;
+let voiceRecognitionSupported = true;
 
 const orderStatusText = {
   ORDER_RECEIVED: "주문 접수",
@@ -23,6 +37,197 @@ const orderStatusText = {
   COMPLETED: "수령 완료",
   ERROR: "예외 발생",
 };
+
+const voiceOrderDefaultTranscript = "아직 인식된 주문 없음";
+const voiceOrderDefaultResult = "마이크 버튼을 누르고 주문을 말해주세요";
+
+function setVoiceOrderFeedback(state, statusText, resultText) {
+  if (voiceOrderStatus) {
+    voiceOrderStatus.className = `voice-order-status ${state}`;
+    voiceOrderStatus.textContent = statusText;
+  }
+
+  if (voiceOrderResult) {
+    voiceOrderResult.textContent = resultText;
+  }
+}
+
+function setVoiceOrderControlsDisabled(disabled) {
+  if (voiceOrderMicButton && voiceRecognitionSupported) {
+    if (disabled) {
+      voiceOrderMicButton.disabled = true;
+    } else if (!voiceListening) {
+      voiceOrderMicButton.disabled = false;
+    }
+  }
+
+  if (voiceOrderRetryButton && voiceRecognitionSupported) {
+    voiceOrderRetryButton.disabled = disabled;
+  }
+}
+
+function setVoiceOrderTranscript(message) {
+  if (voiceOrderTranscript) {
+    voiceOrderTranscript.textContent = message || voiceOrderDefaultTranscript;
+  }
+}
+
+async function sendCustomerLlmMessage(message) {
+  const response = await fetch("/api/customer/llm/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ message }),
+  });
+
+  if (!response.ok) {
+    throw new Error("failed to send voice order");
+  }
+
+  return response.json();
+}
+
+async function handleVoiceOrderMessage(message) {
+  voiceOrderSending = true;
+  setVoiceOrderControlsDisabled(true);
+  const isAudio = message.startsWith("data:audio") || message.startsWith("data:video");
+  setVoiceOrderFeedback("running", "처리 중", isAudio ? "음성 변환 중..." : `"${message}"`);
+
+  try {
+    const response = await sendCustomerLlmMessage(message);
+    const isError = response.result === "error";
+    const resultMessage = response.message || "주문 요청이 처리되었습니다.";
+    if (!isError && response.order) {
+      updateOrderStatus(response.order);
+    }
+    setVoiceOrderFeedback(
+      isError ? "error" : "success",
+      isError ? "응답 실패" : "응답 완료",
+      resultMessage,
+    );
+  } catch (error) {
+    const errorMessage = "음성 주문 요청을 처리하지 못했습니다.";
+    setVoiceOrderFeedback(
+      "error",
+      "응답 실패",
+      errorMessage,
+    );
+  } finally {
+    voiceOrderSending = false;
+    setVoiceOrderControlsDisabled(false);
+  }
+}
+
+function startVoiceRecognition() {
+  if (!window.isSecureContext) {
+    setVoiceOrderFeedback(
+      "error",
+      "마이크 차단",
+      "마이크는 localhost 또는 HTTPS 주소에서만 사용할 수 있습니다.",
+    );
+    return;
+  }
+
+  if (voiceListening) {
+    if (mediaRecorder && mediaRecorder.state === "recording") {
+      mediaRecorder.stop();
+    }
+    return;
+  }
+
+  startMediaRecording();
+}
+
+async function startMediaRecording() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
+    voiceRecognitionSupported = false;
+    if (voiceOrderMicButton) {
+      voiceOrderMicButton.disabled = true;
+    }
+    setVoiceOrderFeedback("error", "음성 미지원", "이 브라우저에서는 음성 주문을 사용할 수 없습니다.");
+    return;
+  }
+
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    const messages = {
+      NotAllowedError: "브라우저의 마이크 권한을 허용해주세요.",
+      NotFoundError: "마이크 장치를 찾지 못했습니다.",
+    };
+    setVoiceOrderFeedback(
+      "error",
+      "마이크 오류",
+      messages[err.name] || "마이크에 접근하지 못했습니다.",
+    );
+    return;
+  }
+
+  voiceListening = true;
+  voiceOrderMicButton?.classList.add("is-listening");
+  setVoiceOrderFeedback("listening", "듣는 중", "...");
+  audioChunks = [];
+
+  const audioCtx = new AudioContext();
+  const source = audioCtx.createMediaStreamSource(stream);
+  const analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 2048;
+  source.connect(analyser);
+  const dataArray = new Float32Array(analyser.fftSize);
+
+  silenceCheckInterval = setInterval(() => {
+    analyser.getFloatTimeDomainData(dataArray);
+    const rms = Math.sqrt(dataArray.reduce((s, v) => s + v * v, 0) / dataArray.length);
+    if (rms < SILENCE_THRESHOLD) {
+      if (!silenceTimer) {
+        silenceTimer = setTimeout(() => {
+          if (mediaRecorder && mediaRecorder.state === "recording") {
+            mediaRecorder.stop();
+          }
+        }, SILENCE_DURATION_MS);
+      }
+    } else {
+      clearTimeout(silenceTimer);
+      silenceTimer = null;
+    }
+  }, 100);
+
+  mediaRecorder = new MediaRecorder(stream);
+
+  mediaRecorder.addEventListener("dataavailable", (event) => {
+    if (event.data.size > 0) {
+      audioChunks.push(event.data);
+    }
+  });
+
+  mediaRecorder.addEventListener("stop", () => {
+    voiceListening = false;
+    voiceOrderMicButton?.classList.remove("is-listening");
+    clearInterval(silenceCheckInterval);
+    clearTimeout(silenceTimer);
+    silenceCheckInterval = null;
+    silenceTimer = null;
+    stream.getTracks().forEach((track) => track.stop());
+    audioCtx.close();
+
+    if (audioChunks.length === 0) {
+      setVoiceOrderFeedback("error", "인식 실패", "녹음된 음성이 없습니다.");
+      setVoiceOrderControlsDisabled(false);
+      return;
+    }
+
+    const blob = new Blob(audioChunks, { type: "audio/webm" });
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      handleVoiceOrderMessage(reader.result);
+    };
+    reader.readAsDataURL(blob);
+  });
+
+  mediaRecorder.start();
+}
 
 function getCartTotal() {
   return Array.from(cart.values()).reduce((total, quantity) => total + quantity, 0);
@@ -508,6 +713,14 @@ orderStatusList?.addEventListener("click", async (event) => {
   } catch (error) {
     button.disabled = false;
   }
+});
+
+voiceOrderMicButton?.addEventListener("click", startVoiceRecognition);
+
+voiceOrderRetryButton?.addEventListener("click", () => {
+  setVoiceOrderTranscript("");
+  setVoiceOrderFeedback("idle", "대기 중", voiceOrderDefaultResult);
+  startVoiceRecognition();
 });
 
 loadProducts();

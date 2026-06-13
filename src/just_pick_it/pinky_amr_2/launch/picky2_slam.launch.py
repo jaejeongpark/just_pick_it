@@ -17,7 +17,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import SetRemap
+from launch_ros.actions import PushROSNamespace, SetRemap
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -32,15 +32,13 @@ def generate_launch_description():
         [FindPackageShare('slam_toolbox'), 'launch', 'online_sync_launch.py']
     )
 
-    def ns(topic):
-        return ["/", namespace, "/", topic]
-
     slam = GroupAction([
-        SetRemap(src='/scan', dst=ns('scan')),
-        SetRemap(src='/tf', dst=ns('tf')),
-        SetRemap(src='/tf_static', dst=ns('tf_static')),
-        SetRemap(src='/map', dst=ns('map')),
-        SetRemap(src='/map_metadata', dst=ns('map_metadata')),
+        PushROSNamespace(namespace),
+        SetRemap(src='/scan', dst='scan'),
+        SetRemap(src='/tf', dst='tf'),
+        SetRemap(src='/tf_static', dst='tf_static'),
+        SetRemap(src='/map', dst='map'),
+        SetRemap(src='/map_metadata', dst='map_metadata'),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(slam_launch),
             launch_arguments={

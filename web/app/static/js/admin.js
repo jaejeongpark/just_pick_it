@@ -47,16 +47,6 @@ const modalPanel = document.querySelector(".modal-panel");
 const modalTitle = document.querySelector("#modal-title");
 const modalBody = document.querySelector("#modal-body");
 const modalCloseButton = document.querySelector("#modal-close-button");
-const llmPanel = document.querySelector("#llm-panel");
-const llmOpenButton = document.querySelector("#llm-open-button");
-const llmCloseButton = document.querySelector("#llm-close-button");
-const llmMessages = document.querySelector("#llm-messages");
-const llmForm = document.querySelector("#llm-form");
-const llmInput = document.querySelector("#llm-input");
-const dashboardLlmForm = document.querySelector("#dashboard-llm-form");
-const dashboardLlmInput = document.querySelector("#dashboard-llm-input");
-const dashboardLlmStatus = document.querySelector("#dashboard-llm-status");
-const dashboardLlmResult = document.querySelector("#dashboard-llm-result");
 const adminPage = document.body.dataset.adminPage || "dashboard";
 let adminSocket = null;
 let fallbackTimer = null;
@@ -443,8 +433,8 @@ function taskTargetLabel(task) {
     return orderNumber;
   }
 
-  if (task?.display_item_id) {
-    return `진열 #${task.display_item_id}`;
+  if (task?.display_item_id || task?.display_batch_id) {
+    return `진열 #${displayBatchId(task)}`;
   }
 
   return `작업 #${task?.task_id ?? "-"}`;
@@ -455,8 +445,8 @@ function taskReferenceLabel(task) {
     return `주문 상품 #${task.order_item_id}`;
   }
 
-  if (task?.display_item_id) {
-    return `진열 요청 #${task.display_item_id}`;
+  if (task?.display_item_id || task?.display_batch_id) {
+    return `진열 요청 #${displayBatchId(task)}`;
   }
 
   return "단독 작업";
@@ -852,7 +842,7 @@ function isDisplayWork(work) {
 }
 
 function displayWorkNumber(displayItem) {
-  return `진열 #${displayItem?.display_item_id ?? "-"}`;
+  return `진열 #${displayBatchId(displayItem) ?? "-"}`;
 }
 
 function orderWorkNumber(order) {
@@ -884,25 +874,137 @@ function displayWorkQuantity(displayItem) {
   );
 }
 
+function displayBatchId(displayItem) {
+  return displayItem?.display_batch_id ?? displayItem?.display_item_id ?? null;
+}
+
+function displayItemIds(displayItem) {
+  if (Array.isArray(displayItem?.display_item_ids)) {
+    return displayItem.display_item_ids;
+  }
+
+  return displayItem?.display_item_id === undefined || displayItem?.display_item_id === null
+    ? []
+    : [displayItem.display_item_id];
+}
+
+const DISPLAY_STATUS_RANK = {
+  REQUESTED: 1,
+  ASSIGNED: 2,
+  IN_PROGRESS: 3,
+  COMPLETED: 4,
+  FAILED: 5,
+  CANCELLED: 5,
+};
+
+function mergeDisplayStatus(currentStatus, nextStatus) {
+  if (!currentStatus) {
+    return nextStatus;
+  }
+
+  return (DISPLAY_STATUS_RANK[nextStatus] || 0) > (DISPLAY_STATUS_RANK[currentStatus] || 0)
+    ? nextStatus
+    : currentStatus;
+}
+
+function addNullableQuantity(currentValue, nextValue) {
+  if (currentValue === null || nextValue === null || nextValue === undefined) {
+    return null;
+  }
+
+  return Number(currentValue || 0) + Number(nextValue || 0);
+}
+
+function groupDisplayItems(displayItems = []) {
+  const groups = new Map();
+
+  displayItems.forEach((displayItem) => {
+    const batchId = displayBatchId(displayItem);
+    if (batchId === null) {
+      return;
+    }
+
+    const key = normalizeId(batchId);
+    const itemQuantity = displayWorkQuantity(displayItem);
+    const workItem = {
+      item_id: `display-${displayItem.display_item_id}`,
+      display_item_id: displayItem.display_item_id,
+      product_id: displayItem.product_id,
+      product_name: displayItem.product_name,
+      image_url: displayItem.image_url,
+      quantity: itemQuantity,
+      status: displayItem.status,
+    };
+
+    if (!groups.has(key)) {
+      groups.set(key, {
+        ...displayItem,
+        display_batch_id: batchId,
+        display_item_id: batchId,
+        display_item_ids: [],
+        requested_quantity:
+          displayItem.requested_quantity === null || displayItem.requested_quantity === undefined
+            ? null
+            : Number(displayItem.requested_quantity),
+        processed_quantity:
+          displayItem.processed_quantity === null || displayItem.processed_quantity === undefined
+            ? null
+            : Number(displayItem.processed_quantity),
+        stock_delta:
+          displayItem.stock_delta === null || displayItem.stock_delta === undefined
+            ? null
+            : Number(displayItem.stock_delta),
+        items: [],
+      });
+    }
+
+    const group = groups.get(key);
+    group.display_item_ids.push(displayItem.display_item_id);
+    group.items.push(workItem);
+    group.status = mergeDisplayStatus(group.status, displayItem.status);
+    group.assigned_unit_id = group.assigned_unit_id ?? displayItem.assigned_unit_id;
+
+    if (group.items.length > 1) {
+      group.requested_quantity = addNullableQuantity(
+        group.requested_quantity,
+        displayItem.requested_quantity,
+      );
+      group.processed_quantity = addNullableQuantity(
+        group.processed_quantity,
+        displayItem.processed_quantity,
+      );
+      group.stock_delta = addNullableQuantity(group.stock_delta, displayItem.stock_delta);
+    }
+  });
+
+  return Array.from(groups.values());
+}
+
 function displayWorkItem(displayItem) {
-  const quantity = displayWorkQuantity(displayItem);
+  const batchId = displayBatchId(displayItem);
+  const items = Array.isArray(displayItem.items) && displayItem.items.length > 0
+    ? displayItem.items
+    : [
+        {
+          item_id: `display-${displayItem.display_item_id}`,
+          product_id: displayItem.product_id,
+          product_name: displayItem.product_name,
+          image_url: displayItem.image_url,
+          quantity: displayWorkQuantity(displayItem),
+          status: displayItem.status,
+        },
+      ];
 
   return {
     ...displayItem,
     work_kind: "DISPLAY",
-    work_key: `display:${displayItem.display_item_id}`,
+    display_item_id: batchId,
+    display_batch_id: batchId,
+    display_item_ids: displayItem.display_item_ids || displayItemIds(displayItem),
+    work_key: `display:${batchId}`,
     order_no: displayWorkNumber(displayItem),
     priority: 1,
-    items: [
-      {
-        item_id: `display-${displayItem.display_item_id}`,
-        product_id: displayItem.product_id,
-        product_name: displayItem.product_name,
-        image_url: displayItem.image_url,
-        quantity,
-        status: displayItem.status,
-      },
-    ],
+    items,
   };
 }
 
@@ -920,20 +1022,20 @@ function workKey(work) {
   }
 
   return isDisplayWork(work)
-    ? `display:${work.display_item_id}`
+    ? `display:${displayBatchId(work)}`
     : `order:${work.order_id}`;
 }
 
 function activeWorkItems(data = latestAdminStatus) {
   const orderWorks = (data?.orders || []).map(orderWorkItem);
-  const displayWorks = (data?.display_items || []).map(displayWorkItem);
+  const displayWorks = groupDisplayItems(data?.display_items || []).map(displayWorkItem);
 
   return [...displayWorks, ...orderWorks].sort(sortWorkItems);
 }
 
 function historyWorkItems(data = latestAdminStatus) {
   const orderWorks = (data?.order_history || []).map(orderWorkItem);
-  const displayWorks = (data?.display_item_history || []).map(displayWorkItem);
+  const displayWorks = groupDisplayItems(data?.display_item_history || []).map(displayWorkItem);
 
   return [...displayWorks, ...orderWorks].sort(sortWorkItems);
 }
@@ -943,7 +1045,7 @@ function historyWorkGroups(data = latestAdminStatus) {
     orders: (data?.order_history || [])
       .map(orderWorkItem)
       .sort(sortWorkItemsNewestFirst),
-    displays: (data?.display_item_history || [])
+    displays: groupDisplayItems(data?.display_item_history || [])
       .map(displayWorkItem)
       .sort(sortWorkItemsNewestFirst),
   };
@@ -989,7 +1091,7 @@ function latestTaskIdForWork(work) {
 }
 
 function workId(work) {
-  return isDisplayWork(work) ? work.display_item_id : work.order_id;
+  return isDisplayWork(work) ? displayBatchId(work) : work.order_id;
 }
 
 function workDisplayTitle(work) {
@@ -1002,13 +1104,17 @@ function workKindLabel(work) {
 
 function findDisplayWork(displayItemId, { includeHistory = false } = {}) {
   const source = includeHistory
-    ? [...(latestAdminStatus?.display_items || []), ...(latestAdminStatus?.display_item_history || [])]
-    : latestAdminStatus?.display_items || [];
+    ? [...activeWorkItems(), ...historyWorkItems()]
+    : activeWorkItems();
   const displayItem = source.find((item) =>
-    sameId(item.display_item_id, displayItemId),
+    isDisplayWork(item) &&
+    (
+      sameId(displayBatchId(item), displayItemId) ||
+      displayItemIds(item).some((itemId) => sameId(itemId, displayItemId))
+    ),
   );
 
-  return displayItem ? displayWorkItem(displayItem) : null;
+  return displayItem || null;
 }
 
 function findWorkByKey(key, { includeHistory = false } = {}) {
@@ -1024,8 +1130,8 @@ function findWorkByTask(task, { includeHistory = false } = {}) {
     return null;
   }
 
-  if (task.display_item_id) {
-    return findDisplayWork(task.display_item_id, { includeHistory });
+  if (task.display_item_id || task.display_batch_id) {
+    return findDisplayWork(task.display_batch_id ?? task.display_item_id, { includeHistory });
   }
 
   if (task.order_id) {
@@ -1057,7 +1163,7 @@ function selectWork(work) {
   }
 
   if (isDisplayWork(work)) {
-    selectedDisplayItemId = Number(work.display_item_id);
+    selectedDisplayItemId = Number(displayBatchId(work));
     selectedOrderId = null;
     return;
   }
@@ -1182,7 +1288,13 @@ function orderTasks(order) {
   return (latestAdminStatus?.tasks || [])
     .filter((task) => {
       if (isDisplayWork(order)) {
-        return sameId(task.display_item_id, order.display_item_id);
+        const batchId = displayBatchId(order);
+        const itemIds = displayItemIds(order);
+
+        return (
+          sameId(task.display_batch_id, batchId) ||
+          itemIds.some((itemId) => sameId(task.display_item_id, itemId))
+        );
       }
 
       return (
@@ -1303,8 +1415,12 @@ function normalizeOrderWorkSelection(data) {
 
   if (
     selectedDisplayItemId !== null &&
-    !(data.display_items || []).some((item) =>
-      sameId(item.display_item_id, selectedDisplayItemId),
+    !works.some((work) =>
+      isDisplayWork(work) &&
+      (
+        sameId(displayBatchId(work), selectedDisplayItemId) ||
+        displayItemIds(work).some((itemId) => sameId(itemId, selectedDisplayItemId))
+      ),
     )
   ) {
     selectedDisplayItemId = null;
@@ -1355,7 +1471,7 @@ function renderOrderWorkDetail() {
   const activeTask =
     selectedTask &&
     (
-      (displayWork && sameId(selectedTask.display_item_id, order.display_item_id)) ||
+      (displayWork && tasks.some((task) => sameId(task.task_id, selectedTask.task_id))) ||
       (!displayWork && (selectedTask.order_id === order.order_id ||
         selectedTask.order_no === order.order_no))
     )
@@ -1638,6 +1754,32 @@ function currentMoveTask(robot) {
     source_zone_name: null,
     target_zone_name: null,
   };
+}
+
+function renderRobotCurrentTaskCell(robot, task) {
+  if (!task) {
+    return "-";
+  }
+
+  const taskText = `${taskTargetLabel(task)} · ${taskDisplayTitle(task)}`;
+  const taskStatus = robot?.current_task_status || task?.status;
+  const robotName = robot?.robot_name || robotDisplayName(robot);
+
+  if (taskStatus !== "RUNNING" || !robotName) {
+    return taskText;
+  }
+
+  return `
+    <span class="task-cell-main">${taskText}</span>
+    <span
+      class="debug-task-success-action"
+      role="button"
+      tabindex="0"
+      title="디버그용으로 현재 RUNNING task를 SUCCESS 처리"
+      data-debug-running-task="${robotName}"
+      data-debug-task-id="${task.task_id}"
+    >완료 처리</span>
+  `;
 }
 
 function plannedWaypointNamesForRobot(robot) {
@@ -2220,7 +2362,7 @@ function renderRobotManagement(robots) {
               <span><span class="state-badge ${statusClass(status)}">${label(status)}</span></span>
               <span>${robotStateLabel(robot)}</span>
               <span>${renderBatteryMeter(robot.battery_level)}</span>
-              <span class="task-cell">${task ? `${taskTargetLabel(task)} · ${taskDisplayTitle(task)}` : "-"}</span>
+              <span class="task-cell">${renderRobotCurrentTaskCell(robot, task)}</span>
               <span class="location-cell">${robotLocationText(robot)}</span>
             </div>
           `;
@@ -2266,13 +2408,13 @@ function renderRobots(robots) {
           const status = robotStatusValue(robot);
 
           return `
-            <button class="admin-table-row robot-table-row" type="button" data-robot-detail="${robot.robot_id}">
+            <div class="admin-table-row robot-table-row" role="button" tabindex="0" data-robot-detail="${robot.robot_id}">
               <span class="robot-name-cell" title="#${robot.robot_id}"><i class="${robotTypeClass}"></i>${displayName}</span>
               <span><span class="state-badge ${statusClass(status)}">${label(status)}</span></span>
               <span>${robotStateLabel(robot)}</span>
-              <span class="task-cell">${task ? `${taskTargetLabel(task)} · ${taskDisplayTitle(task)}` : "-"}</span>
+              <span class="task-cell">${renderRobotCurrentTaskCell(robot, task)}</span>
               <span>${renderBatteryMeter(robot.battery_level)}</span>
-            </button>
+            </div>
           `;
         })
         .join("")}
@@ -2316,6 +2458,7 @@ function renderOrders(orders) {
             adminPage === "orders" &&
             (
               (isDisplayWork(work) && sameId(work.display_item_id, selectedDisplayItemId)) ||
+              (isDisplayWork(work) && sameId(displayBatchId(work), selectedDisplayItemId)) ||
               (!isDisplayWork(work) && sameId(work.order_id, selectedOrderId)) ||
               linkedTaskSelected
             );
@@ -3071,6 +3214,7 @@ function taskSearchText(task) {
     task.order_id,
     task.order_item_id,
     task.display_item_id,
+    task.display_batch_id,
     assignedRobotLabel(task),
     task.status,
     label(task.status),
@@ -3821,6 +3965,31 @@ async function updateRobotPanelState(robotId) {
   selectedRobotId = robotId;
 }
 
+async function debugCompleteRunningRobotTask(robotName, taskId) {
+  const encodedRobotName = encodeURIComponent(robotName);
+  await postJson(`/api/admin/debug/robots/${encodedRobotName}/running-task/success`, {
+    message: `admin debug SUCCESS for task #${taskId || "-"}`,
+  });
+}
+
+function handleDebugRunningTaskAction(debugAction) {
+  if (!debugAction || debugAction.getAttribute("aria-disabled") === "true") {
+    return false;
+  }
+
+  debugAction.classList.add("is-pending");
+  debugAction.setAttribute("aria-disabled", "true");
+  debugCompleteRunningRobotTask(
+    debugAction.dataset.debugRunningTask,
+    debugAction.dataset.debugTaskId,
+  ).catch((error) => {
+    alert(error.message);
+    debugAction.classList.remove("is-pending");
+    debugAction.removeAttribute("aria-disabled");
+  });
+  return true;
+}
+
 async function updateProductStock(productId, stockQty) {
   const response = await fetch(`/api/admin/products/${productId}/stock`, {
     method: "PATCH",
@@ -3961,67 +4130,6 @@ async function createPickupSlot() {
   openPickupSlotManager();
 }
 
-function appendLlmMessage(role, text) {
-  if (!llmMessages) {
-    return;
-  }
-
-  const message = document.createElement("div");
-  message.className = `llm-message ${role}`;
-  message.textContent = text;
-  llmMessages.appendChild(message);
-  llmMessages.scrollTop = llmMessages.scrollHeight;
-}
-
-function buildLlmFailureReply(command) {
-  const lowerCommand = command.toLowerCase();
-
-  if (
-    lowerCommand.includes("진열") ||
-    lowerCommand.includes("display") ||
-    lowerCommand.includes("place")
-  ) {
-    return "진열 명령을 처리하지 못했습니다. AI 메시지 API와 Fleet Manager 상태를 확인해주세요.";
-  }
-
-  if (lowerCommand.includes("재고") || lowerCommand.includes("stock")) {
-    return `현재 재고 부족 상품은 ${latestAdminStatus?.low_stock_count ?? 0}개입니다. Inventory 관리에서 수량을 조정할 수 있습니다.`;
-  }
-
-  if (lowerCommand.includes("예외") || lowerCommand.includes("exception")) {
-    return `미처리 예외는 ${latestAdminStatus?.unresolved_exception_count ?? 0}건입니다. Exceptions 영역에서 처리할 수 있습니다.`;
-  }
-
-  return "AI 메시지 API 호출에 실패했습니다. 서버 상태를 확인해주세요.";
-}
-
-async function sendLlmMessage(message) {
-  const response = await fetch("/api/admin/llm/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ message }),
-  });
-
-  if (!response.ok) {
-    throw new Error("AI 메시지 전송 실패");
-  }
-
-  return response.json();
-}
-
-function setDashboardLlmFeedback(state, statusText, resultText) {
-  if (dashboardLlmStatus) {
-    dashboardLlmStatus.className = `ai-command-status ${state}`;
-    dashboardLlmStatus.textContent = statusText;
-  }
-
-  if (dashboardLlmResult) {
-    dashboardLlmResult.textContent = resultText;
-  }
-}
-
 function refreshOrderManagementView() {
   renderOrders(latestAdminStatus?.orders || []);
   renderTaskSnapshot(latestAdminStatus?.tasks || []);
@@ -4160,6 +4268,14 @@ orderList?.addEventListener("click", (event) => {
 });
 
 robotStatus?.addEventListener("click", (event) => {
+  const debugAction = event.target.closest("[data-debug-running-task]");
+  if (debugAction) {
+    event.preventDefault();
+    event.stopPropagation();
+    handleDebugRunningTaskAction(debugAction);
+    return;
+  }
+
   const row = event.target.closest("[data-robot-select]");
 
   if (adminPage === "robots") {
@@ -4172,13 +4288,28 @@ robotStatus?.addEventListener("click", (event) => {
     return;
   }
 
-  const button = event.target.closest("button[data-robot-detail]");
+  const button = event.target.closest("[data-robot-detail]");
 
   if (!button) {
     return;
   }
 
   openRobotDetail(button.dataset.robotDetail);
+});
+
+robotStatus?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") {
+    return;
+  }
+
+  const debugAction = event.target.closest("[data-debug-running-task]");
+  if (!debugAction) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  handleDebugRunningTaskAction(debugAction);
 });
 
 robotDetailPanel?.addEventListener("click", (event) => {
@@ -4326,77 +4457,6 @@ modalBody?.addEventListener("change", (event) => {
   if (statusFilter) {
     event.stopPropagation();
     applyTaskHistoryFilter();
-  }
-});
-llmOpenButton?.addEventListener("click", () => {
-  if (llmPanel) {
-    llmPanel.hidden = false;
-    llmInput?.focus();
-  }
-});
-llmCloseButton?.addEventListener("click", () => {
-  if (llmPanel) {
-    llmPanel.hidden = true;
-  }
-});
-llmForm?.addEventListener("submit", async (event) => {
-  event.preventDefault();
-
-  const command = llmInput?.value.trim();
-
-  if (!command) {
-    return;
-  }
-
-  appendLlmMessage("user", command);
-  llmInput.value = "";
-
-  try {
-    const response = await sendLlmMessage(command);
-    appendLlmMessage("bot", response.message);
-  } catch (error) {
-    appendLlmMessage("bot", buildLlmFailureReply(command));
-  }
-});
-dashboardLlmForm?.addEventListener("submit", async (event) => {
-  event.preventDefault();
-
-  const command = dashboardLlmInput?.value.trim();
-
-  if (!command) {
-    return;
-  }
-
-  const submitButton = dashboardLlmForm.querySelector("button[type='submit']");
-  if (submitButton) {
-    submitButton.disabled = true;
-  }
-  dashboardLlmInput.value = "";
-  setDashboardLlmFeedback(
-    "running",
-    "명령 전송 중",
-    `"${command}" 명령을 AI 메시지 API로 보내는 중입니다.`,
-  );
-
-  try {
-    const response = await sendLlmMessage(command);
-    const isError = response.result === "error";
-    setDashboardLlmFeedback(
-      isError ? "error" : "success",
-      isError ? "응답 실패" : "응답 완료",
-      response.message || "AI 응답이 도착했습니다.",
-    );
-  } catch (error) {
-    setDashboardLlmFeedback(
-      "error",
-      "응답 실패",
-      "AI 메시지 API 호출에 실패했습니다. 서버 상태를 확인해주세요.",
-    );
-  } finally {
-    if (submitButton) {
-      submitButton.disabled = false;
-    }
-    dashboardLlmInput?.focus();
   }
 });
 modalCloseButton?.addEventListener("click", closeModal);

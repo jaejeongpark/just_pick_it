@@ -108,6 +108,8 @@ class FleetManagerNode(Node):
             self,
             robot_ids=picky_robot_ids,
             zone_coords=zone_coords or None,
+            # 콜드 스타트: 두 로봇 모두 자기 충전 도크에서 부팅하므로 도크 점유 상태로 시작.
+            assume_docked_at_start=True,
         )
 
     def _create_robot_state_monitor(
