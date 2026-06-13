@@ -83,9 +83,24 @@ N_JOINTS = 6              # 전체 로봇 관절 수
 CTRL_IDX = [0, 1, 2, 3, 4]  # NN이 제어하는 관절 (J1~J5). J6(5) 제외.
 N_CTRL = len(CTRL_IDX)
 ANCHOR_DIM = 3            # anchor: cx_norm, cy_norm, area_norm
-FEATURES_PER_STEP = 2 * N_CTRL  # joint(5) + delta(5) = 10
-WINDOW = 5
-INPUT_DIM = ANCHOR_DIM + FEATURES_PER_STEP * WINDOW  # 3 + 50 = 53
+# 진행도(progress): 활성화(시작) 자세 대비 제어 관절 누적 변위 Δq (현재값 1개).
+# "시작에서 얼마나 움직였나"를 정책에 직접 제공해 정지 학습을 돕는다.
+PROGRESS_DIM = N_CTRL    # 5
+PROGRESS_SCALE_DEG = 90.0  # Δq 정규화 스케일
+# policy 입력 구조 (--policy-input, main에서 설정):
+#   memoryless: step = joint(5)만, window=1. 입력 = 3+5+5 = 13.
+#     delta 이력은 "직전 움직임 복사" 지름길 학습을 유발해 런타임에서 중력 처짐 등
+#     측정 바이어스를 증폭하는 것이 확인되어(ablation: closed-loop 도달 거리
+#     memoryless 4.3deg vs window 7.7deg, 처짐 주입 시 6.3 vs 12.0) 기본값으로 한다.
+#   window: step = joint(5)+delta(5), window=5. 입력 = 3+5+50 = 58 (기존 구조).
+USE_DELTA_FEATURES = False
+# progress(시작 자세 대비 Δq) 사용 여부. to_goal에서 target은 q_final-q로 q_start와
+# 무관한데, progress는 q_start 의존성을 입력에 주입해 비전형 q_start에서 OOD 언더슈트를
+# 유발하는 것이 확인되어(같은 q에서 progress만 바꿔도 출력 방향이 뒤집힘) 기본 비활성.
+USE_PROGRESS = False
+FEATURES_PER_STEP = N_CTRL
+WINDOW = 1
+INPUT_DIM = ANCHOR_DIM + PROGRESS_DIM + FEATURES_PER_STEP * WINDOW
 
 
 # ============================================================
@@ -121,22 +136,37 @@ def scale_delta(delta, max_delta_deg):
     return out
 
 
+def scale_progress(dq_from_start):
+    # 시작 자세 대비 누적 변위(제어 관절)를 PROGRESS_SCALE_DEG로 정규화.
+    out = np.zeros(N_CTRL, dtype=np.float32)
+    for k, i in enumerate(CTRL_IDX):
+        out[k] = float(np.clip(float(dq_from_start[i]) / PROGRESS_SCALE_DEG, -1.0, 1.0))
+    return out
+
+
 class Frame:
     """
     combined sequence의 한 timestep.
-    ts_feat(10) = [J1~J5 정규화, dJ1~dJ5 스케일]. 학습 target용 raw delta(6)도 보관.
+    ts_feat = [J1~J5 정규화(+delta 스케일, window 모드)]. 학습 target용 raw 값도 보관.
     """
 
-    __slots__ = ("ts_feat", "raw_delta_deg", "is_human", "grip_triggered")
+    __slots__ = ("ts_feat", "raw_delta_deg", "progress", "is_human",
+                 "grip_triggered", "raw_joints")
 
-    def __init__(self, ts_feat, raw_delta_deg, is_human, grip_triggered):
-        self.ts_feat = ts_feat              # np.float32 (10,)
+    def __init__(self, ts_feat, raw_delta_deg, progress, is_human,
+                 grip_triggered, raw_joints=None):
+        self.ts_feat = ts_feat              # np.float32 (5 or 10,)
         self.raw_delta_deg = raw_delta_deg  # np.float32 (6,) degrees (전체 관절)
+        self.progress = progress            # np.float32 (5,) 시작 자세 대비 Δq(scaled)
         self.is_human = is_human            # bool
         self.grip_triggered = grip_triggered  # bool
+        self.raw_joints = raw_joints        # np.float32 (6,) degrees (to_goal target용)
 
 
 def _make_ts_feat(joints, delta, max_delta_deg):
+    if not USE_DELTA_FEATURES:
+        # memoryless: 관절각만. delta 이력 채널을 제거해 관성 복사 학습을 차단한다.
+        return normalize_joints(joints).astype(np.float32)
     return np.concatenate([
         normalize_joints(joints),
         scale_delta(delta, max_delta_deg),
@@ -262,18 +292,27 @@ def build_episode_sequence(episode_dir, max_delta_deg, seed_len, target_control_
         dtype=np.float32,
     )
 
+    # 진행도 기준점 = 활성화(시작) 자세 = 첫 human FREE_DRIVE 샘플의 관절각.
+    start_joints = human_raw[0]["joints"].astype(np.float32)
+
     seq = []
-    # IBVS seed frames (종단 seed_len 개).
+    # IBVS seed frames (종단 seed_len 개). 시작 자세 근처라 progress ≈ 0.
     for r in (ibvs_raw[-seed_len:] if seed_len > 0 else []):
         seq.append(Frame(
             _make_ts_feat(r["joints"], r["delta"], max_delta_deg),
-            r["delta"].astype(np.float32), False, False,
+            r["delta"].astype(np.float32),
+            scale_progress(r["joints"] - start_joints),
+            False, False,
+            r["joints"].astype(np.float32),
         ))
     # human frames.
     for r in human_raw:
         seq.append(Frame(
             _make_ts_feat(r["joints"], r["delta"], max_delta_deg),
-            r["delta"].astype(np.float32), True, r["grip_triggered"],
+            r["delta"].astype(np.float32),
+            scale_progress(r["joints"] - start_joints),
+            True, r["grip_triggered"],
+            r["joints"].astype(np.float32),
         ))
 
     return seq, anchor
@@ -283,9 +322,14 @@ def build_episode_sequence(episode_dir, max_delta_deg, seed_len, target_control_
 # 데이터셋 구성
 # ============================================================
 def _flatten_window(anchor, window):
-    """입력 벡터 = [anchor 3] + [window 각 frame의 ts_feat 12] = 3 + 12*WINDOW."""
+    """
+    입력 = [anchor(3)] + [progress(5)] + [window 각 frame의 ts_feat(10)].
+    progress는 window의 마지막(가장 최근) frame 기준(현재 진행도).
+    USE_PROGRESS=False면 progress 자리를 0으로 채운다(차원은 유지).
+    """
+    prog = window[-1].progress if USE_PROGRESS else np.zeros_like(window[-1].progress)
     return np.concatenate(
-        [anchor] + [f.ts_feat for f in window]
+        [anchor, prog] + [f.ts_feat for f in window]
     ).astype(np.float32)
 
 
@@ -307,6 +351,65 @@ def make_policy_samples(seq, anchor, max_delta_deg):
         X.append(_flatten_window(anchor, window))
         Yd.append(scale_delta(frame.raw_delta_deg, max_delta_deg))
     return X, Yd
+
+
+def make_policy_samples_to_goal(seq, anchor, max_delta_deg,
+                                noise_deg, n_aug, rng):
+    """
+    목표 지향 재라벨링: target = 현재 자세에서 q_final(grip 자세)로 향하는 방향.
+      - 방향 보존 캡: vec * min(1, max_delta/max|성분|). 관절별 독립 클리핑과 달리
+        방향 비율이 왜곡되지 않고, q_final 근처에서 크기가 줄어 정지가 학습된다.
+      - 모든 frame이 같은 끝점을 가리키므로 수렴장(attractor)이 만들어진다.
+      - 노이즈 증강(memoryless 전용): label을 임의 자세에서 해석적으로 계산할 수
+        있으므로(q_final - q), 시연 궤적 주변 noise_deg 이내 상태를 n_aug개씩
+        합성해 궤적 이탈 시 복귀를 학습시킨다.
+    """
+    q_final = None
+    for f in seq:
+        if f.grip_triggered and f.raw_joints is not None:
+            q_final = f.raw_joints
+    if q_final is None:
+        hum = [f for f in seq if f.is_human and f.raw_joints is not None]
+        if not hum:
+            return [], []
+        q_final = hum[-1].raw_joints
+
+    hum_idx = [i for i, f in enumerate(seq) if f.is_human]
+    if not hum_idx:
+        return [], []
+    start_joints = seq[hum_idx[0]].raw_joints
+
+    def goal_label(q):
+        vec = (q_final - q).astype(np.float32)
+        m = max(abs(float(vec[i])) for i in CTRL_IDX)
+        if m > max_delta_deg:
+            vec = vec * (max_delta_deg / m)
+        return scale_delta(vec, max_delta_deg)
+
+    X, Y = [], []
+    for t in range(WINDOW, len(seq) + 1):
+        window = seq[t - WINDOW:t]
+        f = window[-1]
+        if f.raw_joints is None:
+            continue
+        X.append(_flatten_window(anchor, window))
+        Y.append(goal_label(f.raw_joints))
+
+        # 노이즈 증강은 이력이 없는 memoryless(window=1)에서만 일관되게 가능.
+        if n_aug > 0 and WINDOW == 1:
+            for _ in range(n_aug):
+                noise = rng.uniform(-noise_deg, noise_deg, size=6).astype(np.float32)
+                noise[5] = 0.0
+                qn = f.raw_joints + noise
+                fr = Frame(
+                    _make_ts_feat(qn, np.zeros(6, np.float32), max_delta_deg),
+                    np.zeros(6, np.float32),
+                    scale_progress(qn - start_joints),
+                    f.is_human, False, qn,
+                )
+                X.append(_flatten_window(anchor, [fr]))
+                Y.append(goal_label(qn))
+    return X, Y
 
 
 def make_grip_sample(seq, anchor):
@@ -561,18 +664,41 @@ def collect_episode_dirs(base):
 
 
 def main():
-    global WINDOW, INPUT_DIM
+    global WINDOW, INPUT_DIM, FEATURES_PER_STEP, USE_DELTA_FEATURES, USE_PROGRESS
 
     parser = argparse.ArgumentParser(description="NN controller 학습 (Task 7 / 7-B)")
     parser.add_argument("--data-dir", default="~/rosbags")
     parser.add_argument("--out-dir",
                         default="src/just_pick_it/just_pick_it_perception/result/nn_controller")
-    parser.add_argument("--window", type=int, default=5)
+    parser.add_argument("--policy-input", choices=["memoryless", "window"],
+                        default="memoryless",
+                        help="memoryless(기본): anchor+progress+현재 관절각(13차원). "
+                             "window: 기존 q+delta 5-frame window(58차원)로 되돌리기.")
+    parser.add_argument("--policy-target", choices=["to_goal", "next_delta"],
+                        default="to_goal",
+                        help="to_goal(기본): target = q_final로 향하는 방향(수렴장 학습). "
+                             "next_delta: 기존 사람 다음 step 모방으로 되돌리기.")
+    parser.add_argument("--anchor-mode", choices=["zero", "frozen"],
+                        default="zero",
+                        help="zero(기본): anchor 3차원을 학습/추론 모두 0으로 고정. "
+                             "anchor는 물체별 정보가 없는 반면(LOO 검증) 런타임 area가 "
+                             "학습 분포 밖(0.7~0.8)이라 수렴장을 왜곡하는 부채로 확인됨. "
+                             "frozen: 기존 방식(IBVS 종단 detection 동결)으로 되돌리기.")
+    parser.add_argument("--progress-mode", choices=["zero", "use"], default="zero",
+                        help="zero(기본): progress(q_start 대비 Δq) 입력을 0으로. "
+                             "to_goal에서 잉여이며 비전형 q_start OOD 언더슈트를 유발. "
+                             "use: 기존처럼 progress 사용.")
+    parser.add_argument("--augment-noise-deg", type=float, default=3.0,
+                        help="to_goal 노이즈 증강 폭(deg). memoryless에서만 적용.")
+    parser.add_argument("--augment-copies", type=int, default=5,
+                        help="frame당 노이즈 증강 샘플 수. 0이면 비활성.")
+    parser.add_argument("--window", type=int, default=5,
+                        help="--policy-input window 일 때의 window 크기")
     parser.add_argument("--seed-len", type=int, default=5,
                         help="IBVS 종단 seed frame 개수")
-    parser.add_argument("--target-control-hz", type=float, default=5.0,
+    parser.add_argument("--target-control-hz", type=float, default=3.0,
                         help="학습/추론 timestep(Hz). 기록(고속)을 이 주기로 다운샘플. "
-                             "0이면 기록 rate 그대로 사용.")
+                             "3Hz 권장(샘플 수 vs delta 크기 균형). 0이면 기록 rate 그대로.")
     parser.add_argument("--max-delta-deg", type=float, default=5.0)
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -587,8 +713,19 @@ def main():
     parser.add_argument("--skip-onnx", action="store_true")
     args = parser.parse_args()
 
-    WINDOW = args.window
-    INPUT_DIM = ANCHOR_DIM + FEATURES_PER_STEP * WINDOW
+    if args.policy_input == "memoryless":
+        USE_DELTA_FEATURES = False
+        FEATURES_PER_STEP = N_CTRL
+        WINDOW = 1
+    else:
+        USE_DELTA_FEATURES = True
+        FEATURES_PER_STEP = 2 * N_CTRL
+        WINDOW = args.window
+    USE_PROGRESS = (args.progress_mode == "use")
+    INPUT_DIM = ANCHOR_DIM + PROGRESS_DIM + FEATURES_PER_STEP * WINDOW
+    print(f"policy_input={args.policy_input} (window={WINDOW}, "
+          f"features_per_step={FEATURES_PER_STEP}, input_dim={INPUT_DIM}), "
+          f"progress_mode={args.progress_mode}")
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -609,6 +746,7 @@ def main():
     # --- 데이터 추출 ---
     pX, pYd = [], []              # policy (success only)
     gX, gY = [], []               # grip predictor (success + fail)
+    aug_rng = np.random.default_rng(args.seed)
 
     for label, ep in episodes:
         seq, anchor = build_episode_sequence(
@@ -618,12 +756,21 @@ def main():
             print(f"  [skip] {ep.name}: 시퀀스 비어있음")
             continue
 
+        if args.anchor_mode == "zero":
+            anchor = np.zeros(ANCHOR_DIM, dtype=np.float32)
+
         print(f"  [{label}] {ep.name}: anchor(cx,cy,area)="
               f"({anchor[0]:.3f},{anchor[1]:.3f},{anchor[2]:.3f}), "
               f"frames={len(seq)}")
 
         if label == "success":
-            x, yd = make_policy_samples(seq, anchor, args.max_delta_deg)
+            if args.policy_target == "to_goal":
+                x, yd = make_policy_samples_to_goal(
+                    seq, anchor, args.max_delta_deg,
+                    args.augment_noise_deg, args.augment_copies, aug_rng,
+                )
+            else:
+                x, yd = make_policy_samples(seq, anchor, args.max_delta_deg)
             pX += x
             pYd += yd
 
@@ -639,22 +786,35 @@ def main():
         "window": WINDOW,
         "anchor_dim": ANCHOR_DIM,
         "features_per_step": FEATURES_PER_STEP,
+        # 추론 노드(FeatureBuilder)가 이 플래그로 step feature 구성을 분기한다.
+        "policy_input": args.policy_input,
+        "policy_target": args.policy_target,
+        # zero: 추론 노드도 anchor를 0으로 넣고 detection 대기를 생략한다.
+        "anchor_mode": args.anchor_mode,
+        # zero: 추론 노드도 progress를 0으로 넣는다(FeatureBuilder가 처리).
+        "progress_mode": args.progress_mode,
+        "use_delta_features": USE_DELTA_FEATURES,
         "input_dim": INPUT_DIM,
         "max_delta_deg": args.max_delta_deg,
         # 학습/추론 timestep(Hz). nn_controller는 이 주기로 동작해야 일관성 유지.
         "target_control_hz": args.target_control_hz,
+        # 진행도(시작 자세 대비 Δq) feature.
+        "progress_dim": PROGRESS_DIM,
+        "progress_scale_deg": PROGRESS_SCALE_DEG,
         "joint_limits": JOINT_LIMITS,
         "controlled_joints": CTRL_IDX,   # NN이 제어하는 관절 (J1~J5). J6 제외.
         "gripper_max": GRIPPER_MAX,
         "default_image_w": DEFAULT_IMAGE_W,
         "default_image_h": DEFAULT_IMAGE_H,
         "ibvs_keep_phases": sorted(IBVS_KEEP_PHASES),
-        # 입력 = anchor(3) + window 각 step의 ts_feat(10). step layout이 WINDOW번 반복.
+        # 입력 = anchor(3) + progress(5) + window 각 step의 ts_feat(10).
         "anchor_layout": ["anchor_cx_norm", "anchor_cy_norm", "anchor_area_norm"],
-        "step_layout": [
-            "q1n", "q2n", "q3n", "q4n", "q5n",
-            "dq1s", "dq2s", "dq3s", "dq4s", "dq5s",
-        ],
+        "progress_layout": ["prog_q1", "prog_q2", "prog_q3", "prog_q4", "prog_q5"],
+        "step_layout": (
+            ["q1n", "q2n", "q3n", "q4n", "q5n"]
+            + (["dq1s", "dq2s", "dq3s", "dq4s", "dq5s"]
+               if USE_DELTA_FEATURES else [])
+        ),
         "policy_output": ["dq1..dq5 (tanh, ×max_delta_deg for degrees). J6 excluded."],
         "grip_decision": "GripSuccessPredictor P(success) gate (policy has no gripper head)",
     }

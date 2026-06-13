@@ -1,10 +1,17 @@
 {
-  "window": 5,
+  "window": 1,
   "anchor_dim": 3,
-  "features_per_step": 10,
-  "input_dim": 53,
+  "features_per_step": 5,
+  "policy_input": "memoryless",
+  "policy_target": "to_goal",
+  "anchor_mode": "zero",
+  "progress_mode": "zero",
+  "use_delta_features": false,
+  "input_dim": 13,
   "max_delta_deg": 5.0,
-  "target_control_hz": 3.0,
+  "target_control_hz": 0.0,
+  "progress_dim": 5,
+  "progress_scale_deg": 90.0,
   "joint_limits": [
     [
       -168.0,
@@ -51,17 +58,19 @@
     "anchor_cy_norm",
     "anchor_area_norm"
   ],
+  "progress_layout": [
+    "prog_q1",
+    "prog_q2",
+    "prog_q3",
+    "prog_q4",
+    "prog_q5"
+  ],
   "step_layout": [
     "q1n",
     "q2n",
     "q3n",
     "q4n",
-    "q5n",
-    "dq1s",
-    "dq2s",
-    "dq3s",
-    "dq4s",
-    "dq5s"
+    "q5n"
   ],
   "policy_output": [
     "dq1..dq5 (tanh, \u00d7max_delta_deg for degrees). J6 excluded."

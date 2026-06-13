@@ -60,6 +60,9 @@ class FeatureBuilder:
         self.window = int(config["window"])
         self.anchor_dim = int(config["anchor_dim"])
         self.features_per_step = int(config["features_per_step"])
+        # memoryless 모델(use_delta_features=False)은 step feature가 관절각만이다.
+        # 구버전 config(키 없음)는 delta 포함(기존 window 구조)으로 동작한다.
+        self.use_delta_features = bool(config.get("use_delta_features", True))
         self.input_dim = int(config["input_dim"])
         self.max_delta_deg = float(config["max_delta_deg"])
         self.joint_limits = [tuple(v) for v in config["joint_limits"]]
@@ -68,6 +71,11 @@ class FeatureBuilder:
         self.n_ctrl = len(self.controlled_joints)
         self.image_w = float(config.get("default_image_w", 640.0))
         self.image_h = float(config.get("default_image_h", 480.0))
+        # 진행도(시작 자세 대비 Δq) feature.
+        self.progress_dim = int(config.get("progress_dim", 0))
+        self.progress_scale_deg = float(config.get("progress_scale_deg", 90.0))
+        # zero면 progress 입력을 0으로(학습과 동일). 구버전 config는 use.
+        self.progress_mode = str(config.get("progress_mode", "use")).lower()
 
     def normalize_joints(self, angles):
         out = np.zeros(self.n_ctrl, dtype=np.float32)
@@ -83,7 +91,16 @@ class FeatureBuilder:
             out[k] = float(np.clip(float(delta[i]) / self.max_delta_deg, -1.0, 1.0))
         return out
 
+    def scale_progress(self, dq_from_start):
+        out = np.zeros(self.n_ctrl, dtype=np.float32)
+        for k, i in enumerate(self.controlled_joints):
+            out[k] = float(np.clip(
+                float(dq_from_start[i]) / self.progress_scale_deg, -1.0, 1.0))
+        return out
+
     def step_feat(self, joints, delta):
+        if not self.use_delta_features:
+            return self.normalize_joints(joints).astype(np.float32)
         return np.concatenate([
             self.normalize_joints(joints),
             self.scale_delta(delta),
@@ -98,9 +115,13 @@ class FeatureBuilder:
             float(area_norm),
         ], dtype=np.float32)
 
-    def build_input(self, anchor_vec, window_step_feats):
-        """입력 = [anchor(5)] + [step_feat(12) × window]. window는 oldest→newest 순."""
-        return np.concatenate([anchor_vec] + list(window_step_feats)).astype(np.float32)
+    def build_input(self, anchor_vec, progress_vec, window_step_feats):
+        """입력 = [anchor(3)] + [progress(5)] + [step_feat(10) × window]. window는 oldest→newest."""
+        if self.progress_mode == "zero":
+            progress_vec = np.zeros_like(progress_vec)
+        return np.concatenate(
+            [anchor_vec, progress_vec] + list(window_step_feats)
+        ).astype(np.float32)
 
 
 def load_config(model_dir):

@@ -32,6 +32,10 @@ def launch_setup(context, *args, **kwargs):
     bag_base_dir = LaunchConfiguration("bag_base_dir").perform(context)
     episode_id = LaunchConfiguration("episode_id").perform(context)
     record_rate_hz = LaunchConfiguration("record_rate_hz").perform(context)
+    record_mode = LaunchConfiguration("record_mode").perform(context)
+    displacement_threshold_deg = LaunchConfiguration(
+        "displacement_threshold_deg"
+    ).perform(context)
     loop_episodes = LaunchConfiguration("loop_episodes").perform(context)
     done_status_poll_rate_hz = LaunchConfiguration("done_status_poll_rate_hz").perform(context)
 
@@ -95,6 +99,8 @@ def launch_setup(context, *args, **kwargs):
                 "bag_base_dir": bag_base_dir,
                 "episode_id": episode_id,
                 "record_rate_hz": float(record_rate_hz),
+                "record_mode": record_mode,
+                "displacement_threshold_deg": float(displacement_threshold_deg),
                 "loop_episodes": (loop_episodes.lower() in ("true", "1", "yes")),
                 "shutdown_on_done": True,
             }
@@ -156,6 +162,11 @@ def generate_launch_description():
         # 기록 충실도를 위해 10Hz로 높인다. 학습/추론 timestep은 train의
         # target_control_hz 다운샘플로 분리(예: 5Hz)한다.
         DeclareLaunchArgument("record_rate_hz", default_value="10.0"),
+        # displacement(기본): J1~J5 최대 변위가 displacement_threshold_deg 이상일 때마다
+        # waypoint 저장(시연 속도 무관, 관절 공간 등간격). fixed_rate: 기존 고정 주기.
+        # displacement 모드 학습은 train --target-control-hz 0 으로 돌린다(기록 그대로 사용).
+        DeclareLaunchArgument("record_mode", default_value="displacement"),
+        DeclareLaunchArgument("displacement_threshold_deg", default_value="2.0"),
         # True면 S/F/ERROR 후 종료하지 않고 다음 episode로 자동 루프. 종료는 GUI X.
         DeclareLaunchArgument("loop_episodes", default_value="true"),
         # DONE(human phase) 동안 ibvs_controller가 status를 폴링하는 주파수.

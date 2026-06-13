@@ -33,12 +33,15 @@ PHASE_GRIPPING = 2
 PHASE_WAITING_RESULT = 3
 PHASE_RESULT = 4
 PHASE_READY_TO_RELEASE = 5
+PHASE_RELEASING = 6
 
 
 class InteractionPhase(Enum):
     WAITING = PHASE_WAITING
     # ibvs_done 수신 후 사람이 팔을 잡고 [R]을 누를 때까지 관절을 풀지 않고 대기.
     READY_TO_RELEASE = PHASE_READY_TO_RELEASE
+    # [R] 후 서보 해제 + gripper open이 확인될 때까지 기록을 보류하는 단계.
+    RELEASING = PHASE_RELEASING
     FREE_DRIVE = PHASE_FREE_DRIVE
     GRIPPING = PHASE_GRIPPING
     WAITING_RESULT = PHASE_WAITING_RESULT
@@ -57,9 +60,15 @@ class HumanInteractionRecorderNode(Node):
       WAITING -> (ibvs_done) -> READY_TO_RELEASE
         관절은 풀지 않고 대기. 사람이 팔을 잡고 [R]을 누를 때까지.
 
-      READY_TO_RELEASE -> (R) -> FREE_DRIVE
-        release_all_servos() (gripper는 재발행으로 open 유지), 기록 시작.
-        record_rate_hz 고정 주기로 현재 상태 샘플 기록.
+      READY_TO_RELEASE -> (R) -> RELEASING
+        gripper open + release_all_servos() 발행. 아직 기록하지 않는다.
+
+      RELEASING -> (release + gripper open 확인) -> FREE_DRIVE
+        서보 해제와 gripper open이 실제로 반영된 뒤, 실제 움직임이 감지되면 기록 시작.
+        record_mode=displacement(기본): 마지막 waypoint 대비 J1~J5 최대 변위가
+          displacement_threshold_deg 이상일 때마다 저장. 시연 속도와 무관하게
+          관절 공간 등간격 waypoint가 만들어진다(정지 구간은 기록 안 됨).
+        record_mode=fixed_rate: record_rate_hz 고정 주기 저장(status 갱신 시에만).
 
       FREE_DRIVE -> (G) -> GRIPPING
         set_gripper([0, 50]), grip_wait_sec 대기.
@@ -97,6 +106,26 @@ class HumanInteractionRecorderNode(Node):
         # 재발행해 gripper 서보만 다시 잡아 100(open)을 유지한다(팔 관절은 풀린 채).
         self.declare_parameter("release_gripper_reopen_delay_sec", 0.6)
         self.declare_parameter("gripper_open_speed", 50)
+        # RELEASING: [R] 후 서보 해제 + gripper open이 확인될 때까지 기록을 보류한다.
+        # reopen_delay + settle_margin 경과 후, gripper_value >= confirm 이거나
+        # timeout이면 FREE_DRIVE로 전환하여 기록을 시작한다.
+        self.declare_parameter("release_settle_margin_sec", 0.3)
+        self.declare_parameter("gripper_open_confirm_value", 80.0)
+        self.declare_parameter("release_confirm_timeout_sec", 2.0)
+        # FREE_DRIVE 진입 후 사람이 실제로 움직이기 시작할 때까지 기록을 보류한다.
+        # 서보 해제 지연/반응 시간 동안의 정지 프레임이 데이터에 섞이는 것을 방지.
+        # 기준 자세 대비 관절 최대 변위가 이 값(deg) 이상이면 움직임 시작으로 판정.
+        self.declare_parameter("motion_start_threshold_deg", 1.0)
+        # 기록 모드.
+        #   displacement: 마지막 저장 waypoint 대비 제어 관절(J1~J5) 최대 변위가
+        #     displacement_threshold_deg 이상이 될 때마다 저장(event-interrupt).
+        #     사람 시연 속도와 무관하게 관절 공간 등간격 waypoint가 만들어져,
+        #     학습 step delta가 임계값 수준으로 균일해진다. 정지 구간은 기록되지 않는다.
+        #   fixed_rate: record_rate_hz 고정 주기 저장(기존 방식, status 갱신 시에만).
+        self.declare_parameter("record_mode", "displacement")
+        self.declare_parameter("displacement_threshold_deg", 2.0)
+        # 한 step 변위가 임계값의 이 배수를 넘으면 경고(status 공백/과속 시연 의심).
+        self.declare_parameter("displacement_warn_factor", 2.5)
 
         self.robot_name = str(self.get_parameter("robot_name").value)
         self.episode_id = str(self.get_parameter("episode_id").value)
@@ -114,6 +143,30 @@ class HumanInteractionRecorderNode(Node):
             self.get_parameter("release_gripper_reopen_delay_sec").value
         )
         self.gripper_open_speed = int(self.get_parameter("gripper_open_speed").value)
+        self.release_settle_margin_sec = float(
+            self.get_parameter("release_settle_margin_sec").value
+        )
+        self.gripper_open_confirm_value = float(
+            self.get_parameter("gripper_open_confirm_value").value
+        )
+        self.release_confirm_timeout_sec = float(
+            self.get_parameter("release_confirm_timeout_sec").value
+        )
+        self.motion_start_threshold_deg = float(
+            self.get_parameter("motion_start_threshold_deg").value
+        )
+        self.record_mode = str(self.get_parameter("record_mode").value).strip().lower()
+        if self.record_mode not in ("displacement", "fixed_rate"):
+            self.get_logger().warn(
+                f"Unknown record_mode '{self.record_mode}'. Falling back to 'displacement'."
+            )
+            self.record_mode = "displacement"
+        self.displacement_threshold_deg = float(
+            self.get_parameter("displacement_threshold_deg").value
+        )
+        self.displacement_warn_factor = float(
+            self.get_parameter("displacement_warn_factor").value
+        )
 
         self.ns = f"/{self.robot_name}"
 
@@ -133,6 +186,10 @@ class HumanInteractionRecorderNode(Node):
         self._gripper_reopen_timer = None
         self._gripper_reopen_done = False
 
+        # RELEASING: release + gripper open 확인 후에만 기록(FREE_DRIVE)을 시작한다.
+        self._release_request_sec = 0.0
+        self._release_status_poll_sec = 0.0
+
         # [G] 시 fresh status 수신 대기 상태.
         self._grip_capture_pending = False
         self._grip_capture_req_status_ns = None
@@ -140,6 +197,14 @@ class HumanInteractionRecorderNode(Node):
 
         self.prev_recorded_angles: Optional[List[float]] = None
         self.prev_recorded_ros_time: Optional[float] = None
+
+        # 중복 기록 방지: 마지막으로 기록한 status 측정 시각(ns).
+        # status가 갱신되지 않았으면 같은 측정값을 다시 쓰지 않는다.
+        self._last_committed_status_ns: Optional[int] = None
+
+        # 움직임 감지 게이트: FREE_DRIVE 진입 후 사람이 실제로 움직이기 전까지 기록 보류.
+        self._motion_started: bool = False
+        self._free_drive_baseline_angles: Optional[List[float]] = None
 
         self.sample_index: int = 0
 
@@ -251,6 +316,8 @@ class HumanInteractionRecorderNode(Node):
             return "Waiting for IBVS DONE (ibvs_done)..."
         if self.phase == InteractionPhase.READY_TO_RELEASE:
             return "Hold the arm FIRMLY, then press [R] to release servos"
+        if self.phase == InteractionPhase.RELEASING:
+            return "Releasing servos / confirming gripper open... please wait"
         if self.phase == InteractionPhase.FREE_DRIVE:
             return "Fine-tune position by hand (J6 already aligned), then [G] to grip"
         if self.phase == InteractionPhase.GRIPPING:
@@ -367,6 +434,7 @@ class HumanInteractionRecorderNode(Node):
         if int(msg.data) == 99 and self.phase in (
             InteractionPhase.WAITING,
             InteractionPhase.READY_TO_RELEASE,
+            InteractionPhase.RELEASING,
             InteractionPhase.FREE_DRIVE,
         ):
             self.get_logger().error("ibvs ERROR(99) received. Aborting episode.")
@@ -384,6 +452,10 @@ class HumanInteractionRecorderNode(Node):
 
     def _state_machine_callback(self):
         self._process_keys()
+
+        if self.phase == InteractionPhase.RELEASING:
+            self._update_releasing()
+            return
 
         # [G] 후 fresh status 대기: 새 status 수신 또는 timeout 시 grip 기록.
         if self._grip_capture_pending:
@@ -437,12 +509,60 @@ class HumanInteractionRecorderNode(Node):
     # Event-driven sample recording
     # ============================================================
     def _record_timer_callback(self):
-        # FREE_DRIVE 동안 고정 주기로 현재 상태를 기록한다(움직임 여부와 무관).
+        # FREE_DRIVE 동안 고정 주기로 기록을 시도하되,
+        #   1) status가 갱신되지 않은 프레임(같은 측정값 복사)은 기록하지 않는다.
+        #   2) 사람이 실제로 움직이기 시작하기 전(서보 해제 지연 등)에는 기록하지 않는다.
+        #   3) displacement 모드면 마지막 waypoint 대비 변위가 임계값 이상일 때만 기록한다.
         if self.phase != InteractionPhase.FREE_DRIVE:
             return
-        if self.latest_angles is None:
+        if self.latest_angles is None or self.latest_status_time is None:
             return
+
+        status_ns = self.latest_status_time.nanoseconds
+        if (
+            self._last_committed_status_ns is not None
+            and status_ns <= self._last_committed_status_ns
+        ):
+            return
+
+        if not self._motion_started:
+            if self._free_drive_baseline_angles is None:
+                # FREE_DRIVE 후 첫 측정값을 기준 자세로 잡는다(기록은 보류).
+                self._free_drive_baseline_angles = self.latest_angles[:]
+                self._last_committed_status_ns = status_ns
+                return
+            moved = max(
+                abs(a - b)
+                for a, b in zip(self.latest_angles, self._free_drive_baseline_angles)
+            )
+            if moved < self.motion_start_threshold_deg:
+                self._last_committed_status_ns = status_ns
+                return
+            self._motion_started = True
+            self.get_logger().info(
+                f"Motion detected (max|dq|={moved:.2f}deg >= "
+                f"{self.motion_start_threshold_deg}deg). Recording starts."
+            )
+
+        if self.record_mode == "displacement" and self.prev_recorded_angles is not None:
+            # 제어 관절(J1~J5)만 본다. J6는 IBVS가 정렬한 뒤 human이 건드리지 않는
+            # 관절이라 학습에서도 제외되며, 노이즈로 waypoint가 생기는 것을 막는다.
+            disp = max(
+                abs(self.latest_angles[i] - self.prev_recorded_angles[i])
+                for i in range(5)
+            )
+            if disp < self.displacement_threshold_deg:
+                self._last_committed_status_ns = status_ns
+                return
+            if disp >= self.displacement_threshold_deg * self.displacement_warn_factor:
+                self.get_logger().warn(
+                    f"Oversized waypoint step: max|dq|={disp:.1f}deg "
+                    f"(threshold={self.displacement_threshold_deg}deg). "
+                    f"Status gap or too-fast motion suspected."
+                )
+
         self._commit_sample(grip_triggered=False, result_recorded=False)
+        self._last_committed_status_ns = status_ns
 
     def _commit_sample(
         self,
@@ -503,7 +623,7 @@ class HumanInteractionRecorderNode(Node):
         # 사람이 팔을 잡은 상태에서 [R]을 눌렀을 때만 호출된다.
         self.get_logger().info(
             "Release triggered by [R]. Opening gripper and releasing servos. "
-            "Recording resumes (FREE_DRIVE)."
+            "Recording resumes after release + gripper-open is confirmed."
         )
         # 서보가 살아있을 때 gripper를 먼저 100(open)으로 연다.
         self._publish_gripper_open()
@@ -517,11 +637,60 @@ class HumanInteractionRecorderNode(Node):
         # 그러면 gripper 서보만 다시 잡혀 100(open)이 유지되고 팔 관절은 풀린 상태로 남는다.
         self._schedule_gripper_reopen()
 
-        self.phase = InteractionPhase.FREE_DRIVE
+        # 즉시 FREE_DRIVE로 가지 않는다. 서보 해제와 gripper open이 시리얼에서 실제로
+        # 반영되기 전에는 강체 자세/전이 프레임이 기록되므로, RELEASING에서 확인한 뒤
+        # FREE_DRIVE로 전환한다.
+        self.phase = InteractionPhase.RELEASING
+        self._release_request_sec = self._now_sec()
+        self._release_status_poll_sec = 0.0
 
+    def _update_releasing(self):
+        # RELEASING: gripper open + 서보 해제가 확인될 때까지 기록을 보류한다.
+        elapsed = self._now_sec() - self._release_request_sec
+
+        # gripper 상태를 빨리 확인하기 위해 status를 저주파로 폴링한다.
+        self._poll_release_status()
+
+        # reopen 발행 + 정착 시간이 지나기 전에는 무조건 대기.
+        if elapsed < self.release_gripper_reopen_delay_sec + self.release_settle_margin_sec:
+            return
+
+        gripper_ok = (
+            math.isfinite(self.latest_gripper_value)
+            and self.latest_gripper_value >= self.gripper_open_confirm_value
+        )
+        timed_out = elapsed >= self.release_confirm_timeout_sec
+
+        if gripper_ok or timed_out:
+            if timed_out and not gripper_ok:
+                self.get_logger().warn(
+                    f"Release confirm timeout ({self.release_confirm_timeout_sec:.1f}s). "
+                    f"gripper_value={self.latest_gripper_value}. Starting FREE_DRIVE anyway."
+                )
+            self._enter_free_drive(elapsed)
+
+    def _poll_release_status(self):
+        # RELEASING 동안 gripper open 여부를 빨리 확인하기 위해 status를 0.2s 간격으로 요청.
+        now = self._now_sec()
+        if now - self._release_status_poll_sec >= 0.2:
+            self._release_status_poll_sec = now
+            self.request_status_pub.publish(Empty())
+
+    def _enter_free_drive(self, elapsed: float):
+        # release + gripper open 확인 후에만 기록을 시작한다.
         # 기록 기준점 초기화: release 직후 첫 샘플의 delta가 과대해지지 않도록.
         self.prev_recorded_angles = None
         self.prev_recorded_ros_time = None
+        # 움직임 감지 게이트 리셋: 실제 움직임이 관측될 때까지 기록 보류.
+        self._motion_started = False
+        self._free_drive_baseline_angles = None
+        self._last_committed_status_ns = None
+        self.phase = InteractionPhase.FREE_DRIVE
+        self.get_logger().info(
+            f"Release + gripper-open confirmed after {elapsed:.2f}s "
+            f"(gripper_value={self.latest_gripper_value}). "
+            f"Recording starts after motion is detected (FREE_DRIVE)."
+        )
 
     def _schedule_gripper_reopen(self):
         # 기존 타이머가 남아있으면 정리한다.
@@ -651,8 +820,13 @@ class HumanInteractionRecorderNode(Node):
         self.sample_index = 0
         self.prev_recorded_angles = None
         self.prev_recorded_ros_time = None
+        self._last_committed_status_ns = None
+        self._motion_started = False
+        self._free_drive_baseline_angles = None
         self.ibvs_done_ros_time = None
         self.gripping_start_ros_time = None
+        self._release_request_sec = 0.0
+        self._release_status_poll_sec = 0.0
         self._result_text = ""
         self.phase = InteractionPhase.WAITING
 
