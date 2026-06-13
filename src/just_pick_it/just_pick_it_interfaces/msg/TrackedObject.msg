@@ -13,6 +13,9 @@ float32 mask_cx
 float32 mask_cy
 float32 orientation_angle
 
+# segmentation polygon (이미지 px). [x0, y0, x1, y1, ...] 평탄화. 비어 있으면 mask 없음.
+float32[] mask_polygon
+
 geometry_msgs/PoseStamped estimated_pose
 bool pose_valid
 

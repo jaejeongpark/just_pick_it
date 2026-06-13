@@ -56,6 +56,7 @@ setup(
             'human_interaction_recorder = just_pick_it_perception.human_interaction_recorder_node:main',
             'episode_replay_tester = just_pick_it_perception.episode_replay_tester_node:main',
             'nn_controller = just_pick_it_perception.nn_controller_node:main',
+            'shelf_place_planner = just_pick_it_perception.shelf_place_planner_node:main',
         ],
     },
 )

@@ -40,6 +40,8 @@ class YoloSegInferNode(Node):
             TrackedObjectArray, 'infer/tracked_objects', 10)
         self._pub_annotated = self.create_publisher(
             Image, 'infer/annotated_image', 10)
+        self._pub_raw = self.create_publisher(
+            Image, 'infer/image_raw', 10)
 
         udp_port = self.get_parameter('udp_port').value
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -151,6 +153,11 @@ class YoloSegInferNode(Node):
 
         self._pub_objects.publish(tracked_array)
 
+        # overlay 이전 raw 프레임 발행 (place planner의 edge detection용)
+        raw_msg = self._bridge.cv2_to_imgmsg(frame, encoding='bgr8')
+        raw_msg.header = header
+        self._pub_raw.publish(raw_msg)
+
         annotated_msg = self._bridge.cv2_to_imgmsg(annotated, encoding='bgr8')
         annotated_msg.header = header
         self._pub_annotated.publish(annotated_msg)
@@ -209,10 +216,13 @@ class YoloSegInferNode(Node):
             obj.mask_cx = float(pts_arr[:, 0].mean())
             obj.mask_cy = float(pts_arr[:, 1].mean())
             obj.orientation_angle = self._compute_obb_angle(pts_arr)
+            # polygon을 [x0, y0, x1, y1, ...] 평탄화하여 발행
+            obj.mask_polygon = pts_arr.astype(np.float32).reshape(-1).tolist()
         else:
             obj.mask_cx = cx
             obj.mask_cy = cy
             obj.orientation_angle = 0.0
+            obj.mask_polygon = []
 
         obj.pose_valid = False
         return obj
