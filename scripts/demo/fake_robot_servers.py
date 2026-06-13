@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import math
 import os
+from pathlib import Path
+import shlex
 import threading
 import time
 
@@ -39,13 +41,13 @@ ARRIVAL_STATE = {
 }
 
 DOCK_POSES = {
-    "CHARGING_DOCK_1": (0.11, 0.07, 0.0),
-    "CHARGING_DOCK_2": (0.28, 0.07, 0.0),
+    "CHARGING_DOCK_1": (0.11, 0.08, 0.0),
+    "CHARGING_DOCK_2": (0.28, 0.08, 0.0),
 }
 
 INITIAL_PICKY_POSES = {
-    "PICKY1": (0.11, 0.07, 0.0),
-    "PICKY2": (0.28, 0.07, 0.0),
+    "PICKY1": (0.11, 0.08, 0.0),
+    "PICKY2": (0.28, 0.08, 0.0),
 }
 
 COBOT_TASK_PHASES = {
@@ -60,6 +62,38 @@ FLOW_COMPLETION_PHASE_BY_TASK = {
     "UNLOAD": "UNLOADING",
     "DISPLAY_PLACE": "PLACING",
 }
+
+DEMO_ENV_PATH = Path(__file__).with_name("full_flow_demo.env")
+
+
+def load_demo_env_defaults(env_path: Path = DEMO_ENV_PATH) -> None:
+    """Load demo defaults when fake servers are run directly.
+
+    Shell-provided environment variables win. This keeps explicit overrides such
+    as `DEMO_MOCK_PICKY=true python3 ...` working while making plain direct
+    execution honor scripts/demo/full_flow_demo.env.
+    """
+    if not env_path.is_file():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            parts = shlex.split(line, comments=True, posix=True)
+        except ValueError:
+            continue
+        if not parts:
+            continue
+        if parts[0] == "export":
+            parts = parts[1:]
+        if not parts or "=" not in parts[0]:
+            continue
+
+        key, value = parts[0].split("=", 1)
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
 @dataclass
@@ -116,6 +150,11 @@ class FakeRobotServers(Node):
         self._battery_drain_per_flow = env_float("DEMO_PICKY_BATTERY_DRAIN_PER_FLOW", 30.0)
         self._charge_complete_seconds = env_float("DEMO_PICKY_CHARGE_COMPLETE_SECONDS", 5.0)
         self._cobot_auto_complete = env_bool("DEMO_COBOT_AUTO_COMPLETE", True)
+        # 실로봇 혼합 테스트용 선택 mock. 실제 AMR(picky1) 주행 테스트 중에는
+        # DEMO_MOCK_PICKY=0 으로 picky mock 을 꺼서 보드의 실제 action server 와
+        # 충돌하지 않게 하고, cobot 작업만 자동 처리(auto-complete)하게 한다.
+        self._mock_picky = env_bool("DEMO_MOCK_PICKY", True)
+        self._mock_cobot = env_bool("DEMO_MOCK_COBOT", True)
         self._state_publish_interval_sec = env_float(
             "DEMO_STATE_PUBLISH_INTERVAL_SECONDS",
             1.0,
@@ -131,7 +170,7 @@ class FakeRobotServers(Node):
         self._servers: list[object] = []
         self._services: list[object] = []
 
-        for name in PICKY_NAMES:
+        for name in (PICKY_NAMES if self._mock_picky else ()):
             ns = name.lower()
             x, y, theta = INITIAL_PICKY_POSES[name]
             runtime = PickyRuntime(name=name, x=x, y=y, theta=theta)
@@ -190,7 +229,7 @@ class FakeRobotServers(Node):
                 )
             )
 
-        for name in COBOT_NAMES:
+        for name in (COBOT_NAMES if self._mock_cobot else ()):
             ns = name.lower()
             runtime = CobotRuntime(name=name)
             self._cobots[name] = runtime
@@ -227,16 +266,16 @@ class FakeRobotServers(Node):
 
         self.create_timer(
             self._state_publish_interval_sec,
-            self._publish_all_state_pose,
+            self._publish_all_telemetry,
             callback_group=callback_group,
         )
-        self._publish_all_state_pose()
-        self._publish_all_battery()
+        self._publish_all_telemetry()
 
         self.get_logger().info(
             "fake robot servers ready: "
-            "/picky{1,2}/move_command, /picky{1,2}/dock_command, "
-            f"/cobot{{1,2}}/execute_task, cobot_auto_complete={self._cobot_auto_complete}"
+            f"mock_picky={self._mock_picky}(/picky*/move_command,dock_command), "
+            f"mock_cobot={self._mock_cobot}(/cobot*/execute_task), "
+            f"cobot_auto_complete={self._cobot_auto_complete}"
         )
 
     def request_shutdown(self) -> None:
@@ -248,6 +287,10 @@ class FakeRobotServers(Node):
     # ------------------------------------------------------------------
     # PICKY telemetry
     # ------------------------------------------------------------------
+
+    def _publish_all_telemetry(self) -> None:
+        self._publish_all_state_pose()
+        self._publish_all_battery()
 
     def _publish_all_state_pose(self) -> None:
         if self._is_shutdown_requested():
@@ -812,6 +855,7 @@ class FakeRobotServers(Node):
 
 
 def main() -> None:
+    load_demo_env_defaults()
     rclpy.init()
     node = FakeRobotServers()
     executor = MultiThreadedExecutor(num_threads=8)

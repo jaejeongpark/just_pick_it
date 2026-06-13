@@ -1,6 +1,6 @@
 # Fleet Manager 작업 현황 (담당 · 결정 · TODO)
 
-갱신: 2026-06-01. 설계·동작은 `docs/Fleet_manager.md`, 인터페이스 계약은 `docs/Fleet_manager_interface.md`.
+갱신: 2026-06-10. 설계·동작은 `docs/Fleet_manager.md`, 인터페이스 계약은 `docs/Fleet_manager_interface.md`.
 
 심각도: **S**(기능 결함) / **R**(견고성) / **C**(문서·정합) / **Q**(테스트).
 
@@ -73,8 +73,72 @@
    06-01 주행 중 확인된 항목: `/picky1/amcl_pose` namespaced 발행 + 텔레메트리가 들어와도
    `robot_status` 가 task 전이로만 바뀌고 IDLE 유지, battery 게이팅(30% 임계) 실측.
    (E2E 완주·R1 reconcile 실검증은 배터리 충전 후로 잔존 — §3-D)
+8. **실로봇 주행 정밀도 튜닝 + 도착 정지 자세 정책 (2026-06-09~10, picky1 단독)** — ✅ 완료 (박서우)
+   반복 주행 테스트로 발견·수정. 각 변경의 근거와 성과를 함께 남긴다.
 
-> 박서우 미완(다음 기동·배터리 충전 후): 주문 E2E 실주행 완주, R1 재시작 복구 실동작, `_at_dock` 부팅 가정 견고화(낮음). 상세는 §3-D.
+   1. **맵 프레임 정합(origin)** — "목적지 도착 전 도착 오판 + 벽 충돌"의 근본 원인이 `map.yaml`
+      `origin=[0,0,0]`. origin 은 SLAM 시작 오프셋을 반영하는 고정 기하값인데 [0,0,0]으로 둬 맵
+      전체가 약 (0.06,0.12) 밀려 map 프레임이 arena 절대좌표와 어긋남(실측: (0.28,0.40)에 둔 로봇이
+      amcl (0.352,0.505)). → **origin [-0.08,-0.12] 복원**. 성과: 조기 도착·벽 충돌 해소.
+      (odom 은 1m=1m 로 정상임을 실측해 odom 스케일 가설을 배제 → 원인을 map 프레임으로 한정)
+   2. **RPP 코너 cut** — 좁은 아레나(2x1m)에 lookahead 과대(저속 실효 0.3m)로 코너를 질러 벽 충돌.
+      → **lookahead_dist 0.6→0.25, min 0.3→0.15, max 0.9→0.45**. 성과: 코너 cut 제거(경유지 추종 강화).
+   3. **TRAFFIC 노드 수직 정합** — TRAFFIC_T/B x 가 같은 열 PRODUCT_ZONE 과 어긋나(0.70/1.05/1.40)
+      복도→상품존 진입에 횡성분 발생 → 진입 heading 기욺. → **0.64/1.06/1.48 정렬**(이후 column-2 는
+      매대 간섭 여유로 1.05). 성과: 순수 수직 진입 → 도착 자세 정확.
+   4. **정밀접근 정지거리** — 매대 정중앙보다 5cm 짧게 정지. 원인은 `move_to_goal` 자체
+      `xy_goal_tolerance`(0.05, Nav2 의 0.01 과 별개). → **0.02 로 축소 + 근거리(<3cm) 조향 가드**
+      (`atan2(dy,dx)` 노이즈로 인한 목표 직전 wobble 방지). 성과: 5cm→2cm 접근, 떨림 없음.
+   5. **Nav2 abort 완화 + CPU 절감** — `compute_path_to_pose` ack 타임아웃으로 navigation abort.
+      원인은 보드 CPU 과부하(load avg 20+)로 planner_server 가 20ms 안에 goal 응답 못 함. →
+      **default_server_timeout 20→100ms** + (origin 정합으로 불필요해진) **amcl update_min_d
+      0.05→0.10**(amcl 갱신 빈도↓ = CPU 절반). 성과: abort 완화 + 보드 부하 경감.
+   6. **도착 정지 자세 task별 정책** — 수평 진입(standby→product) 시 nearest-90 스냅이 매대를
+      바라보고 정지하던 문제. → **task_type 별 고정**: MOVE_TO_PRODUCT/DISPLAY=법선(±y 중 회전 적은
+      쪽), MOVE_TO_PICKUP=-x, MOVE_TO_STOCK=+x, RETURN_HOME(standby)=+y, 그 외 nearest-90. 정책은
+      `state_manager`(STOP_MODE_BY_TASK), 회전 계산은 `move_to_goal`(_rotate_to_stop_pose)가 도착
+      heading 으로 수행. 성과: 진입 방향과 무관하게 올바른 사이드 주차 자세.
+   7. **AMR/COBOT 분리 테스트 지원** — `scripts/demo/fake_robot_servers.py` 에 `DEMO_MOCK_PICKY` /
+      `DEMO_MOCK_COBOT` 플래그 추가. 실 AMR 주행 중 cobot 작업만 자동 처리(`DEMO_MOCK_PICKY=0`),
+      반대로 실 cobot 테스트는 AMR 만 mock(`DEMO_MOCK_COBOT=0`). 성과: 한쪽 실로봇+한쪽 자동 혼합 테스트.
+
+   같은 기간 반영: 콜드 스타트 시 양 충전 도크 점유 초기화, battery 텔레메트리 20s+ 미수신 시 0%로
+   처리해 offline 로봇 배정 제외(RobotStateMonitor).
+9. **Reverse Docking 실차 디버깅 + 견고화 (2026-06-10~11, picky1)** — ✅ **완성** (박서우). 1차 정렬에 안정적으로 잡혀 반복 거의 불필요, E2E 도킹 성공. 잔여는 보드 CPU 경량화·N회 정량화(낮음).
+
+   1. **카메라/캘리브레이션 직접화** — reverse_docking 이 ROS Image pub/sub 대신 Picamera2 를 직접
+      열고(도킹 중에만) `camera_calibration.yaml` 을 직접 로드. udp_image_sender 는 UDP 전용 원복.
+   2. **카메라 180° flip** — 카메라가 거꾸로 장착 + 캘리브레이션도 flip 기준이라, 검출 전 `cv2.flip(-1)`
+      적용(`apriltag_detector_real` 와 동일). 안 하면 마커 횡/yaw·라인 좌우가 반전.
+   3. **마커 dict/size 정정** — 도크 마커는 AprilTag `DICT_APRILTAG_36h11`, 한 변 `0.05m`(기존 ArUco
+      4x4_50·0.10 오설정 → acquire timeout/깊이 오차였음).
+   4. **3줄 주차선 대응** — 주차선이 3줄(왼\|중앙(공유)\|오)이라 dock1=왼+중앙, dock2=중앙+오. 컬럼
+      히스토그램으로 라인 분리→x순→도크별 채널 2줄 선택. 2줄(가까움)/3줄(멀어짐) 전환 일관.
+   5. **마커 상실 복구** — 정렬하느라 마커가 시야 벗어나는 건 정상 → 실패 처리 대신 라인으로 법선 복귀.
+   6. **정렬 게인 하향** — 후진 진동 완화(marker 0.6, lane_lat 0.002/yaw 0.6, max_angular_vel 0.25).
+
+   **(2026-06-11) 제어 아키텍처 전면 개정 — E2E 도킹 성공.** 위 1~6(검출 파이프라인) 후, 제어가
+   발산/드리프트하던 근본원인이 **rvec yaw(psi)의 구조적 노이즈**(정지 상태 ±5~8°, pose-flip
+   ambiguity)임을 확인 → "라인+실시간 마커 서보" 설계를 **"마커 1회 측정 + odom 실행"** 으로 뒤집음.
+   - **횡:** 실시간 robot_x 추적 폐기 → **마커 1회 측정 Δx + 부드러운 후진 arc**(odom 으로 |Δx| 이동, 방향 자동반전 안전장치).
+   - **측정 전 똑바로 세우기:** 각 패스에서 `psi→0` 후 측정 → `Δx≈−tx·scale`(저노이즈), phantom 제거·수렴.
+   - **헤딩:** 후진 직전 odom yaw 를 θ_ref(법선) 앵커 → **후진 내내 odom 유지**(`yaw_drift` ±0.2°). psi 미사용.
+   - **깊이/횡 스케일 분리:** depth_scale 1.36(원거리 dock) / lateral_scale 1.48(가까운 측정). 라인 횡조향은 기본 off(`use_lane_steering`).
+   - **수치 정정:** marker_world_x 0.07→0.11, marker_world_y 0.655→0.635, cam_fwd 0.05→0.060, marker_size→0.05, dict→36h11, depth_scale 도입.
+   - 상세 기록·표: `docs/Reverse_Docking_Design.md` §7.
+
+   **남은 미세조정:** ① 정렬 후 x 가 일정하게 >0.11(잔차 ~1~2cm) → `marker_lat_offset_m` 실측 보정 ②
+   depth 정지 ~4cm 조기(1.36 적용, 실측 미세조정) ③ 정밀도 floor(lateral ~1cm·yaw ~2°)=단일 마커 한계
+   ④ **보드 CPU 과부하**(도킹 비전이 Pi 포화 → 경량화/주기↓) ⑤ N회 반복 정량화(final x·깊이·yaw).
+
+10. **주행 견고성 (2026-06-10)** — ✅ 완료 (박서우)
+    - **벽 충돌 안전망**: nav2 `use_collision_detection: true` + 짧은 시간지평(local costmap 기반,
+      amcl 무관). odom 누적으로 벽 향할 때 임박 충돌만 정지(유연성 유지).
+    - **예약 레이스 수정**: TrafficManager `notify_state` 가 갓 만든 경로 예약을 STANDBY 텔레메트리에
+      지워(`예약 task=None`) goal 이 cancel/abort 되고 주문이 빈 메시지로 실패하던 것 → '이동/점유에서
+      빠져나올 때(prev active)만' 해제하도록 수정. test 갱신+레이스 케이스 추가(62 pass).
+
+> 박서우 미완(다음 기동·배터리 충전 후): 주문 E2E 실주행 완주, **Reverse Docking 완성(§3-A 9 미해결)**, R1 재시작 복구 실동작, `_at_dock` 부팅 가정 견고화(낮음). 상세는 §3-D.
 
 ### 3-B. 이명제 완료 작업
 

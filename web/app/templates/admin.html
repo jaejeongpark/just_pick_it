@@ -6,7 +6,7 @@
     <title>Just Pick It Admin</title>
     <link
       rel="stylesheet"
-      href="/static/css/style.css?v=20260606-task-readonly"
+      href="/static/css/style.css?v=20260609-debug-success"
     />
   </head>
   <body class="admin-console" data-admin-page="{{ page }}">
@@ -768,37 +768,6 @@
             </div>
           </section>
 
-          <section class="section-band ai-command-section">
-            <div class="section-heading">
-              <h2>AI Chat</h2>
-              <span id="dashboard-llm-status" class="ai-command-status idle"
-                >대기 중</span
-              >
-            </div>
-            <form id="dashboard-llm-form" class="dashboard-llm-form">
-              <input
-                id="dashboard-llm-input"
-                type="text"
-                autocomplete="off"
-                placeholder="예: 생수 5개 진열해줘"
-              />
-              <button
-                id="dashboard-llm-submit"
-                class="ai-chat-button"
-                type="submit"
-                aria-label="AI command"
-              >
-                <span>AI</span> 명령
-              </button>
-            </form>
-            <div class="ai-command-feedback">
-              <p id="dashboard-llm-result">
-                진열 명령이나 재고/예외 질문을 입력하면 AI 응답이 여기에
-                표시됩니다.
-              </p>
-            </div>
-          </section>
-
           <section class="section-band task-summary-section">
             <div class="section-heading">
               <h2>진행 중인 작업 (최근)</h2>
@@ -1075,37 +1044,6 @@
       </div>
     </div>
 
-    <section
-      id="llm-panel"
-      class="llm-panel"
-      aria-label="LLM command panel"
-      hidden
-    >
-      <div class="llm-header">
-        <div>
-          <strong>LLM Command</strong>
-          <span>Display command</span>
-        </div>
-        <button id="llm-close-button" class="ghost-button" type="button">
-          Close
-        </button>
-      </div>
-      <div id="llm-messages" class="llm-messages">
-        <div class="llm-message bot">
-          진열 명령이나 재고/예외 질문을 입력하면 Fleet Manager API가 처리합니다.
-        </div>
-      </div>
-      <form id="llm-form" class="llm-form">
-        <input
-          id="llm-input"
-          type="text"
-          autocomplete="off"
-          placeholder="예: 생수 5개 진열해줘"
-        />
-        <button class="small-action-button" type="submit">Send</button>
-      </form>
-    </section>
-
     <div id="modal-backdrop" class="modal-backdrop" hidden>
       <section
         class="modal-panel"
@@ -1125,6 +1063,6 @@
       </section>
     </div>
 
-    <script src="/static/js/admin.js?v=20260606-task-readonly"></script>
+    <script src="/static/js/admin.js?v=20260609-display-batch"></script>
   </body>
 </html>
