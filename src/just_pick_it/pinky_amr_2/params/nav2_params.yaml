@@ -16,9 +16,9 @@ amcl:
     laser_max_range: 100.0
     laser_min_range: -1.0
     laser_model_type: "likelihood_field"
-    max_beams: 40
-    max_particles: 1000
-    min_particles: 300
+    max_beams: 60
+    max_particles: 1500
+    min_particles: 500
     odom_frame_id: "odom"
     pf_err: 0.05
     pf_z: 0.99
@@ -31,7 +31,7 @@ amcl:
     tf_broadcast: true
     transform_tolerance: 1.0
     update_min_a: 0.05
-    update_min_d: 0.08
+    update_min_d: 0.05
     z_hit: 0.5
     z_max: 0.05
     z_rand: 0.5
@@ -309,6 +309,18 @@ waypoint_follower:
       plugin: "nav2_waypoint_follower::WaitAtWaypoint"
       enabled: True
       waypoint_pause_duration: 200
+
+obstacle_stop:
+  ros__parameters:
+    # PICKY2 narrow-map safety filter. This is not obstacle avoidance; it only
+    # reduces/blocks forward velocity when a very close object is directly ahead.
+    front_angle_center_rad: 3.141592653589793
+    front_angle_limit_rad: 0.08
+    slow_distance_m: 0.18
+    stop_distance_m: 0.12
+    hard_stop_distance_m: 0.08
+    max_decel_mps2: 0.40
+    allow_rotation_when_blocked: true
 
 velocity_smoother:
   ros__parameters:

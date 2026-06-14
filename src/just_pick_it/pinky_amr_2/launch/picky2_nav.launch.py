@@ -14,8 +14,8 @@ nav2_params.yaml 을 RewrittenYaml 없이 raw 로 로드한다. 그래서 노드
 docking_server 까지 띄우는데 pinky 의 nav2_params.yaml 에는 이들 설정이 없어
 collision_monitor 가 configure 단계에서 죽고 nav 전체 bringup 이 abort 된다.
 그래서 여기서는 pinky 가 설정한 노드만 띄운다(이 세 노드 제외). collision_monitor
-를 빼면 cmd_vel_smoothed -> cmd_vel 최종 출력 단이 사라지므로 velocity_smoother
-가 그 역할을 하도록 remap 한다.
+대신 PICKY2 전용 obstacle_stop 을 최종 속도 필터로 붙여 좁은 맵에서 전방
+근접 장애물에 대한 감속/전진 차단을 수행한다.
 
 사용 예:
   ros2 launch pinky_amr_2 picky2_nav.launch.py
@@ -145,14 +145,20 @@ def generate_launch_description():
             name='waypoint_follower', output='screen',
             parameters=[configured_params], arguments=log_args, remappings=remappings,
         ),
-        # collision_monitor 를 띄우지 않으므로 velocity_smoother 가 최종 cmd_vel 을
-        # 발행한다. 입력 cmd_vel_nav(컨트롤러 출력), 출력 cmd_vel(드라이버 입력).
+        # velocity_smoother 는 Nav2 출력(cmd_vel_nav)을 부드럽게 만든 뒤
+        # obstacle_stop 의 입력(cmd_vel_raw)으로 넘긴다. obstacle_stop 이 최종
+        # cmd_vel 을 발행해 전방 근접 장애물 앞에서 전진만 감속/차단한다.
         Node(
             package='nav2_velocity_smoother', executable='velocity_smoother',
             name='velocity_smoother', output='screen',
             parameters=[configured_params], arguments=log_args,
             remappings=remappings + [('cmd_vel', 'cmd_vel_nav'),
-                                     ('cmd_vel_smoothed', 'cmd_vel')],
+                                     ('cmd_vel_smoothed', 'cmd_vel_raw')],
+        ),
+        Node(
+            package='pinky_amr_2', executable='obstacle_stop',
+            name='obstacle_stop', output='screen',
+            parameters=[configured_params], arguments=log_args,
         ),
         Node(
             package='nav2_lifecycle_manager', executable='lifecycle_manager',
