@@ -35,6 +35,7 @@ setup(
             "odom_logger = pinky_amr_2.odom_logger:main",
             "scan_logger = pinky_amr_2.scan_logger:main",
             "obstacle_stop = pinky_amr_2.obstacle_stop:main",
+            "tf_frame_adapter = pinky_amr_2.tf_frame_adapter:main",
             "picky2_state_machine = pinky_amr_2.state_machine:main",
         ],
     },

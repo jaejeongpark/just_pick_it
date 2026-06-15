@@ -52,16 +52,16 @@ def generate_launch_description():
             # 노드 이름을 /<namespace>/<node> 로 네임스페이스화(2대 동시 시연 시
             # /pinky_bringup, /sllidar_node, /battery_publisher 등 글로벌 노드 이름 충돌
             # 방지). 아래 RSP/JSP 는 PushROSNamespace 가 일괄 적용하도록 명시 namespace 를
-            # 제거했다(중복 /picky2/picky2 방지). 프레임은 frame_prefix="" 라 무접두어 유지,
-            # /tf 분리는 SetRemap(/tf -> /picky2/tf)이 담당(PushROSNamespace 는 절대 /tf 무관).
+            # 제거했다(중복 /picky2/picky2 방지). TF frame id 는 frame_prefix 와
+            # tf_frame_adapter 가 namespace prefix 를 붙여 여러 로봇 frame 충돌을 막는다.
             PushROSNamespace(namespace),
             SetRemap(src="/cmd_vel", dst=ns("cmd_vel")),
-            SetRemap(src="/odom", dst=ns("odom")),
+            SetRemap(src="/odom", dst=ns("odom_raw")),
             SetRemap(src="/scan", dst=ns("scan")),
             SetRemap(src="/joint_states", dst=ns("joint_states")),
             SetRemap(src="/battery/percent", dst=ns("battery/percent")),
             SetRemap(src="/battery/voltage", dst=ns("battery/voltage")),
-            SetRemap(src="/tf", dst=ns("tf")),
+            SetRemap(src="/tf", dst=ns("tf_raw")),
             SetRemap(src="/tf_static", dst=ns("tf_static")),
             SetRemap(src="/robot_description", dst=ns("robot_description")),
             SetRemap(src="/camera/image_raw", dst=ns("camera/image_raw")),
@@ -79,7 +79,7 @@ def generate_launch_description():
                         use_sim_time,
                         " cam_tilt_deg:=0",
                     ]),
-                    "frame_prefix": "",
+                    "frame_prefix": ParameterValue([namespace, "/"], value_type=str),
                 }],
             ),
             Node(
@@ -95,7 +95,7 @@ def generate_launch_description():
                 AnyLaunchDescriptionSource(lidar_launch),
                 launch_arguments={
                     "serial_port": "/dev/ttyS0",
-                    "frame_id": "rplidar_link",
+                    "frame_id": [namespace, "/rplidar_link"],
                     "inverted": "false",
                     "angle_compensate": "true",
                     "scan_mode": "DenseBoost",
@@ -138,6 +138,24 @@ def generate_launch_description():
         ]
     )
 
+    tf_frame_adapter = Node(
+        package="pinky_amr_2",
+        executable="tf_frame_adapter",
+        namespace=namespace,
+        name="amr2_tf_frame_adapter",
+        output="screen",
+        parameters=[{
+            "frame_prefix": ParameterValue([namespace, "/"], value_type=str),
+            "raw_odom_topic": "odom_raw",
+            "odom_topic": "odom",
+            "use_sim_time": use_sim_time,
+        }],
+        remappings=[
+            ("/tf", "tf"),
+            ("/tf_static", "tf_static"),
+        ],
+    )
+
     return LaunchDescription([
         DeclareLaunchArgument(
             'namespace',
@@ -159,4 +177,5 @@ def generate_launch_description():
         DeclareLaunchArgument('wheel_separation', default_value='0.0961'),
         DeclareLaunchArgument('odom_stamp_offset_sec', default_value='0.0'),
         picky2_bringup,
+        tf_frame_adapter,
     ])
