@@ -57,6 +57,10 @@ class CobotStateManager(Node):
         self.declare_parameter('cobot_port', '/dev/ttyJETCOBOT')
         self.declare_parameter('cobot_baudrate', 1_000_000)
         self.declare_parameter('dry_run', False)
+        # IBVS+NN 픽 요청/결과 토픽. local 컴퓨터의 ibvs_nn_pick_agent 와 짝을 이룬다.
+        self.declare_parameter('pick_timeout_sec', 120.0)
+        self.declare_parameter('pick_request_topic', '/ibvs_nn_pick/request')
+        self.declare_parameter('pick_result_topic', '/ibvs_nn_pick/result')
 
         self._robot_id       = self.get_parameter('robot_id').value
         self._vision_timeout = self.get_parameter('vision_service_timeout_sec').value
@@ -103,12 +107,17 @@ class CobotStateManager(Node):
         #     callback_group=cb_group,
         # )
 
-        # 코봇 하드웨어 제어기
+        # 코봇 하드웨어 제어기.
+        # dry_run=True 면 serial 직접 제어를 생략한다(로봇 구동은 jetcobot 드라이버로 일원화).
+        # SORTING 픽은 dry_run 여부와 무관하게 항상 IBVS+NN 으로 수행한다.
         self._controller = CobotController(
             self,
             port=self.get_parameter('cobot_port').value,
             baudrate=self.get_parameter('cobot_baudrate').value,
             dry_run=self.get_parameter('dry_run').value,
+            pick_timeout_sec=self.get_parameter('pick_timeout_sec').value,
+            pick_request_topic=self.get_parameter('pick_request_topic').value,
+            pick_result_topic=self.get_parameter('pick_result_topic').value,
         )
 
         # 주기 상태 publish 타이머 (late subscriber 를 위한 cobot_state heartbeat)
@@ -306,15 +315,11 @@ class CobotStateManager(Node):
         반환값: (success, detected_quantity)
         """
         if phase == 'SORTING':
-
-            # [구현 필요] Vision Server에서 grasp_trajectory 수신 후 교체
-            grasp_trajectory: list[list[float]] = []
-            return self._controller.run_sorting(grasp_trajectory)
+            # IBVS+NN 으로 request.product_name 한 종류를 quantity 개 집어 올린다.
+            return self._controller.run_sorting(request.product_name, request.quantity)
         elif phase == 'LOADING':
-            # [구현 필요] Vision Server에서 pick/place trajectory 수신 후 교체
-            pick_trajectory:  list[list[float]] = []
-            place_trajectory: list[list[float]] = []
-            return self._controller.run_loading(pick_trajectory, place_trajectory)
+            # 집은 상품을 picky 적재 위치로 내려놓는다(place shell).
+            return self._controller.run_loading(request.product_name, request.target_zone_name)
 
         elif phase == 'INSPECTING':
             # [구현 필요] Vision Server에서 inspect_trajectory 수신 후 교체

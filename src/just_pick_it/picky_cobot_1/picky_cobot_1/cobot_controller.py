@@ -3,6 +3,8 @@ import time
 
 from pymycobot.mycobot280 import MyCobot280
 
+from .ibvs_nn_pick import IbvsNnPickClient
+
 
 GRIPPER_OPEN   = 100
 GRIPPER_CLOSED = 0
@@ -17,6 +19,17 @@ POLL_INTERVAL_SEC    = 0.05
 # 단위: degree,  순서: [J1, J2, J3, J4, J5, J6]
 _HOME = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
+# 상품별 place 좌표(고정 매핑). 단위: mm/deg, 순서: [x, y, z, rx, ry, rz].
+# [구현 필요] 실제 picky 적재 위치에 맞춰 좌표 보정. 현재는 shell 더미값.
+PLACE_COORDS = {
+    'fanta':       [180.0, -60.0, 200.0, -90.0, 0.0, 0.0],
+    'water':       [180.0, -20.0, 200.0, -90.0, 0.0, 0.0],
+    'watermelon':  [180.0,  20.0, 200.0, -90.0, 0.0, 0.0],
+    'bread':       [180.0,  60.0, 200.0, -90.0, 0.0, 0.0],
+    'cream_bread': [220.0, -40.0, 200.0, -90.0, 0.0, 0.0],
+    'choco_pie':   [220.0,  40.0, 200.0, -90.0, 0.0, 0.0],
+}
+
 
 class CobotController:
     """
@@ -26,12 +39,34 @@ class CobotController:
     각 phase 메서드는 (success: bool, detected_quantity: int) 를 반환한다.
     """
 
-    def __init__(self, node, port: str = '/dev/ttyJETCOBOT', baudrate: int = 1_000_000, dry_run: bool = False) -> None:
+    def __init__(
+        self,
+        node,
+        port: str = '/dev/ttyJETCOBOT',
+        baudrate: int = 1_000_000,
+        dry_run: bool = False,
+        pick_timeout_sec: float = 120.0,
+        pick_request_topic: str = '/ibvs_nn_pick/request',
+        pick_result_topic: str = '/ibvs_nn_pick/result',
+    ) -> None:
         self._node    = node
         self._dry_run = dry_run
+
+        # SORTING 픽은 local AI 컴퓨터의 ibvs_nn_pick_agent 에 토픽으로 요청한다.
+        # agent 가 IBVS+NN 을 띄우면 cobot 호스트의 드라이버가 제어 토픽을 snatch 해 구동한다.
+        # serial 직접 제어(dry_run 여부)와 무관하게 동작한다.
+        self._pick = IbvsNnPickClient(
+            node,
+            request_topic=pick_request_topic,
+            result_topic=pick_result_topic,
+            pick_timeout_sec=pick_timeout_sec,
+        )
+        # 어떤 상품을 어디(좌표/zone)에 놓았는지 기록. 차후 picky 에서 재집기용.
+        self._placements: list[dict] = []
+
         if dry_run:
             self._mc = None
-            self._log('CobotController dry_run 모드 — 하드웨어 연결 생략')
+            self._log('CobotController dry_run 모드 — serial 직접 제어 생략(픽은 IBVS+NN)')
             return
         self._mc = MyCobot280(port, baudrate, thread_lock=True)
         time.sleep(0.4)
@@ -41,28 +76,69 @@ class CobotController:
 
     # ── 공개 phase 메서드 ────────────────────────────────────────────────
 
-    def run_sorting(self, grasp_trajectory: list[list[float]]) -> tuple[bool, int]:
-        """서버에서 받은 학습 파지 궤적으로 물체를 집는다."""
-        self._log('SORTING 시작')
-        if self._dry_run:
-            return True, 1  # [구현 필요] grasp_trajectory 기반 실제 파지 동작으로 교체
-        if not self.execute_grasp_trajectory(grasp_trajectory):
-            return False, 0
-        if not self.close_gripper():
-            return False, 0
-        return True, 1
+    def run_sorting(self, product_name: str, quantity: int = 1) -> tuple[bool, int]:
+        """IBVS+NN 픽으로 지정 상품을 quantity 개 집어 올린다.
+
+        한 정차 위치에는 한 종류 상품만 진열되어 있으므로 product_name 한 종류를
+        quantity 번 반복해 집는다. 각 픽은 nn_inference.launch.py 1회 실행에 대응한다.
+        반환값: (success, 집어 올린 개수)
+        """
+        self._log(f'SORTING 시작 — product={product_name}, quantity={quantity}')
+        target_qty = max(1, int(quantity or 1))
+        picked = 0
+        for i in range(target_qty):
+            self._log(f'SORTING {i + 1}/{target_qty} 픽 시도')
+            if not self._pick.pick(product_name):
+                self._log_err(f'{i + 1}번째 픽 실패')
+                return False, picked
+            picked += 1
+        return True, picked
 
     def run_loading(
         self,
-        pick_trajectory: list[list[float]],
-        place_trajectory: list[list[float]],
+        product_name: str,
+        target_zone_name: str = '',
     ) -> tuple[bool, int]:
-        self._log('LOADING 시작')
+        """집어 올린 상품을 picky 적재 위치(place)로 내려놓는다(shell)."""
+        return self.place_product(product_name, target_zone_name)
+
+    # ── place(내려놓기) shell ─────────────────────────────────────────────
+
+    def place_product(self, product_name: str, target_zone_name: str = '') -> tuple[bool, int]:
+        """상품을 고정 place 좌표로 내려놓고, 무엇을 어디 놓았는지 기록한다.
+
+        실제 place 동작은 PLACE_COORDS 의 고정 좌표로 send_coords 하는 shell 이다.
+        '어떤 상품을 어디에 놓았는지' 는 차후 picky 에서 재집기/재진열할 때 쓰도록
+        self._placements 에 저장한다.
+        """
+        self._log(f'PLACE 시작 — product={product_name}, zone={target_zone_name}')
+        coords = PLACE_COORDS.get(product_name)
+        if coords is None:
+            self._log_err(f'place 좌표 미정의 상품: {product_name}')
+            return False, 0
+
+        # 어디에 놓았는지 먼저 기록(좌표 매핑은 cobot 내부 보관).
+        self._placements.append({
+            'product_name': product_name,
+            'coords': list(coords),
+            'zone': target_zone_name,
+        })
+
         if self._dry_run:
-            return True, 1  # [구현 필요] pick_trajectory/place_trajectory 기반 실제 적재 동작으로 교체
-        self.open_gripper()
-        ok = self._execute_pick_and_place(pick_trajectory, place_trajectory)
-        return ok, (1 if ok else 0)
+            self._log(f'(dry_run) place 좌표 기록만 — {product_name} -> {coords}')
+            return True, 1
+
+        # [구현 필요] 집은 물체를 들고 이 좌표로 이동 후 내려놓는 실제 동작 보강.
+        if not self.move_to_coords(coords):
+            return False, 0
+        if not self.open_gripper():
+            return False, 0
+        return True, 1
+
+    @property
+    def placements(self) -> list[dict]:
+        """차후 재집기를 위한 place 기록(상품명/좌표/zone)."""
+        return list(self._placements)
 
     def run_inspecting(self, inspect_trajectory: list[list[float]]) -> tuple[bool, int]:
         self._log('INSPECTING 시작')

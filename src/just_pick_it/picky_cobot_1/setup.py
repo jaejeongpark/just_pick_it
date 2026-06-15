@@ -28,6 +28,7 @@ setup(
     entry_points={
         'console_scripts': [
             'cobot_state_manager = picky_cobot_1.cobot_state_machine:main',
+            'ibvs_nn_pick_agent = picky_cobot_1.ibvs_nn_pick_agent:main',
         ],
     },
 )
