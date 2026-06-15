@@ -27,6 +27,7 @@ HOUSEKEEPING_TASK_TYPES = {
     "DOCK_IN",
     "CHARGE",
 }
+STARTED_DISPLAY_BATCH_TASK_STATUSES = {"RUNNING", "PAUSED", "SUCCESS"}
 
 HOUSEKEEPING_REASON_PARKING = "PARKING"
 HOUSEKEEPING_REASON_LOW_BATTERY = "LOW_BATTERY"
@@ -1501,7 +1502,7 @@ class TaskManager:
         return task_ids
 
     def _append_display_item_to_open_batch(self, display_item: dict[str, Any]) -> list[int]:
-        """아직 housekeeping 전인 기존 진열 batch에 새 display_item task를 이어붙인다."""
+        """아직 실행 시작 전인 기존 진열 batch에 새 display_item task를 이어붙인다."""
         batch_tasks = self._find_appendable_display_batch_tasks()
         if not batch_tasks:
             return []
@@ -1566,7 +1567,7 @@ class TaskManager:
         return task_ids
 
     def _find_appendable_display_batch_tasks(self) -> list[dict[str, Any]]:
-        """housekeeping에 들어가기 전인 기존 진열 batch task를 찾는다."""
+        """아직 로봇 실행이 시작되지 않은 기존 진열 batch task를 찾는다."""
         tasks_by_batch: dict[int, list[dict[str, Any]]] = {}
         housekeeping_batches: set[int] = set()
         for task in self._repo.list_tasks():
@@ -1583,6 +1584,8 @@ class TaskManager:
                 continue
             statuses = {str(task.get("status") or "") for task in tasks}
             if not statuses or statuses & {"FAILED", "CANCELLED"}:
+                continue
+            if statuses & STARTED_DISPLAY_BATCH_TASK_STATUSES:
                 continue
             if any(status not in FINAL_TASK_STATUSES for status in statuses):
                 return sorted(tasks, key=self._task_sequence_sort_key)

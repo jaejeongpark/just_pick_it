@@ -1,130 +1,133 @@
 #!/usr/bin/env python3
-"""
-Reverse Docking - ArUco 시각 서보 후진 도킹
+"""PICKY2 reverse docking.
 
-4단계:
-  0단계: 마커 탐색 및 rvec[1] 기반 yaw 정렬
-  1단계: tvec[0] 기반 횡방향 pre-alignment (전진 아크)
-  2단계: tvec + rvec PID 후진 (부호 반전), tvec[2] <= dock_switch_distance 시 종료
-  3단계: 노란 주차라인 중심 추종 후진 + 파란 정지선 감지 시 정지
+Docking is split from normal Nav2 driving:
+  - RETURN_HOME moves the robot to the STANDBY zone with Nav2.
+  - DOCK_IN uses this node to align to the AprilTag/ArUco marker and
+    reverse slowly into the charging dock.
 
-reverse_dock(marker_id, dock_map_x, dock_map_y, dock_map_yaw) 를 state_machine 이 호출.
+This MVP intentionally does not use the yellow lane or blue stop tape. The
+current physical marker is on the horizontal wall above the standby zones, so
+the marker is a local alignment reference, not the final stopping target.
 """
 
 import math
-import time
 import threading
+import time
 
 import cv2
 import numpy as np
 
 import rclpy
-from rclpy.node import Node
-
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
+from nav_msgs.msg import Odometry
+from rclpy.node import Node
 from sensor_msgs.msg import Image
 
 
-class PID:
-    def __init__(self, kp: float, ki: float, kd: float):
-        self.kp, self.ki, self.kd = kp, ki, kd
-        self._integral = 0.0
-        self._prev_err = 0.0
-        self._prev_t = time.time()
+def quat_to_yaw(q) -> float:
+    siny = 2.0 * (q.w * q.z + q.x * q.y)
+    cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+    return math.atan2(siny, cosy)
 
-    def reset(self):
-        self._integral = 0.0
-        self._prev_err = 0.0
-        self._prev_t = time.time()
 
-    def compute(self, err: float) -> float:
-        now = time.time()
-        dt = max(now - self._prev_t, 1e-4)
-        self._integral += err * dt
-        d = (err - self._prev_err) / dt
-        out = self.kp * err + self.ki * self._integral + self.kd * d
-        self._prev_err = err
-        self._prev_t = now
-        return out
+def normalize_angle(angle: float) -> float:
+    return math.atan2(math.sin(angle), math.cos(angle))
 
 
 class ReverseDocking(Node):
     def __init__(self):
         super().__init__("reverse_docking")
 
-        # ArUco
-        self.declare_parameter("aruco_marker_dict", 0)
-        self.declare_parameter("marker_size_m", 0.10)
+        # AprilTag/ArUco marker. The physical tags are shared with PICKY1.
+        self.declare_parameter("aruco_marker_dict", "DICT_APRILTAG_36h11")
+        self.declare_parameter("marker_size_m", 0.05)
 
-        # 카메라 (비전 담당 캘리브레이션 후 채워줌, wide lens 1080p placeholder)
+        # PICKY2 camera calibration, 1280x720.
         self.declare_parameter("camera_matrix", [
-            777.0, 0.0, 960.0,
-            0.0, 777.0, 540.0,
+            1564.8861778174316, 0.0, 634.6279547011992,
+            0.0, 1557.9751956153086, 386.3538829840184,
             0.0, 0.0, 1.0,
         ])
-        self.declare_parameter("dist_coeffs", [0.0, 0.0, 0.0, 0.0, 0.0])
+        self.declare_parameter("dist_coeffs", [
+            -0.03862007925270209,
+            1.9953590527035414,
+            -0.004035341465584413,
+            0.007809686398255311,
+            -10.752768150812287,
+        ])
 
-        # 거리 임계값
-        self.declare_parameter("dock_switch_distance", 0.20)   # Phase 2→3 전환 (m)
-
-        # Phase 0: yaw 정렬
-        self.declare_parameter("rotate_kp", 1.5)
-        self.declare_parameter("rotate_ki", 0.0)
-        self.declare_parameter("rotate_kd", 0.1)
-        self.declare_parameter("rotate_thresh_rad", 0.05)
-
-        # Phase 1: 횡방향 pre-alignment
-        self.declare_parameter("prealign_kp", 1.2)
-        self.declare_parameter("prealign_thresh_m", 0.03)
-
-        # Phase 2: ArUco 후진
-        self.declare_parameter("lat_kp", 1.0)
-        self.declare_parameter("lat_ki", 0.0)
-        self.declare_parameter("lat_kd", 0.05)
-        self.declare_parameter("yaw_kp", 0.8)
-        self.declare_parameter("yaw_ki", 0.0)
-        self.declare_parameter("yaw_kd", 0.05)
-        self.declare_parameter("reverse_speed", 0.05)
-
-        # Phase 3: 주차라인 + 정지선
-        self.declare_parameter("lane_kp", 0.003)
-        self.declare_parameter("final_speed", 0.03)
-
-        # 파란 정지선 (HSV)
-        self.declare_parameter("tape_hsv_lower", [100, 100, 50])
-        self.declare_parameter("tape_hsv_upper", [130, 255, 255])
-        self.declare_parameter("tape_coverage_thresh", 0.5)
-
-        # 공통
-        self.declare_parameter("max_angular_vel", 0.4)
-        self.declare_parameter("aruco_timeout_sec", 30.0)
+        # Camera is off during normal driving. For docking, open it directly.
+        # Use "ros_topic" only when an external /camera/image_raw publisher is
+        # intentionally running for bench tests.
+        self.declare_parameter("camera_source", "picamera2")
         self.declare_parameter("camera_topic", "camera/image_raw")
+        self.declare_parameter("camera_width", 1280)
+        self.declare_parameter("camera_height", 720)
+        self.declare_parameter("flip_camera_180", False)
 
-        # 파라미터 로드
-        dict_id = self.get_parameter("aruco_marker_dict").value
-        self._marker_size = self.get_parameter("marker_size_m").value
+        # Phase timing and motion.
+        self.declare_parameter("marker_timeout_sec", 15.0)
+        self.declare_parameter("align_timeout_sec", 10.0)
+        self.declare_parameter("reverse_timeout_sec", 20.0)
+        self.declare_parameter("odom_timeout_sec", 5.0)
+        self.declare_parameter("settle_sec", 0.3)
 
-        cam = self.get_parameter("camera_matrix").value
-        self._cam_matrix = np.array(cam, dtype=np.float64).reshape(3, 3)
+        self.declare_parameter("acquire_rotate_speed", 0.25)
+        self.declare_parameter("align_lateral_tolerance_m", 0.02)
+        self.declare_parameter("align_stable_frames", 3)
+        self.declare_parameter("align_kp", 1.2)
+        self.declare_parameter("reverse_speed", 0.035)
+        self.declare_parameter("reverse_distance_m", 0.32)
+        self.declare_parameter("yaw_hold_kp", 1.2)
+        # Default 0 keeps reverse insertion odom-yaw based. Increase only after
+        # logs show consistent lateral drift while reversing.
+        self.declare_parameter("reverse_marker_lat_kp", 0.0)
+        self.declare_parameter("max_angular_vel", 0.35)
+
+        dict_id = self._resolve_aruco_dict(
+            self.get_parameter("aruco_marker_dict").value
+        )
+        self._marker_size = float(self.get_parameter("marker_size_m").value)
+        self._cam_matrix = np.array(
+            self.get_parameter("camera_matrix").value,
+            dtype=np.float64,
+        ).reshape(3, 3)
         self._dist_coeffs = np.array(
-            self.get_parameter("dist_coeffs").value, dtype=np.float64
+            self.get_parameter("dist_coeffs").value,
+            dtype=np.float64,
         )
 
-        self._switch_dist     = self.get_parameter("dock_switch_distance").value
-        self._rotate_thresh   = self.get_parameter("rotate_thresh_rad").value
-        self._prealign_kp     = self.get_parameter("prealign_kp").value
-        self._prealign_thresh = self.get_parameter("prealign_thresh_m").value
-        self._reverse_speed   = self.get_parameter("reverse_speed").value
-        self._lane_kp         = self.get_parameter("lane_kp").value
-        self._final_speed     = self.get_parameter("final_speed").value
-        self._tape_lower      = tuple(int(v) for v in self.get_parameter("tape_hsv_lower").value)
-        self._tape_upper      = tuple(int(v) for v in self.get_parameter("tape_hsv_upper").value)
-        self._tape_thresh     = self.get_parameter("tape_coverage_thresh").value
-        self._max_ang         = self.get_parameter("max_angular_vel").value
-        self._timeout         = self.get_parameter("aruco_timeout_sec").value
+        self._camera_source = str(self.get_parameter("camera_source").value)
+        self._camera_width = int(self.get_parameter("camera_width").value)
+        self._camera_height = int(self.get_parameter("camera_height").value)
+        self._flip_180 = bool(self.get_parameter("flip_camera_180").value)
 
-        # ArUco 검출기
+        self._marker_timeout = float(self.get_parameter("marker_timeout_sec").value)
+        self._align_timeout = float(self.get_parameter("align_timeout_sec").value)
+        self._reverse_timeout = float(self.get_parameter("reverse_timeout_sec").value)
+        self._odom_timeout = float(self.get_parameter("odom_timeout_sec").value)
+        self._settle_sec = float(self.get_parameter("settle_sec").value)
+
+        self._acquire_rotate_speed = float(
+            self.get_parameter("acquire_rotate_speed").value
+        )
+        self._align_tol = float(self.get_parameter("align_lateral_tolerance_m").value)
+        self._align_stable_frames = int(
+            self.get_parameter("align_stable_frames").value
+        )
+        self._align_kp = float(self.get_parameter("align_kp").value)
+        self._reverse_speed = float(self.get_parameter("reverse_speed").value)
+        self._reverse_distance = float(
+            self.get_parameter("reverse_distance_m").value
+        )
+        self._yaw_hold_kp = float(self.get_parameter("yaw_hold_kp").value)
+        self._reverse_marker_lat_kp = float(
+            self.get_parameter("reverse_marker_lat_kp").value
+        )
+        self._max_ang = float(self.get_parameter("max_angular_vel").value)
+
         self._aruco_dict = cv2.aruco.getPredefinedDictionary(dict_id)
         self._aruco_params = cv2.aruco.DetectorParameters()
         self._detector = None
@@ -134,7 +137,6 @@ class ReverseDocking(Node):
                 self._aruco_params,
             )
 
-        # solvePnP 용 마커 3D 기준점 (마커 중심 원점, XY 평면)
         h = self._marker_size / 2.0
         self._marker_obj_pts = np.array([
             [-h,  h, 0.0],
@@ -143,43 +145,33 @@ class ReverseDocking(Node):
             [-h, -h, 0.0],
         ], dtype=np.float64)
 
-        # PID
-        self._rotate_pid = PID(
-            self.get_parameter("rotate_kp").value,
-            self.get_parameter("rotate_ki").value,
-            self.get_parameter("rotate_kd").value,
-        )
-        self._lat_pid = PID(
-            self.get_parameter("lat_kp").value,
-            self.get_parameter("lat_ki").value,
-            self.get_parameter("lat_kd").value,
-        )
-        self._yaw_pid = PID(
-            self.get_parameter("yaw_kp").value,
-            self.get_parameter("yaw_ki").value,
-            self.get_parameter("yaw_kd").value,
-        )
-
-        # 카메라
         self._bridge = CvBridge()
         self._lock = threading.Lock()
         self._latest_frame = None
+        self._latest_odom = None
         self._cancel_requested = False
+        self._picam2 = None
 
-        cam_topic = self.get_parameter("camera_topic").value
-        self.create_subscription(Image, cam_topic, self._image_cb, 10)
+        if self._camera_source == "ros_topic":
+            cam_topic = self.get_parameter("camera_topic").value
+            self.create_subscription(Image, cam_topic, self._image_cb, 10)
 
-        # 퍼블리셔. 노드 namespace 가 'picky2' 이면 자동으로 /picky2/cmd_vel,
-        # /picky2/initialpose 가 된다 (AMCL 도 같은 namespace 안에서 띄운다는 가정).
+        self.create_subscription(Odometry, "odom", self._odom_cb, 20)
+
         self._cmd_pub = self.create_publisher(Twist, "cmd_vel", 10)
         self._init_pose_pub = self.create_publisher(
-            PoseWithCovarianceStamped, "initialpose", 10
+            PoseWithCovarianceStamped,
+            "initialpose",
+            10,
         )
 
-        self.get_logger().info("ReverseDocking ready.")
+        self.get_logger().info(
+            "ReverseDocking ready "
+            f"(camera_source={self._camera_source}, marker_size={self._marker_size:.3f}m)"
+        )
 
     # ------------------------------------------------------------------ #
-    # 외부 인터페이스
+    # Public interface
     # ------------------------------------------------------------------ #
 
     def reverse_dock(
@@ -189,242 +181,212 @@ class ReverseDocking(Node):
         dock_map_y: float,
         dock_map_yaw: float,
     ) -> bool:
-        """ArUco 기반 4단계 후진 도킹. 성공 시 True."""
+        """Align to marker, reverse into the dock, and correct AMCL pose."""
         self.get_logger().info(
             f"reverse_dock: marker={marker_id}, "
             f"target=({dock_map_x:.3f}, {dock_map_y:.3f}, "
             f"{math.degrees(dock_map_yaw):.1f}deg)"
         )
-        self._rotate_pid.reset()
-        self._lat_pid.reset()
-        self._yaw_pid.reset()
 
-        phases = [
-            ("Phase 0", lambda: self._phase0_rotate_to_marker(marker_id)),
-            ("Phase 1", lambda: self._phase1_lateral_prealign(marker_id)),
-            ("Phase 2", lambda: self._phase2_aruco_reverse(marker_id)),
-            ("Phase 3", self._phase3_final_approach),
-        ]
-        for name, fn in phases:
-            if not fn():
-                self._stop()
-                self.get_logger().error(f"reverse_dock: FAILED at {name}")
+        if not self._start_camera():
+            self._stop()
+            return False
+
+        try:
+            if not self._wait_for_odom():
+                self.get_logger().error("reverse_dock: FAILED at WAIT_ODOM")
                 return False
 
-        self._stop()
-        self.get_logger().info("reverse_dock: SUCCESS")
-        self._publish_pose_correction(dock_map_x, dock_map_y, dock_map_yaw)
-        return True
+            phases = [
+                ("OBSERVE_MARKER", lambda: self._phase_observe_marker(marker_id)),
+                ("ALIGN_MARKER_CENTER", lambda: self._phase_align_marker_center(marker_id)),
+                ("REVERSE_INSERT", lambda: self._phase_reverse_insert(marker_id)),
+            ]
+            for name, fn in phases:
+                if not fn():
+                    self._stop()
+                    self.get_logger().error(f"reverse_dock: FAILED at {name}")
+                    return False
+
+            self._stop()
+            time.sleep(self._settle_sec)
+            self._publish_pose_correction(dock_map_x, dock_map_y, dock_map_yaw)
+            self.get_logger().info("reverse_dock: SUCCESS")
+            return True
+        finally:
+            self._stop()
+            self._stop_camera()
 
     def cancel(self) -> None:
-        """진행 중인 도킹 루틴을 다음 루프에서 중단한다."""
+        """Request cancellation; the active phase will stop on the next loop."""
         with self._lock:
             self._cancel_requested = True
         self._stop()
 
     def clear_cancel(self) -> None:
-        """이전 취소 플래그를 지워 다음 도킹 명령을 받을 수 있게 한다."""
         with self._lock:
             self._cancel_requested = False
 
-    def _is_cancel_requested(self) -> bool:
-        with self._lock:
-            return self._cancel_requested
-
     # ------------------------------------------------------------------ #
-    # 0단계: 마커 탐색 + yaw 정렬
+    # Phases
     # ------------------------------------------------------------------ #
 
-    def _phase0_rotate_to_marker(self, marker_id: int) -> bool:
-        """마커 미검출 시 탐색 회전, 검출 후 rvec[1] 기반 yaw 정렬."""
-        deadline = time.time() + self._timeout
-
+    def _phase_observe_marker(self, marker_id: int) -> bool:
+        """Wait until the expected marker is visible."""
+        deadline = time.time() + self._marker_timeout
         while time.time() < deadline:
             if self._is_cancel_requested():
-                self._stop()
                 return False
 
-            frame = self._get_latest_frame()
-            if frame is None:
-                time.sleep(0.05)
-                continue
-
-            result = self._detect_aruco(frame, marker_id)
-
-            if result is None:
-                twist = Twist()
-                twist.angular.z = 0.3
-                self._cmd_pub.publish(twist)
-                time.sleep(0.05)
-                continue
-
-            _, rvec = result
-            yaw_err = float(rvec[1])
-
-            if abs(yaw_err) <= self._rotate_thresh:
-                self._stop()
-                self.get_logger().info(f"Phase 0: done — rvec[1]={yaw_err:.3f} rad")
-                return True
-
-            twist = Twist()
-            twist.angular.z = self._clamp(self._rotate_pid.compute(-yaw_err))
-            self._cmd_pub.publish(twist)
-            time.sleep(0.05)
-
-        self._stop()
-        self.get_logger().warn("Phase 0: timeout")
-        return False
-
-    # ------------------------------------------------------------------ #
-    # 1단계: 횡방향 pre-alignment
-    # ------------------------------------------------------------------ #
-
-    def _phase1_lateral_prealign(self, marker_id: int) -> bool:
-        """tvec[0] 허용 범위 이내가 될 때까지 아크로 횡방향 보정.
-
-        기본은 후진 아크. tvec[2] <= dock_switch_distance 에 도달하면
-        전진 아크로 전환하여 벽 충돌 없이 보정을 완료한다.
-        """
-        deadline = time.time() + 10.0
-
-        while time.time() < deadline:
-            if self._is_cancel_requested():
-                self._stop()
-                return False
-
-            frame = self._get_latest_frame()
-            if frame is None:
-                time.sleep(0.05)
-                continue
-
-            result = self._detect_aruco(frame, marker_id)
+            result = self._detect_from_latest_frame(marker_id)
             if result is None:
                 time.sleep(0.05)
                 continue
 
-            tvec, _ = result
-            lat_err = float(tvec[0])
-            dist    = float(tvec[2])
-
-            if abs(lat_err) <= self._prealign_thresh:
-                self._stop()
-                self.get_logger().info(f"Phase 1: done — tvec[0]={lat_err:.3f} m")
-                return True
-
-            if dist <= self._switch_dist:
-                # 너무 가까워졌으면 전진 아크로 전환 (벽 충돌 방지)
-                lin = 0.04
-                ang = self._clamp(self._prealign_kp * lat_err)
-            else:
-                # 기본: 후진 아크 (부호 반전)
-                lin = -0.04
-                ang = self._clamp(-self._prealign_kp * lat_err)
-
-            twist = Twist()
-            twist.linear.x  = lin
-            twist.angular.z = ang
-            self._cmd_pub.publish(twist)
-            time.sleep(0.05)
-
-        self._stop()
-        self.get_logger().warn("Phase 1: timeout")
-        return False
-
-    # ------------------------------------------------------------------ #
-    # 2단계: ArUco 기반 후진
-    # ------------------------------------------------------------------ #
-
-    def _phase2_aruco_reverse(self, marker_id: int) -> bool:
-        """tvec[0] + rvec[1] PID 후진. tvec[2] <= dock_switch_distance 시 종료."""
-        deadline = time.time() + 30.0
-
-        while time.time() < deadline:
-            if self._is_cancel_requested():
-                self._stop()
-                return False
-
-            frame = self._get_latest_frame()
-            if frame is None:
-                time.sleep(0.05)
-                continue
-
-            result = self._detect_aruco(frame, marker_id)
-
-            if result is None:
-                # 검출 실패: 각도 보정 없이 저속 직진 후진
-                twist = Twist()
-                twist.linear.x = -self._reverse_speed * 0.5
-                self._cmd_pub.publish(twist)
-                time.sleep(0.05)
-                continue
-
-            tvec, rvec = result
-            dist = float(tvec[2])
-
-            if dist <= self._switch_dist:
-                self._stop()
-                self.get_logger().info(f"Phase 2: done — dist={dist:.3f} m")
-                return True
-
-            # 후진 시 부호 반전: 마커가 우측(tvec[0] > 0)이면 좌회전(-angular.z)
-            ang_cmd = self._clamp(
-                -(self._lat_pid.compute(float(tvec[0]))
-                  + self._yaw_pid.compute(float(rvec[1])))
+            tvec, rvec, center = result
+            self.get_logger().info(
+                "OBSERVE_MARKER: "
+                f"id={marker_id}, center=({center[0]:.1f},{center[1]:.1f}), "
+                f"tvec=({tvec[0]:.3f},{tvec[1]:.3f},{tvec[2]:.3f}), "
+                f"rvec=({rvec[0]:.3f},{rvec[1]:.3f},{rvec[2]:.3f})"
             )
-            speed = min(self._reverse_speed, dist * 0.15 + 0.02)
+            return True
 
-            twist = Twist()
-            twist.linear.x = -speed
-            twist.angular.z = ang_cmd
-            self._cmd_pub.publish(twist)
-            time.sleep(0.05)
-
-        self._stop()
-        self.get_logger().warn("Phase 2: timeout")
+        self.get_logger().warn(f"OBSERVE_MARKER: timeout waiting marker_id={marker_id}")
         return False
 
-    # ------------------------------------------------------------------ #
-    # 3단계: 주차라인 기반 최종 접근
-    # ------------------------------------------------------------------ #
-
-    def _phase3_final_approach(self) -> bool:
-        """노란 주차라인 중심 추종 후진 + 파란 정지선 감지 시 정지."""
-        deadline = time.time() + 15.0
+    def _phase_align_marker_center(self, marker_id: int) -> bool:
+        """Rotate in place until the marker is centered laterally."""
+        deadline = time.time() + self._align_timeout
+        stable = 0
+        last_log = 0.0
 
         while time.time() < deadline:
             if self._is_cancel_requested():
-                self._stop()
                 return False
 
-            frame = self._get_latest_frame()
-            if frame is None:
+            result = self._detect_from_latest_frame(marker_id)
+            if result is None:
+                twist = Twist()
+                twist.angular.z = self._acquire_rotate_speed
+                self._cmd_pub.publish(twist)
+                stable = 0
                 time.sleep(0.05)
                 continue
 
-            if self._detect_tape(frame):
+            tvec, _, center = result
+            lat_err = float(tvec[0])
+
+            if abs(lat_err) <= self._align_tol:
+                stable += 1
                 self._stop()
-                self.get_logger().info("Phase 3: stop line detected — docking complete")
-                return True
+                if stable >= self._align_stable_frames:
+                    self.get_logger().info(
+                        "ALIGN_MARKER_CENTER: done "
+                        f"lat_err={lat_err:.3f}m, center_x={center[0]:.1f}"
+                    )
+                    return True
+                time.sleep(0.05)
+                continue
 
-            lane_err = self._detect_lane_center(frame)
-            ang_cmd = self._clamp(-self._lane_kp * lane_err) if lane_err is not None else 0.0
-
+            stable = 0
             twist = Twist()
-            twist.linear.x = -self._final_speed
-            twist.angular.z = ang_cmd
+            # If the marker is to the camera's right, rotate clockwise.
+            twist.angular.z = self._clamp(-self._align_kp * lat_err)
             self._cmd_pub.publish(twist)
+
+            now = time.time()
+            if now - last_log > 1.0:
+                self.get_logger().info(
+                    "ALIGN_MARKER_CENTER: "
+                    f"lat_err={lat_err:.3f}m, cmd_w={twist.angular.z:.3f}"
+                )
+                last_log = now
             time.sleep(0.05)
 
         self._stop()
-        self.get_logger().warn("Phase 3: timeout")
+        self.get_logger().warn("ALIGN_MARKER_CENTER: timeout")
+        return False
+
+    def _phase_reverse_insert(self, marker_id: int) -> bool:
+        """Reverse by odom distance while holding the starting yaw."""
+        start = self._get_odom_pose()
+        if start is None:
+            self.get_logger().warn("REVERSE_INSERT: no odom")
+            return False
+
+        start_x, start_y, theta_ref = start
+        deadline = time.time() + self._reverse_timeout
+        last_log = 0.0
+
+        self.get_logger().info(
+            "REVERSE_INSERT: start "
+            f"odom=({start_x:.3f},{start_y:.3f},{math.degrees(theta_ref):.1f}deg), "
+            f"target_distance={self._reverse_distance:.3f}m"
+        )
+
+        while time.time() < deadline:
+            if self._is_cancel_requested():
+                return False
+
+            cur = self._get_odom_pose()
+            if cur is None:
+                self._stop()
+                self.get_logger().warn("REVERSE_INSERT: lost odom")
+                return False
+
+            x, y, yaw = cur
+            moved = math.hypot(x - start_x, y - start_y)
+            if moved >= self._reverse_distance:
+                self._stop()
+                self.get_logger().info(
+                    "REVERSE_INSERT: done "
+                    f"moved={moved:.3f}m, yaw={math.degrees(yaw):.1f}deg"
+                )
+                return True
+
+            yaw_err = normalize_angle(theta_ref - yaw)
+            marker_lat = 0.0
+            if self._reverse_marker_lat_kp != 0.0:
+                result = self._detect_from_latest_frame(marker_id)
+                if result is not None:
+                    marker_lat = float(result[0][0])
+
+            twist = Twist()
+            twist.linear.x = -self._reverse_speed
+            twist.angular.z = self._clamp(
+                self._yaw_hold_kp * yaw_err
+                - self._reverse_marker_lat_kp * marker_lat
+            )
+            self._cmd_pub.publish(twist)
+
+            now = time.time()
+            if now - last_log > 1.0:
+                self.get_logger().info(
+                    "REVERSE_INSERT: "
+                    f"moved={moved:.3f}/{self._reverse_distance:.3f}m, "
+                    f"yaw_err={math.degrees(yaw_err):.1f}deg, "
+                    f"cmd=({twist.linear.x:.3f},{twist.angular.z:.3f})"
+                )
+                last_log = now
+            time.sleep(0.05)
+
+        self._stop()
+        self.get_logger().warn("REVERSE_INSERT: timeout")
         return False
 
     # ------------------------------------------------------------------ #
-    # 검출
+    # Detection and camera
     # ------------------------------------------------------------------ #
+
+    def _detect_from_latest_frame(self, marker_id: int):
+        frame = self._get_latest_frame()
+        if frame is None:
+            return None
+        return self._detect_aruco(frame, marker_id)
 
     def _detect_aruco(self, frame, target_id: int):
-        """solvePnP 기반 ArUco pose 추정. (tvec[3], rvec[3]) 또는 None."""
+        """Return (tvec, rvec, center_px) for the target marker, or None."""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         if self._detector is not None:
             corners, ids, _ = self._detector.detectMarkers(gray)
@@ -437,51 +399,143 @@ class ReverseDocking(Node):
         if ids is None:
             return None
 
-        for i, mid in enumerate(ids.flatten()):
-            if mid != target_id:
+        for i, marker_id in enumerate(ids.flatten()):
+            if int(marker_id) != int(target_id):
                 continue
+            marker_corners = corners[i][0].astype(np.float64)
             ok, rvec, tvec = cv2.solvePnP(
                 self._marker_obj_pts,
-                corners[i][0].astype(np.float64),
+                marker_corners,
                 self._cam_matrix,
                 self._dist_coeffs,
             )
-            if ok:
-                return tvec.flatten(), rvec.flatten()
+            if not ok:
+                return None
+            center = marker_corners.mean(axis=0)
+            return tvec.flatten(), rvec.flatten(), center
 
         return None
 
-    def _detect_lane_center(self, frame) -> float | None:
-        """노란 주차라인 좌/우 중심 평균으로 횡방향 오차(px) 반환."""
-        h, w = frame.shape[:2]
-        roi = frame[h * 2 // 3 :, :]
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        yellow = cv2.inRange(hsv, (20, 100, 100), (35, 255, 255))
+    def _start_camera(self) -> bool:
+        with self._lock:
+            self._latest_frame = None
 
-        left_pts  = cv2.findNonZero(yellow[:, : w // 2])
-        right_pts = cv2.findNonZero(yellow[:, w // 2 :])
-        if left_pts is None or right_pts is None:
+        if self._camera_source == "ros_topic":
+            self.get_logger().info("Camera source: ros_topic")
+            return True
+
+        if self._camera_source != "picamera2":
+            self.get_logger().error(f"Unknown camera_source={self._camera_source!r}")
+            return False
+
+        if self._picam2 is not None:
+            return True
+
+        try:
+            from picamera2 import Picamera2
+
+            self._picam2 = Picamera2()
+            config = self._picam2.create_video_configuration(
+                main={
+                    "size": (self._camera_width, self._camera_height),
+                    "format": "RGB888",
+                }
+            )
+            self._picam2.configure(config)
+            self._picam2.start()
+            time.sleep(0.5)
+            self.get_logger().info(
+                "Camera opened for docking "
+                f"({self._camera_width}x{self._camera_height})"
+            )
+            return True
+        except Exception as exc:
+            self.get_logger().error(f"Failed to open Picamera2: {exc}")
+            self._stop_camera()
+            return False
+
+    def _stop_camera(self) -> None:
+        if self._picam2 is None:
+            return
+        try:
+            self._picam2.stop()
+        except Exception:
+            pass
+        try:
+            self._picam2.close()
+        except Exception:
+            pass
+        self._picam2 = None
+        self.get_logger().info("Camera closed after docking")
+
+    # ------------------------------------------------------------------ #
+    # ROS callbacks and pose helpers
+    # ------------------------------------------------------------------ #
+
+    def _image_cb(self, msg: Image) -> None:
+        try:
+            frame = self._bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+            if self._flip_180:
+                frame = cv2.flip(frame, -1)
+            with self._lock:
+                self._latest_frame = frame
+        except Exception as exc:
+            self.get_logger().warn(f"Image conversion error: {exc}")
+
+    def _odom_cb(self, msg: Odometry) -> None:
+        pose = msg.pose.pose
+        with self._lock:
+            self._latest_odom = (
+                float(pose.position.x),
+                float(pose.position.y),
+                quat_to_yaw(pose.orientation),
+                time.time(),
+            )
+
+    def _get_latest_frame(self):
+        if self._camera_source == "picamera2":
+            if self._picam2 is None:
+                return None
+            try:
+                frame = self._picam2.capture_array()
+                if self._flip_180:
+                    frame = cv2.flip(frame, -1)
+                return frame
+            except Exception as exc:
+                self.get_logger().warn(f"Camera capture failed: {exc}")
+                return None
+
+        with self._lock:
+            return self._latest_frame.copy() if self._latest_frame is not None else None
+
+    def _wait_for_odom(self) -> bool:
+        deadline = time.time() + self._odom_timeout
+        while time.time() < deadline:
+            if self._is_cancel_requested():
+                return False
+            if self._get_odom_pose() is not None:
+                return True
+            time.sleep(0.05)
+        return False
+
+    def _get_odom_pose(self):
+        with self._lock:
+            if self._latest_odom is None:
+                return None
+            x, y, yaw, stamp = self._latest_odom
+        if time.time() - stamp > 1.0:
             return None
+        return x, y, yaw
 
-        left_cx  = float(np.mean(left_pts[:, 0, 0]))
-        right_cx = float(np.mean(right_pts[:, 0, 0])) + w // 2
-        return (left_cx + right_cx) / 2.0 - w / 2.0
-
-    def _detect_tape(self, frame) -> bool:
-        """파란 정지선이 하단 ROI 가로의 tape_coverage_thresh 이상이면 True."""
-        h, w = frame.shape[:2]
-        roi = frame[h * 2 // 3 :, :]
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, self._tape_lower, self._tape_upper)
-        row_coverage = np.sum(mask > 0, axis=1) / w
-        return bool(np.any(row_coverage > self._tape_thresh))
+    def _is_cancel_requested(self) -> bool:
+        with self._lock:
+            return self._cancel_requested
 
     # ------------------------------------------------------------------ #
-    # 위치 보정
+    # Pose correction and utilities
     # ------------------------------------------------------------------ #
 
-    def _publish_pose_correction(self, x: float, y: float, yaw: float):
-        """알려진 dock 절대 좌표를 /initialpose 로 발행해 AMCL 재초기화."""
+    def _publish_pose_correction(self, x: float, y: float, yaw: float) -> None:
         msg = PoseWithCovarianceStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = "map"
@@ -490,35 +544,30 @@ class ReverseDocking(Node):
         half = yaw / 2.0
         msg.pose.pose.orientation.z = math.sin(half)
         msg.pose.pose.orientation.w = math.cos(half)
-        msg.pose.covariance[0]  = 0.01
-        msg.pose.covariance[7]  = 0.01
+        msg.pose.covariance[0] = 0.01
+        msg.pose.covariance[7] = 0.01
         msg.pose.covariance[35] = 0.005
         self._init_pose_pub.publish(msg)
         self.get_logger().info(
             f"Pose correction: ({x:.3f}, {y:.3f}, {math.degrees(yaw):.1f}deg)"
         )
 
-    # ------------------------------------------------------------------ #
-    # 유틸
-    # ------------------------------------------------------------------ #
+    def _resolve_aruco_dict(self, value) -> int:
+        if isinstance(value, str):
+            if not hasattr(cv2.aruco, value):
+                raise ValueError(f"Unknown cv2.aruco dictionary: {value}")
+            return int(getattr(cv2.aruco, value))
+        return int(value)
 
     def _clamp(self, val: float) -> float:
         return max(min(val, self._max_ang), -self._max_ang)
 
-    def _image_cb(self, msg: Image):
-        try:
-            frame = self._bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-            with self._lock:
-                self._latest_frame = frame
-        except Exception as e:
-            self.get_logger().warn(f"Image conversion error: {e}")
-
-    def _get_latest_frame(self):
-        with self._lock:
-            return self._latest_frame.copy() if self._latest_frame is not None else None
-
-    def _stop(self):
+    def _stop(self) -> None:
         self._cmd_pub.publish(Twist())
+
+    def destroy_node(self):
+        self._stop_camera()
+        super().destroy_node()
 
 
 def main(args=None):

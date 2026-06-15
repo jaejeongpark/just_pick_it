@@ -195,7 +195,8 @@ class TrafficManager:
     # reserve_nearest_from() 이 평가와 예약을 한 번에 처리한다.
     #
     # 한 robot 은 한 시점에 최대 1개의 reserve 만 보유한다.
-    # 도크 점유는 notify_state(CHARGING -> 타상태) 에서 자동 해제된다.
+    # 도크 점유는 로봇이 실제로 도크를 떠나는 이동 상태에 들어갈 때만
+    # notify_state() 에서 자동 해제된다.
 
     def reserve_path(
         self,

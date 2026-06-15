@@ -32,111 +32,111 @@ VALUES (
         'STOCK_ZONE',
         'STOCK',
         0.20,
-        0.85,
+        0.87,
         0.00,
         3.1416
     ),
     (
         'STOCK_SLOT',
         'STOCK_SLOT',
-        0.05,
-        0.85,
+        0.21,
+        0.72,
         0.35,
         0.00
     ),
     (
         'PRODUCT_ZONE_1',
         'PRODUCT',
-        0.63,
-        0.60,
+        0.65,
+        0.62,
         0.00,
         0.00
     ),
     (
         'PRODUCT_ZONE_2',
         'PRODUCT',
-        1.04,
-        0.60,
+        1.07,
+        0.62,
         0.00,
         0.00
     ),
     (
         'PRODUCT_ZONE_3',
         'PRODUCT',
-        1.47,
-        0.60,
+        1.48,
+        0.62,
         0.00,
         0.00
     ),
     (
         'PRODUCT_ZONE_4',
         'PRODUCT',
-        0.63,
-        0.36,
+        0.65,
+        0.38,
         0.00,
         0.00
     ),
     (
         'PRODUCT_ZONE_5',
         'PRODUCT',
-        1.04,
-        0.36,
+        1.07,
+        0.38,
         0.00,
         0.00
     ),
     (
         'PRODUCT_ZONE_6',
         'PRODUCT',
-        1.47,
-        0.36,
+        1.48,
+        0.38,
         0.00,
         0.00
     ),
     (
         'PRODUCT_SLOT_1',
         'PRODUCT_SLOT',
-        0.82,
-        0.60,
+        0.81,
+        0.62,
         0.35,
         0.00
     ),
     (
         'PRODUCT_SLOT_2',
         'PRODUCT_SLOT',
-        1.17,
-        0.60,
+        1.22,
+        0.62,
         0.35,
         0.00
     ),
     (
         'PRODUCT_SLOT_3',
         'PRODUCT_SLOT',
-        1.52,
-        0.60,
+        1.63,
+        0.62,
         0.35,
         0.00
     ),
     (
         'PRODUCT_SLOT_4',
         'PRODUCT_SLOT',
-        0.82,
-        0.35,
+        0.81,
+        0.38,
         0.35,
         0.00
     ),
     (
         'PRODUCT_SLOT_5',
         'PRODUCT_SLOT',
-        1.17,
-        0.35,
+        1.22,
+        0.38,
         0.35,
         0.00
     ),
     (
         'PRODUCT_SLOT_6',
         'PRODUCT_SLOT',
-        1.52,
-        0.35,
+        1.63,
+        0.38,
         0.35,
         0.00
     ),
@@ -152,7 +152,7 @@ VALUES (
         'PICKUP_ZONE_2',
         'PICKUP',
         1.80,
-        0.18,
+        0.17,
         0.00,
         3.14
     ),
@@ -160,7 +160,7 @@ VALUES (
         'PICKUP_SLOT_1',
         'PICKUP_SLOT',
         1.80,
-        0.80,
+        0.60,
         0.35,
         3.14
     ),
@@ -168,7 +168,7 @@ VALUES (
         'PICKUP_SLOT_2',
         'PICKUP_SLOT',
         1.80,
-        0.20,
+        0.41,
         0.35,
         3.14
     ),
@@ -210,7 +210,7 @@ VALUES (
     (
         'TRAFFIC_T3',
         'TRAFFIC',
-        1.47,
+        1.48,
         0.85,
         0.00,
         0.00
@@ -234,7 +234,7 @@ VALUES (
     (
         'TRAFFIC_B3',
         'TRAFFIC',
-        1.47,
+        1.48,
         0.15,
         0.00,
         0.00

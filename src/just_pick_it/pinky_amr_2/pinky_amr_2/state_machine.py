@@ -3,7 +3,7 @@
 
 Fleet Manager가 보내는 MoveCommand / DockCommand / EmergencyControl 계약을
 PICKY2 namespace 안에서 제공한다. 1차 통합판은 PICKY1에서 검증된 Nav2
-이동과 ArUco/라인 기반 후진 도킹 구현을 사용한다.
+이동과 AprilTag/ArUco 정렬 + odom 거리 기반 후진 도킹 구현을 사용한다.
 """
 
 import math
@@ -23,7 +23,14 @@ from just_pick_it_interfaces.action import DockCommand, MoveCommand
 from just_pick_it_interfaces.srv import EmergencyControl
 
 from pinky_amr_2.emergency_guard import Amr2EmergencyGuard
-from pinky_amr_2.move_to_goal import MoveToGoal
+from pinky_amr_2.move_to_goal import (
+    MoveToGoal,
+    STOP_NEAREST_90,
+    STOP_NEAREST_Y,
+    STOP_PLUS_Y,
+    STOP_PLUS_X,
+    STOP_MINUS_X,
+)
 from pinky_amr_2.reverse_docking import ReverseDocking
 
 
@@ -44,6 +51,17 @@ ARRIVAL_STATE = {
     'MOVE_TO_STOCK':   'WAITING_FOR_COBOT',
     'MOVE_TO_DISPLAY': 'WAITING_FOR_COBOT',
     'RETURN_HOME':     'STANDBY',
+}
+
+# task_type 별 최종 목적지 정지 자세(yaw) 정책. move_to_goal 의 final_mode 로 전달한다.
+# MOVE_TO_PRODUCT/DISPLAY = +y/-y 중 회전 적은 쪽, PICKUP = -x, STOCK = +x,
+# RETURN_HOME(standby) = +y. 그 외/미지정은 nearest-90 축 정렬 스냅.
+STOP_MODE_BY_TASK = {
+    'MOVE_TO_PRODUCT': STOP_NEAREST_Y,
+    'MOVE_TO_DISPLAY': STOP_NEAREST_Y,
+    'MOVE_TO_PICKUP':  STOP_MINUS_X,
+    'MOVE_TO_STOCK':   STOP_PLUS_X,
+    'RETURN_HOME':     STOP_PLUS_Y,
 }
 
 # 충전 중 배터리가 이 값(%)을 넘으면 picky_state 를 CHARGING -> STANDBY 로 바꾼다.
@@ -92,11 +110,11 @@ class Amr2StateMachine(Node):
         self.declare_parameter('charging_dock_1.marker_id', 0)
         self.declare_parameter('charging_dock_1.map_x', 0.11)
         self.declare_parameter('charging_dock_1.map_y', 0.08)
-        self.declare_parameter('charging_dock_1.map_yaw', 0.0)
+        self.declare_parameter('charging_dock_1.map_yaw', 1.5708)
         self.declare_parameter('charging_dock_2.marker_id', 1)
         self.declare_parameter('charging_dock_2.map_x', 0.28)
         self.declare_parameter('charging_dock_2.map_y', 0.08)
-        self.declare_parameter('charging_dock_2.map_yaw', 0.0)
+        self.declare_parameter('charging_dock_2.map_yaw', 1.5708)
 
         self._robot_id = self.get_parameter('robot_id').value
         self._depart_dist = self.get_parameter('dock_departure_distance').value
@@ -259,9 +277,43 @@ class Amr2StateMachine(Node):
 
         feedback = MoveCommand.Feedback()
         feedback.total_waypoints = len(waypoints)
+        last_passed_waypoint_index = -1
 
-        # waypoint 순차 이동
-        for i, wp in enumerate(waypoints):
+        def publish_source_release() -> None:
+            # Fleet TaskManager가 +1 보정 후 TrafficManager 현재 path의 첫 노드(source)를
+            # 해제한다. MoveCommand.waypoints에는 source가 빠져 있으므로 시작 시 1회 필요하다.
+            feedback.current_waypoint_index = 0
+            goal_handle.publish_feedback(feedback)
+            self.get_logger().info(
+                '[PATHTRACE][StateMachine] source waypoint released'
+            )
+
+        def publish_waypoint_progress(waypoint_index: int) -> None:
+            nonlocal last_passed_waypoint_index
+            if waypoint_index <= last_passed_waypoint_index:
+                return
+            if waypoint_index < 0 or waypoint_index >= len(waypoints):
+                self.get_logger().warn(
+                    f'[StateMachine] MOVE waypoint feedback index out of range: '
+                    f'{waypoint_index}/{len(waypoints)}'
+                )
+                return
+
+            # 현재 Fleet 계약에서는 TaskManager가 이 값을 +1 해서 TrafficManager의
+            # "현재 남은 path"를 trim한다. 실제 통과 waypoint index는 로그로 남기고,
+            # TrafficManager에는 한 칸 진행 신호(0 -> +1)를 보낸다.
+            feedback.current_waypoint_index = 0
+            goal_handle.publish_feedback(feedback)
+            last_passed_waypoint_index = waypoint_index
+            self.get_logger().info(
+                '[PATHTRACE][StateMachine] waypoint passed '
+                f'idx={waypoint_index}/{len(waypoints) - 1}'
+            )
+
+        # waypoint 개수와 관계없이 Nav2 NavigateThroughPoses 한 번으로 보내
+        # 코너에서의 cancel/restart를 피한다. PICKY2 전용 BT에서 지나간 goal 제거
+        # 반경을 작게 낮춰 TrafficManager waypoint가 시작 직후 삭제되지 않게 한다.
+        if waypoints:
             if goal_handle.is_cancel_requested:
                 self._move.cancel_navigation()
                 goal_handle.canceled()
@@ -273,20 +325,27 @@ class Amr2StateMachine(Node):
                 goal_handle.abort()
                 return MoveCommand.Result(success=False, message='emergency stopped')
 
-            feedback.current_waypoint_index = i
-            goal_handle.publish_feedback(feedback)
+            publish_source_release()
 
-            x = wp.pose.position.x
-            y = wp.pose.position.y
-            # zone 의 theta 는 쓰지 않는다. 중간 경유지는 통과만 하고, 마지막
-            # 목적지에서만 도착 heading 기준 가장 가까운 90° 로 정지 자세를 잡는다.
-            is_final = (i == len(waypoints) - 1)
+            final_mode = STOP_MODE_BY_TASK.get(task_type, STOP_NEAREST_90)
+            path_points = [
+                (wp.pose.position.x, wp.pose.position.y)
+                for wp in waypoints
+            ]
 
             self.get_logger().info(
-                f'[PATHTRACE][StateMachine->MoveToGoal] idx={i} 좌표=({x:.3f}, {y:.3f}) final={is_final}'
+                '[PATHTRACE][StateMachine->MoveThroughGoals] '
+                f'waypoints={[(round(x, 3), round(y, 3)) for x, y in path_points]} '
+                f'final_mode={final_mode}'
             )
+            move_ok = self._move.move_through_goals(
+                path_points,
+                final_mode=final_mode,
+                progress_callback=publish_waypoint_progress,
+            )
+            failure_message = 'navigation failed through poses'
 
-            if not self._move.move_to_goal(x, y, final=is_final):
+            if not move_ok:
                 if goal_handle.is_cancel_requested:
                     self._move.cancel_navigation()
                     goal_handle.canceled()
@@ -297,9 +356,7 @@ class Amr2StateMachine(Node):
                     return MoveCommand.Result(success=False, message='emergency stopped')
                 self._set_state('ERROR_RECOVERY')
                 goal_handle.abort()
-                return MoveCommand.Result(
-                    success=False, message=f'navigation failed at waypoint {i}'
-                )
+                return MoveCommand.Result(success=False, message=failure_message)
 
         # 전체 이동 완료. 정지 자세 회전(사방향 90° 스냅)은 move_to_goal 의 최종 목적지
         # (final=True) 처리로 옮겼다. 여기서는 추가 회전하지 않는다(중간 경유지도 회전 없음).
@@ -362,7 +419,7 @@ class Amr2StateMachine(Node):
         return CancelResponse.ACCEPT
 
     def _execute_dock(self, goal_handle) -> DockCommand.Result:
-        """DOCK_IN task 수신 시 reverse_docking 으로 ArUco 기반 후진 도킹을 수행한다."""
+        """DOCK_IN task 수신 시 marker 정렬 + odom 거리 기반 후진 도킹을 수행한다."""
         request = goal_handle.request
         dock_name = request.dock_name
         start_zone_name = request.start_zone_name

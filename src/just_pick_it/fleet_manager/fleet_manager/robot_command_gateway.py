@@ -282,7 +282,7 @@ class RobotCommandGateway:
         """PICKY 도킹 task를 DockCommand.action goal로 전송한다.
 
         DockCommand는 Nav2 waypoint 이동이 아니라 State Manager 내부의
-        ArUco/라인 기반 정밀 도킹 루틴을 실행하기 위한 action이다.
+        AprilTag/ArUco 정렬 + odom 거리 기반 정밀 도킹 루틴을 실행하기 위한 action이다.
 
         TrafficManager는 STANDBY_ZONE까지의 교통/점유만 관여한다.
         CHARGING_DOCK은 DB zone pose가 아니라 State Manager 내부 도킹 루틴이

@@ -7,6 +7,7 @@ from just_pick_it_db.services.product_images import resolve_product_image_url
 
 FINAL_DISPLAY_ITEM_STATUSES = ("COMPLETED", "FAILED", "CANCELLED")
 OPEN_DISPLAY_ITEM_STATUSES = ("REQUESTED", "ASSIGNED", "IN_PROGRESS")
+APPENDABLE_DISPLAY_ITEM_STATUSES = ("REQUESTED", "ASSIGNED")
 
 
 def build_display_item_summary(db: Session, display_item: DisplayItem) -> dict:
@@ -60,9 +61,13 @@ def create_display_item_record(
 
 
 def find_open_display_batch_id(db: Session) -> int | None:
+    """새 진열 상품을 추가해도 되는 아직 수행 전 batch id를 찾는다.
+
+    IN_PROGRESS 진열은 이미 로봇 작업이 시작된 흐름이므로 새 display_item을 붙이지 않는다.
+    """
     open_display_item = (
         db.query(DisplayItem)
-        .filter(DisplayItem.status.in_(OPEN_DISPLAY_ITEM_STATUSES))
+        .filter(DisplayItem.status.in_(APPENDABLE_DISPLAY_ITEM_STATUSES))
         .order_by(DisplayItem.display_batch_id.asc(), DisplayItem.display_item_id.asc())
         .first()
     )
@@ -76,6 +81,15 @@ def has_open_display_item(db: Session) -> bool:
     return (
         db.query(DisplayItem)
         .filter(DisplayItem.status.in_(OPEN_DISPLAY_ITEM_STATUSES))
+        .first()
+        is not None
+    )
+
+
+def has_appendable_display_item(db: Session) -> bool:
+    return (
+        db.query(DisplayItem)
+        .filter(DisplayItem.status.in_(APPENDABLE_DISPLAY_ITEM_STATUSES))
         .first()
         is not None
     )
