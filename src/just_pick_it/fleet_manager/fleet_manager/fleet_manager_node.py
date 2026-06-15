@@ -1,3 +1,5 @@
+from threading import Timer
+
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
@@ -185,6 +187,7 @@ class FleetManagerNode(Node):
         reason: str = 'ADMIN',
         task_id: int = 0,
         request_id: str = '',
+        resume_task_ids: list[int] | tuple[int, ...] | None = None,
     ) -> dict:
         """robot EmergencyControl 전파 + TaskManager dispatch 제어."""
         results = self.robot_gateway.set_emergency_stop(
@@ -197,17 +200,38 @@ class FleetManagerNode(Node):
         if enabled:
             self.task_manager.handle_emergency_stop()
         else:
-            self.task_manager.handle_resume()
+            self._schedule_resume_dispatch(resume_task_ids=resume_task_ids)
         return results
+
+    def _schedule_resume_dispatch(
+        self,
+        *,
+        resume_task_ids: list[int] | tuple[int, ...] | None = None,
+    ) -> None:
+        """robot resume service가 먼저 반영된 뒤 PAUSED task를 재전송한다."""
+        task_ids = tuple(resume_task_ids or ())
+
+        def dispatch_after_resume() -> None:
+            self.task_manager.handle_resume(resume_task_ids=task_ids)
+
+        timer = Timer(0.5, dispatch_after_resume)
+        timer.daemon = True
+        timer.start()
 
     def trigger_emergency_stop(self, enabled: bool, *, reason: str = 'ADMIN') -> dict:
         """API 경유 emergency/resume: DB 전이 + robot 전파 + TaskManager 처리."""
         if enabled:
             result = self.fleet_repo.apply_emergency_stop()
+            resume_task_ids: list[int] = []
         else:
             result = self.fleet_repo.apply_resume()
+            resume_task_ids = list(result.get("resumed_task_ids") or [])
 
-        results = self._propagate_emergency(enabled, reason=reason)
+        results = self._propagate_emergency(
+            enabled,
+            reason=reason,
+            resume_task_ids=resume_task_ids,
+        )
         self.get_logger().info(
             f"[FleetManager] API emergency_control={enabled} db={result} 전파: {results}"
         )

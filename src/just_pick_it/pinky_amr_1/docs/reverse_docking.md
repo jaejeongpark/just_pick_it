@@ -1,10 +1,11 @@
 # Reverse Docking System
 
-> ⚠️ **개정 안내 (2026-06-11):** 이 문서는 초기 Phase 0~3(시각서보+파란 정지선) 구상 기록이다.
-> 실차 브링업 결과 라인 검출(원거리 불검출)과 마커 rvec yaw(구조적 노이즈)의 한계로 제어를
-> **"마커 1회 측정 + odom 실행(arc 횡 진입 · odom yaw 유지 · 직진 후진)"** 으로 전면 개정했다.
-> **현행 설계·근본원인·수치 변화 표는 `docs/Reverse_Docking_Design.md` §7 / `docs/Reverse_Docking_Summary.md` 참조.**
-> 아래 Phase 구조는 역사적 기록으로 보존.
+> ⚠️ **개정 안내 (최종 2026-06-15):** 이 문서는 초기 Phase 0~3(시각서보+파란 정지선) 구상 기록이다.
+> 실차에서 라인 불검출·마커 rvec yaw 노이즈로 "마커 1회+odom"(§7)으로 개정했고, 이후
+> **카메라 fx 오류(~1.48배)와 단일 평면 마커 pose-flip** 을 정지 진단툴로 격리해
+> **"두 마커 translation localization + odom 정밀 곡선 이동(6단계)"** 으로 완성했다.
+> **현행 설계·근본원인·단일 vs 두-마커 비교표는 `docs/Reverse_Docking_Design.md` §8 /
+> `docs/Reverse_Docking_Summary.md` ④ 참조.** 아래 Phase 구조는 역사적 기록으로 보존.
 
 ## 개요
 

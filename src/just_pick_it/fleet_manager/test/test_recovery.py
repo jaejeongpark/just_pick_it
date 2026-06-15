@@ -35,6 +35,9 @@ class FakeRecoveryRepo:
     def list_robots(self):
         return []
 
+    def update_task_target_zone(self, task_id, *, target_zone_name):
+        return {"task_id": task_id, "target_zone_name": target_zone_name}
+
 
 # ----------------------------------------------------------------------
 # TrafficManager 복구 헬퍼

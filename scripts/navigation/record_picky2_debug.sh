@@ -5,8 +5,8 @@
 #   - 기본 light profile: Nav2/State/Fleet 분석에 필요한 /picky2 핵심 ROS 토픽 rosbag
 #   - full profile: costmap raw/update까지 포함한 무거운 분석용 rosbag
 #   - /rosout 로그 토픽
-#   - NavigateThroughPoses / FollowPath / MoveCommand action status/feedback
-#   - scan, tf, odom, amcl, cmd_vel, plan, map, transition_event
+#   - NavigateThroughPoses / FollowPath / MoveCommand / DockCommand action status/feedback
+#   - scan, tf, odom, amcl, cmd_vel, cmd_vel_nav, cmd_vel_raw, plan, map, transition_event
 #   - PC에서 실행 중 생성된 ~/.ros/log 파일 일부(Fleet/RViz/recorder 로그)
 #
 # 사용법:
@@ -17,7 +17,8 @@
 #   PICKY2_DEBUG_BASE=./bags              저장 루트 변경
 #   PICKY2_DEBUG_PROFILE=light            light 또는 full
 #   PICKY2_DEBUG_MAX_BAG_DURATION=600     bag 자동 split 시간(초)
-#   PICKY2_DEBUG_RECORD_CAMERA=1          /picky2/camera 계열 토픽도 bag에 포함
+#   PICKY2_DEBUG_RECORD_CAMERA=1          /picky2/camera 계열과 docking/debug_image도 bag에 포함
+#   PICKY2_DEBUG_MCAP_PRESET=none         none은 MCAP 기본 인덱스를 남김, fastwrite는 분석 경고가 날 수 있음
 #   PICKY2_DEBUG_WITH_PC_MONITOR=1        PC CPU/메모리 감시 로그 추가
 #   PICKY2_DEBUG_LIFECYCLE_INTERVAL=0     lifecycle 상태 주기 기록(초, 0이면 비활성)
 #   PICKY2_DEBUG_LIFECYCLE_TIMEOUT=2      lifecycle get 1회 timeout(초)
@@ -38,7 +39,8 @@ BASE_DIR="${PICKY2_DEBUG_BASE:-$WS_ROOT/bags}"
 OUT_DIR="$BASE_DIR/$RUN_NAME"
 DEBUG_PROFILE="${PICKY2_DEBUG_PROFILE:-light}"
 MAX_BAG_DURATION="${PICKY2_DEBUG_MAX_BAG_DURATION:-600}"
-RECORD_CAMERA="${PICKY2_DEBUG_RECORD_CAMERA:-0}"
+RECORD_CAMERA="${PICKY2_DEBUG_RECORD_CAMERA:-1}"
+MCAP_PRESET="${PICKY2_DEBUG_MCAP_PRESET:-none}"
 WITH_PC_MONITOR="${PICKY2_DEBUG_WITH_PC_MONITOR:-0}"
 LIFECYCLE_INTERVAL="${PICKY2_DEBUG_LIFECYCLE_INTERVAL:-0}"
 LIFECYCLE_TIMEOUT="${PICKY2_DEBUG_LIFECYCLE_TIMEOUT:-2}"
@@ -208,6 +210,7 @@ trap cleanup INT TERM EXIT
     echo "ros_domain_id=${ROS_DOMAIN_ID:-unset}"
     echo "debug_profile=$DEBUG_PROFILE"
     echo "record_camera=$RECORD_CAMERA"
+    echo "mcap_preset=$MCAP_PRESET"
     echo "with_pc_monitor=$WITH_PC_MONITOR"
     echo "lifecycle_interval_sec=$LIFECYCLE_INTERVAL"
     echo "lifecycle_timeout_sec=$LIFECYCLE_TIMEOUT"
@@ -219,10 +222,14 @@ trap cleanup INT TERM EXIT
 
 CAMERA_TOPIC_PART=""
 if [[ "$RECORD_CAMERA" == "1" ]]; then
-    CAMERA_TOPIC_PART="camera/.*|.*image.*|"
+    CAMERA_TOPIC_PART="camera/.*|docking/debug_image|.*image.*|"
 fi
 
-LIGHT_TOPIC_REGEX="^(/rosout|/diagnostics|/parameter_events|/picky2/(${CAMERA_TOPIC_PART}amcl_pose|battery/(percent|voltage)|behavior_tree_log|cmd_vel|cmd_vel_nav|goal_pose|is_rotating_to_heading|lookahead_collision_arc|lookahead_point|map|odom|picky_state|plan|received_global_plan|robot_description|scan|tf|tf_static|.*transition_event|local_costmap/(published_footprint|local_costmap/transition_event)|global_costmap/(published_footprint|global_costmap/transition_event)|(move_command|navigate_through_poses|follow_path|compute_path_through_poses|navigate_to_pose|compute_path_to_pose)/_action/(status|feedback)))$"
+if [[ "$MCAP_PRESET" == "fastwrite" ]]; then
+    log "warning: MCAP fastwrite can omit message indexes; analysis may warn about no message index"
+fi
+
+LIGHT_TOPIC_REGEX="^(/rosout|/diagnostics|/parameter_events|/picky2/(${CAMERA_TOPIC_PART}amcl_pose|battery/(percent|voltage)|behavior_tree_log|cmd_vel|cmd_vel_nav|cmd_vel_raw|goal_pose|initialpose|is_rotating_to_heading|lookahead_collision_arc|lookahead_point|map|odom|picky_state|plan|received_global_plan|robot_description|scan|tf|tf_static|.*transition_event|local_costmap/(published_footprint|local_costmap/transition_event)|global_costmap/(published_footprint|global_costmap/transition_event)|(move_command|dock_command|navigate_through_poses|follow_path|compute_path_through_poses|navigate_to_pose|compute_path_to_pose)/_action/(status|feedback)))$"
 FULL_TOPIC_REGEX="^(/rosout|/diagnostics|/parameter_events|/picky2/(${CAMERA_TOPIC_PART}amcl_pose|battery/(percent|voltage)|behavior_tree_log|clicked_point|cmd_vel|cmd_vel_nav|cmd_vel_teleop|controller_selector|curvature_lookahead_point|goal_pose|initialpose|is_rotating_to_heading|joint_states|lookahead_collision_arc|lookahead_point|map|map_updates|odom|particle_cloud|picky_state|plan|plan_smoothed|planner_selector|preempt_teleop|received_global_plan|robot_description|scan|speed_limit|tf|tf_static|waypoints|.*transition_event|local_costmap/(costmap|costmap_updates|costmap_raw|costmap_raw_updates|footprint|published_footprint|obstacle_layer|obstacle_layer_updates|obstacle_layer_raw|obstacle_layer_raw_updates|local_costmap/transition_event)|global_costmap/(costmap|costmap_updates|costmap_raw|costmap_raw_updates|footprint|published_footprint|obstacle_layer|obstacle_layer_updates|obstacle_layer_raw|obstacle_layer_raw_updates|static_layer|static_layer_updates|static_layer_raw|static_layer_raw_updates|global_costmap/transition_event)|[^/]+/_action/(status|feedback)))$"
 
 case "$DEBUG_PROFILE" in
@@ -244,7 +251,7 @@ start_bg \
         --include-hidden-topics \
         --regex "$TOPIC_REGEX" \
         --storage mcap \
-        --storage-preset-profile fastwrite \
+        --storage-preset-profile "$MCAP_PRESET" \
         --max-bag-duration "$MAX_BAG_DURATION" \
         -o "$BAG_DIR"
 
