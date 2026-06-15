@@ -16,6 +16,8 @@
   <!-- picky_cobot.launch.py 가 jetcobot_control_with_camera.launch.py(드라이버+카메라)를
        include 하므로 jetcobot_bringup 에 의존한다 -->
   <exec_depend>jetcobot_bringup</exec_depend>
+  <!-- task_debug_gui 는 tkinter 사용 -->
+  <exec_depend>python3-tk</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

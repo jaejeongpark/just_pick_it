@@ -54,9 +54,12 @@ class CobotStateManager(Node):
         # 두 머신의 ROS_DOMAIN_ID 가 동일해야 한다.
         self.declare_parameter('vision_service_name', '/vision/scan_empty_slot')  # [확정 필요]
         self.declare_parameter('vision_service_timeout_sec', 30.0)
-        self.declare_parameter('cobot_port', '/dev/ttyJETCOBOT')
-        self.declare_parameter('cobot_baudrate', 1_000_000)
         self.declare_parameter('dry_run', False)
+        # 로봇 구동은 jetcobot_joint_subscriber 드라이버 토픽 경유. 드라이버 namespace 와 일치해야 한다.
+        self.declare_parameter('robot_name', 'jetcobot1')
+        # INSPECTION 검출 비교용 detection 토픽(local AI 컴퓨터의 yolo_seg_infer).
+        self.declare_parameter('detection_topic', '/infer/tracked_objects')
+        self.declare_parameter('inspect_min_confidence', 0.5)
         # IBVS+NN 픽 요청/결과 토픽. local 컴퓨터의 ibvs_nn_pick_agent 와 짝을 이룬다.
         self.declare_parameter('pick_timeout_sec', 120.0)
         self.declare_parameter('pick_request_topic', '/ibvs_nn_pick/request')
@@ -107,14 +110,15 @@ class CobotStateManager(Node):
         #     callback_group=cb_group,
         # )
 
-        # 코봇 하드웨어 제어기.
-        # dry_run=True 면 serial 직접 제어를 생략한다(로봇 구동은 jetcobot 드라이버로 일원화).
-        # SORTING 픽은 dry_run 여부와 무관하게 항상 IBVS+NN 으로 수행한다.
+        # 코봇 제어기(토픽 기반). serial 은 jetcobot 드라이버가 점유하므로 제어기는
+        # 드라이버 토픽으로 로봇을 구동한다. dry_run=True 면 발행 없이 시뮬레이션한다.
+        # SORTING 픽은 IBVS+NN(IbvsNnPickClient)으로 위임한다.
         self._controller = CobotController(
             self,
-            port=self.get_parameter('cobot_port').value,
-            baudrate=self.get_parameter('cobot_baudrate').value,
+            robot_name=self.get_parameter('robot_name').value,
             dry_run=self.get_parameter('dry_run').value,
+            detection_topic=self.get_parameter('detection_topic').value,
+            inspect_min_confidence=self.get_parameter('inspect_min_confidence').value,
             pick_timeout_sec=self.get_parameter('pick_timeout_sec').value,
             pick_request_topic=self.get_parameter('pick_request_topic').value,
             pick_result_topic=self.get_parameter('pick_result_topic').value,
@@ -216,60 +220,75 @@ class CobotStateManager(Node):
         goal_handle.publish_feedback(feedback)
 
         # ── 작업 단계별 실행 ─────────────────────────────────────────
-        phases       = TASK_PHASE_STATES[task_type]
-        total_phases = len(phases)
-        detected_qty = 0
+        phases = TASK_PHASE_STATES[task_type]
+        # SORTING_AND_LOAD 는 그리퍼 1개 제약상 '집기1 -> 적재1' 단위를 quantity 회
+        # 번갈아 반복한다(집은 순서대로 picky 슬롯에 적재). 그 외 task 는 1회.
+        units = max(1, int(request.quantity or 1)) if task_type == 'SORTING_AND_LOAD' else 1
+        total_steps    = len(phases) * units
+        step           = 0
+        processed_qty  = 0
+        last_phase_qty = 0
 
-        for idx, phase in enumerate(phases):
-            if goal_handle.is_cancel_requested:
-                self._set_state('STANDBY')
-                goal_handle.canceled()
-                return ExecuteTask.Result(
-                    success=False,
-                    status='CANCELLED',
-                    message='task cancelled',
-                    processed_quantity=detected_qty,
-                    stock_delta=0,
-                )
+        for unit in range(units):
+            for phase in phases:
+                if goal_handle.is_cancel_requested:
+                    self._set_state('STANDBY')
+                    goal_handle.canceled()
+                    return ExecuteTask.Result(
+                        success=False,
+                        status='CANCELLED',
+                        message='task cancelled',
+                        processed_quantity=processed_qty,
+                        stock_delta=0,
+                    )
 
-            with self._lock:
-                if self._emergency_stop:
+                with self._lock:
+                    if self._emergency_stop:
+                        self._set_state('SAFETY_STOPPED')
+                        goal_handle.abort()
+                        return ExecuteTask.Result(
+                            success=False,
+                            status='FAILED',
+                            message='emergency stop triggered',
+                            processed_quantity=processed_qty,
+                            stock_delta=0,
+                        )
+
+                self._set_state(phase)
+                feedback.state              = phase
+                feedback.message            = f'{phase} in progress ({unit + 1}/{units})'
+                feedback.progress           = float(step) / total_steps
+                feedback.processed_quantity = processed_qty
+                goal_handle.publish_feedback(feedback)
+
+                success, last_phase_qty = self._run_phase(task_type, phase, request)
+
+                if not success:
                     self._set_state('SAFETY_STOPPED')
                     goal_handle.abort()
                     return ExecuteTask.Result(
                         success=False,
                         status='FAILED',
-                        message='emergency stop triggered',
-                        processed_quantity=detected_qty,
+                        message=f'{phase} failed',
+                        processed_quantity=processed_qty,
                         stock_delta=0,
                     )
 
-            self._set_state(phase)
-            feedback.state              = phase
-            feedback.message            = f'{phase} in progress'
-            feedback.progress           = float(idx) / total_phases
-            feedback.processed_quantity = detected_qty
-            goal_handle.publish_feedback(feedback)
+                step += 1
+                # 단계 완료 feedback — 다음 단계 진입 전 task manager에 성공 알림
+                feedback.state              = phase
+                feedback.message            = f'{phase} complete ({unit + 1}/{units})'
+                feedback.progress           = float(step) / total_steps
+                feedback.processed_quantity = processed_qty
+                goal_handle.publish_feedback(feedback)
 
-            success, detected_qty = self._run_phase(task_type, phase, request)
+            # 한 단위(집기+적재) 완료 시 처리 수량 +1.
+            if task_type == 'SORTING_AND_LOAD':
+                processed_qty += last_phase_qty
 
-            if not success:
-                self._set_state('SAFETY_STOPPED')
-                goal_handle.abort()
-                return ExecuteTask.Result(
-                    success=False,
-                    status='FAILED',
-                    message=f'{phase} failed',
-                    processed_quantity=detected_qty,
-                    stock_delta=0,
-                )
-
-            # 단계 완료 feedback — 다음 단계 진입 전 task manager에 성공 알림
-            feedback.state              = phase
-            feedback.message            = f'{phase} complete'
-            feedback.progress           = float(idx + 1) / total_phases
-            feedback.processed_quantity = detected_qty
-            goal_handle.publish_feedback(feedback)
+        # 비 SORTING_AND_LOAD 는 마지막 phase 가 반환한 수량을 결과로 쓴다.
+        if task_type != 'SORTING_AND_LOAD':
+            processed_qty = last_phase_qty
 
         # ── STOWING_ARM feedback 발행 (Fleet 다음 PICKY 경로 선계획 트리거) ──
         self._set_state('STOWING_ARM')
@@ -287,7 +306,7 @@ class CobotStateManager(Node):
                 success=False,
                 status='FAILED',
                 message='arm stowing failed',
-                processed_quantity=detected_qty,
+                processed_quantity=processed_qty,
                 stock_delta=0,
             )
 
@@ -298,7 +317,7 @@ class CobotStateManager(Node):
             success=True,
             status='SUCCESS',
             message='ok',
-            processed_quantity=detected_qty,
+            processed_quantity=processed_qty,
             stock_delta=0,  # [구현 필요] 실제 재고 반영 수량 반환
         )
 
@@ -315,41 +334,26 @@ class CobotStateManager(Node):
         반환값: (success, detected_quantity)
         """
         if phase == 'SORTING':
-            # IBVS+NN 으로 request.product_name 한 종류를 quantity 개 집어 올린다.
-            return self._controller.run_sorting(request.product_name, request.quantity)
+            # IBVS+NN 으로 request.product_name 1개를 집어 올린다(quantity 반복은 _execute_task).
+            return self._controller.run_sorting(request.product_name)
         elif phase == 'LOADING':
-            # 집은 상품을 picky 적재 위치로 내려놓는다(place shell).
-            return self._controller.run_loading(request.product_name, request.target_zone_name)
+            # 집은 상품을 picky 의 다음 빈 슬롯에 적재(집는 순서 = 슬롯 순서).
+            return self._controller.run_loading(
+                request.product_name, request.order_id, request.target_zone_name
+            )
 
         elif phase == 'INSPECTING':
-            # [구현 필요] Vision Server에서 inspect_trajectory 수신 후 교체
-            inspect_trajectory: list[list[float]] = []
-            return self._controller.run_inspecting(inspect_trajectory)
+            # 4 SLOT 관측 자세에서 검출을 적재 기록과 비교(불일치면 abort).
+            return self._controller.run_inspecting()
 
         elif phase == 'UNLOADING':
-            # [구현 필요] Vision Server에서 pick/place trajectory 수신 후 교체
-            pick_trajectory:  list[list[float]] = []
-            place_trajectory: list[list[float]] = []
-            return self._controller.run_unloading(pick_trajectory, place_trajectory)
-            # [구현 필요] Vision/학습 서버에서 받은 실제 grasp_trajectory로 교체
-            return self._controller.run_sorting([])
-
-            # req = VisionScanService.Request()
-            # req.task_id          = request.task_id
-            # req.target_zone_name = request.target_zone_name
-            #
-            # success, response = self._call_vision_service(req)
-            # if not success:
-            #     return False, 0
-            #
-            # self._scan_result = response
-            return True, 0
+            # 적재된 모든 item 을 PICKUP SLOT 으로 이송 drop.
+            return self._controller.run_unloading()
 
         elif phase == 'PLACING':
-            # [구현 필요] Vision Server에서 pick/place trajectory 수신 후 교체
-            pick_trajectory:  list[list[float]] = []
-            place_trajectory: list[list[float]] = []
-            success, qty = self._controller.run_placing(pick_trajectory, place_trajectory)
+            success, qty = self._controller.run_placing(
+                request.product_name, request.target_zone_name
+            )
             if success:
                 self._scan_result = None
             return success, qty

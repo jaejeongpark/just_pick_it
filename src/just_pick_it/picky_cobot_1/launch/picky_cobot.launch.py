@@ -49,6 +49,8 @@ def generate_launch_description():
     camera_dest_ip = LaunchConfiguration('camera_dest_ip')
     camera_dest_port = LaunchConfiguration('camera_dest_port')
     camera_dest_port_2 = LaunchConfiguration('camera_dest_port_2')
+    dry_run = LaunchConfiguration('dry_run')
+    detection_topic = LaunchConfiguration('detection_topic')
     pick_timeout_sec = LaunchConfiguration('pick_timeout_sec')
     pick_request_topic = LaunchConfiguration('pick_request_topic')
     pick_result_topic = LaunchConfiguration('pick_result_topic')
@@ -65,6 +67,10 @@ def generate_launch_description():
         DeclareLaunchArgument('camera_dest_ip', default_value='192.168.1.70'),
         DeclareLaunchArgument('camera_dest_port', default_value='5003'),
         DeclareLaunchArgument('camera_dest_port_2', default_value='5004'),
+        # true 면 토픽 발행 없이 시뮬레이션. 실제 로봇 구동은 false.
+        DeclareLaunchArgument('dry_run', default_value='false'),
+        # INSPECTION 검출 비교용 토픽(local AI 컴퓨터 yolo_seg_infer).
+        DeclareLaunchArgument('detection_topic', default_value='/infer/tracked_objects'),
         DeclareLaunchArgument('pick_timeout_sec', default_value='120.0'),
         DeclareLaunchArgument('pick_request_topic', default_value='/ibvs_nn_pick/request'),
         DeclareLaunchArgument('pick_result_topic', default_value='/ibvs_nn_pick/result'),
@@ -89,7 +95,7 @@ def generate_launch_description():
         }.items(),
     )
 
-    # ExecuteTask 액션 서버. serial 은 드라이버가 점유하므로 dry_run=true.
+    # ExecuteTask 액션 서버. 로봇 구동은 드라이버 토픽 경유(serial 은 드라이버가 점유).
     cobot_state_manager = Node(
         package='picky_cobot_1',
         executable='cobot_state_manager',
@@ -97,7 +103,9 @@ def generate_launch_description():
         output='screen',
         parameters=[
             {'robot_id': cobot_robot_id},
-            {'dry_run': True},
+            {'robot_name': robot_name},
+            {'dry_run': ParameterValue(dry_run, value_type=bool)},
+            {'detection_topic': detection_topic},
             {'pick_timeout_sec': ParameterValue(pick_timeout_sec, value_type=float)},
             {'pick_request_topic': pick_request_topic},
             {'pick_result_topic': pick_result_topic},

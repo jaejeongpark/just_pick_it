@@ -1,234 +1,472 @@
 #!/usr/bin/env python3
+import threading
 import time
 
-from pymycobot.mycobot280 import MyCobot280
+from rclpy.callback_groups import ReentrantCallbackGroup
+from std_msgs.msg import Empty, Float64MultiArray
+
+from just_pick_it_interfaces.msg import TrackedObjectArray
 
 from .ibvs_nn_pick import IbvsNnPickClient
 
 
-GRIPPER_OPEN   = 100
-GRIPPER_CLOSED = 0
-GRIPPER_SPEED  = 100
-GRIPPER_WAIT_SEC = 2.0  # 그리퍼 동작 완료 대기 시간
+# 드라이버(jetcobot_joint_subscriber) target_pose command_type.
+CMD_JOINT = 0
+CMD_COORD = 1
 
-DEFAULT_SPEED        = 20   # 관절 이동 속도 (1~100)
-STREAM_SPEED         = 50   # 센터링 실시간 추종 속도
-MOTION_TIMEOUT_SEC   = 15.0
-POLL_INTERVAL_SEC    = 0.05
+GRIPPER_OPEN      = 100
+GRIPPER_CLOSED    = 0
+GRIPPER_LOAD_OPEN = 70   # 적재 시 부분 개방값(완전 개방 100 대신 살짝만 열어 충돌/이탈 방지)
+GRIPPER_SPEED     = 100
+GRIPPER_WAIT_SEC  = 2.0  # 그리퍼 동작 완료 대기 시간
+
+DEFAULT_SPEED         = 20    # 관절 이동 속도 (1~100)
+MOTION_TIMEOUT_SEC    = 20.0
+STATUS_POLL_INTERVAL_SEC = 0.3   # 모션 완료 폴링 주기(드라이버 serial read 부하 고려)
+JOINT_CONVERGE_TOL_DEG   = 3.0   # 관절 수렴 판정 허용오차(deg)
+
+# 드라이버 status(Float64MultiArray) 레이아웃:
+#   [tool(6), world(6), reference_frame, end_type, angles(6), coords(6), gripper_value]
+STATUS_ANGLES_SLICE = slice(14, 20)
+STATUS_COORDS_SLICE = slice(20, 26)
 
 # 단위: degree,  순서: [J1, J2, J3, J4, J5, J6]
 _HOME = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-# 상품별 place 좌표(고정 매핑). 단위: mm/deg, 순서: [x, y, z, rx, ry, rz].
-# [구현 필요] 실제 picky 적재 위치에 맞춰 좌표 보정. 현재는 shell 더미값.
-PLACE_COORDS = {
-    'fanta':       [180.0, -60.0, 200.0, -90.0, 0.0, 0.0],
-    'water':       [180.0, -20.0, 200.0, -90.0, 0.0, 0.0],
-    'watermelon':  [180.0,  20.0, 200.0, -90.0, 0.0, 0.0],
-    'bread':       [180.0,  60.0, 200.0, -90.0, 0.0, 0.0],
-    'cream_bread': [220.0, -40.0, 200.0, -90.0, 0.0, 0.0],
-    'choco_pie':   [220.0,  40.0, 200.0, -90.0, 0.0, 0.0],
-}
+# 4 SLOT 이 모두 보이는 INSPECTION 관측 자세(관절각, degree).
+INSPECTION_POSE = [20.39, -7.29, -28.82, -50.44, 5.36, -110.65]
+
+# picky 적재 슬롯별 2단계 접근 관절각(pre-load 자세). 인덱스 = 적재 순서(슬롯 번호).
+# place 위치는 상품 종류가 아니라 '집는 순서'로 결정한다. 첫 번째 적재 item은 slot 0,
+# 두 번째는 slot 1 ... 에 적재한다.
+# 협소 공간 충돌 방지를 위해 각 슬롯은 2단계로 접근한다.
+#   approach (1단계): 슬롯 진입 전 안전 경유점.
+#   place    (2단계): 실제 내려놓는 슬롯 위치.
+# 적재 동작은 approach -> place -> grip 부분개방(70) -> 다시 approach 순으로 빠져나온다.
+# 슬롯 4개 = picky 바구니 용량(공간 협소). 단위: degree, [J1..J6].
+LOAD_SLOT_ANGLES = [
+    {  # slot 0 (item 1)
+        'approach': [7.38, -33.83, -49.92, -7.38, 3.60, -125.59],
+        'place':    [6.41, -37.79, -65.47, 14.32, 4.30, -124.45],
+    },
+    {  # slot 1 (item 2)
+        'approach': [11.33, -14.15, -64.59, -14.50, 4.39, -121.46],
+        'place':    [9.93, -15.02, -96.32, 18.01, 6.15, -120.76],
+    },
+    {  # slot 2 (item 3)
+        'approach': [26.71, -36.47, -44.20, -11.77, 3.60, -108.10],
+        'place':    [24.96, -39.11, -60.55, 7.73, 4.39, -111.35],
+    },
+    {  # slot 3 (item 4)
+        'approach': [29.61, -6.76, -71.98, -13.35, 4.57, -101.25],
+        'place':    [29.53, -15.02, -98.70, 21.97, 4.04, -102.56],
+    },
+]
+
+# 상품 수령장소(PICKUP SLOT)는 picky 정차 오차로 위치/자세가 매번 조금씩 틀어지므로
+# 고정 관절각으로 가지 않는다(약 15x10cm 공간이라 픽보다 수렴은 쉬울 것으로 기대).
+# 드롭 파이프라인(perception 측 추후 구현):
+#   1. edge detection 으로 놓을 영역을 찾고, CSRT tracker 로 frame 을 추적해 일부 edge 가
+#      가려져도 수렴을 유지하면서 IBVS 로 그 영역에 접근한다.
+#   2. 수렴(ibvs_done) 후 drop 전용 NN(pick 과 별도 가중치)으로 최종 자세를 보정한다.
+#   3. gripper predictor 가 '여는 시점'을 예측(pick 의 닫는 예측과 반대)해 gripper open 으로
+#      물건을 내려놓는다. drop 완료 신호 = gripper open.
+# 완성되면 pick 과 동일하게 ibvs_nn_pick_agent 에 'drop' 요청으로 연동한다(agent 가 drop
+# launch 를 실행하고 set_gripper open 관측을 완료로 보고). 그 전까지 _unload_slot 의
+# 드롭 단계는 미연동 상태다.
 
 
 class CobotController:
     """
-    MyCobot280 하드웨어 직접 제어 래퍼.
+    Cobot 동작 제어기(토픽 기반).
 
-    cobot_state_machine.py 에서 생성하며, 상태 전환 없이 순수 동작만 담당한다.
-    각 phase 메서드는 (success: bool, detected_quantity: int) 를 반환한다.
+    cobot_state_machine.py 에서 생성한다. serial 은 jetcobot_joint_subscriber 드라이버가
+    단독 점유하므로, 이 제어기는 드라이버 토픽으로 로봇을 구동한다.
+      발행: /{robot}/target_pose  (관절/좌표 명령), /{robot}/set_gripper, /{robot}/request_status
+      구독: /{robot}/status       (현재 관절각으로 모션 완료 판정), detection_topic (INSPECTION)
+    SORTING 픽은 IBVS+NN(IbvsNnPickClient) 에 위임한다.
+    각 phase 메서드는 (success: bool, quantity: int) 를 반환한다.
+    dry_run=True 이면 토픽을 발행하지 않고 시뮬레이션(성공 가정)한다.
     """
 
     def __init__(
         self,
         node,
-        port: str = '/dev/ttyJETCOBOT',
-        baudrate: int = 1_000_000,
+        robot_name: str = 'jetcobot1',
         dry_run: bool = False,
+        default_speed: int = DEFAULT_SPEED,
+        motion_timeout_sec: float = MOTION_TIMEOUT_SEC,
         pick_timeout_sec: float = 120.0,
         pick_request_topic: str = '/ibvs_nn_pick/request',
         pick_result_topic: str = '/ibvs_nn_pick/result',
+        detection_topic: str = '/infer/tracked_objects',
+        inspect_min_confidence: float = 0.5,
+        inspect_settle_sec: float = 2.0,
     ) -> None:
-        self._node    = node
-        self._dry_run = dry_run
+        self._node           = node
+        self._robot_name     = robot_name
+        self._dry_run        = dry_run
+        self._default_speed  = int(default_speed)
+        self._motion_timeout = float(motion_timeout_sec)
+        self._inspect_min_confidence = float(inspect_min_confidence)
+        self._inspect_settle_sec     = float(inspect_settle_sec)
 
         # SORTING 픽은 local AI 컴퓨터의 ibvs_nn_pick_agent 에 토픽으로 요청한다.
-        # agent 가 IBVS+NN 을 띄우면 cobot 호스트의 드라이버가 제어 토픽을 snatch 해 구동한다.
-        # serial 직접 제어(dry_run 여부)와 무관하게 동작한다.
         self._pick = IbvsNnPickClient(
             node,
             request_topic=pick_request_topic,
             result_topic=pick_result_topic,
             pick_timeout_sec=pick_timeout_sec,
         )
-        # 어떤 상품을 어디(좌표/zone)에 놓았는지 기록. 차후 picky 에서 재집기용.
+
+        # 슬롯 점유 상태. 인덱스 = 슬롯 번호, 값 = 적재된 상품명(빈 슬롯은 None).
+        self._slot_occupant: list[str | None] = [None] * len(LOAD_SLOT_ANGLES)
+        # 적재 이력(순서대로). {'slot', 'product_name', 'order_id'}.
         self._placements: list[dict] = []
 
-        if dry_run:
-            self._mc = None
-            self._log('CobotController dry_run 모드 — serial 직접 제어 생략(픽은 IBVS+NN)')
-            return
-        self._mc = MyCobot280(port, baudrate, thread_lock=True)
-        time.sleep(0.4)
-        self._mc.set_fresh_mode(1)
-        time.sleep(0.4)
-        self._log(f'CobotController 초기화 완료 — port={port}')
+        ns = f'/{robot_name}'
+        self._target_pub  = node.create_publisher(Float64MultiArray, f'{ns}/target_pose', 1)
+        self._gripper_pub = node.create_publisher(Float64MultiArray, f'{ns}/set_gripper', 10)
+        self._req_status_pub = node.create_publisher(Empty, f'{ns}/request_status', 10)
+
+        cb_group = ReentrantCallbackGroup()
+        self._status_lock = threading.Lock()
+        self._latest_angles: list[float] | None = None
+        self._latest_coords: list[float] | None = None
+        node.create_subscription(
+            Float64MultiArray, f'{ns}/status', self._status_callback, 10,
+            callback_group=cb_group,
+        )
+
+        self._detect_lock = threading.Lock()
+        self._latest_detection: TrackedObjectArray | None = None
+        node.create_subscription(
+            TrackedObjectArray, detection_topic, self._detection_callback, 10,
+            callback_group=cb_group,
+        )
+
+        mode = 'dry_run(시뮬레이션)' if dry_run else f'토픽 구동({ns})'
+        self._log(f'CobotController 초기화 — {mode}')
 
     # ── 공개 phase 메서드 ────────────────────────────────────────────────
 
-    def run_sorting(self, product_name: str, quantity: int = 1) -> tuple[bool, int]:
-        """IBVS+NN 픽으로 지정 상품을 quantity 개 집어 올린다.
+    def run_sorting(self, product_name: str) -> tuple[bool, int]:
+        """IBVS+NN 픽으로 지정 상품 1개를 집어 올린다.
 
-        한 정차 위치에는 한 종류 상품만 진열되어 있으므로 product_name 한 종류를
-        quantity 번 반복해 집는다. 각 픽은 nn_inference.launch.py 1회 실행에 대응한다.
-        반환값: (success, 집어 올린 개수)
+        그리퍼가 1개라 한 번에 1개만 집을 수 있다. quantity 반복은 state machine 이
+        '집기1 -> 적재1' 단위로 처리하므로 여기서는 1개만 집는다.
+        반환값: (success, 집은 개수 0/1)
         """
-        self._log(f'SORTING 시작 — product={product_name}, quantity={quantity}')
-        target_qty = max(1, int(quantity or 1))
-        picked = 0
-        for i in range(target_qty):
-            self._log(f'SORTING {i + 1}/{target_qty} 픽 시도')
-            if not self._pick.pick(product_name):
-                self._log_err(f'{i + 1}번째 픽 실패')
-                return False, picked
-            picked += 1
-        return True, picked
+        self._log(f'SORTING 시작 — product={product_name}')
+        if not self._pick.pick(product_name):
+            return False, 0
+        return True, 1
 
     def run_loading(
         self,
         product_name: str,
+        order_id: int = 0,
         target_zone_name: str = '',
     ) -> tuple[bool, int]:
-        """집어 올린 상품을 picky 적재 위치(place)로 내려놓는다(shell)."""
-        return self.place_product(product_name, target_zone_name)
+        """집어 올린 상품 1개를 picky 의 다음 빈 적재 슬롯에 내려놓는다."""
+        return self.load_to_next_slot(product_name, order_id)
 
-    # ── place(내려놓기) shell ─────────────────────────────────────────────
+    def run_inspecting(self) -> tuple[bool, int]:
+        """4 SLOT 이 모두 보이는 자세에서 한 번에 검출해 적재 항목/수량을 검증한다.
 
-    def place_product(self, product_name: str, target_zone_name: str = '') -> tuple[bool, int]:
-        """상품을 고정 place 좌표로 내려놓고, 무엇을 어디 놓았는지 기록한다.
-
-        실제 place 동작은 PLACE_COORDS 의 고정 좌표로 send_coords 하는 shell 이다.
-        '어떤 상품을 어디에 놓았는지' 는 차후 picky 에서 재집기/재진열할 때 쓰도록
-        self._placements 에 저장한다.
+        YOLO-seg 검출(detection_topic)을 cobot 자신의 적재 기록(_slot_occupant)과 비교한다.
+        일치하면 (True, 검출 총개수), 불일치면 (False, 검출 총개수)를 반환한다.
         """
-        self._log(f'PLACE 시작 — product={product_name}, zone={target_zone_name}')
-        coords = PLACE_COORDS.get(product_name)
-        if coords is None:
-            self._log_err(f'place 좌표 미정의 상품: {product_name}')
+        expected = self._expected_counts()
+        self._log(f'INSPECTING 시작 — 관측 자세 이동, 기대 적재={expected}')
+
+        if not self.move_to_angles(INSPECTION_POSE):
+            self._log_err('INSPECTION 관측 자세 이동 실패')
             return False, 0
 
-        # 어디에 놓았는지 먼저 기록(좌표 매핑은 cobot 내부 보관).
-        self._placements.append({
-            'product_name': product_name,
-            'coords': list(coords),
-            'zone': target_zone_name,
-        })
+        detected = self._observe_counts()
+        total = sum(detected.values())
 
+        if detected == expected:
+            self._log(f'INSPECTION 일치 — detected={detected}')
+            return True, total
+
+        self._log_err(f'INSPECTION 불일치 — expected={expected}, detected={detected}')
+        return False, total
+
+    def run_unloading(self) -> tuple[bool, int]:
+        """적재된 모든 item(최대 4개)을 순서대로 PICKUP SLOT 으로 옮겨 drop 한다.
+
+        각 슬롯에서 2단계 접근으로 재파지 -> PICKUP 으로 이송 -> drop 한다.
+        반환값: (success, drop 한 개수)
+        """
+        self._log('UNLOADING 시작 — 적재 item 을 PICKUP SLOT 으로 이송')
+        dropped = 0
+        for slot in range(len(LOAD_SLOT_ANGLES)):
+            product = self._slot_occupant[slot]
+            if product is None:
+                continue
+            if not self._unload_slot(slot, product):
+                self._log_err(f'slot {slot} unloading 실패')
+                return False, dropped
+            self._slot_occupant[slot] = None
+            dropped += 1
+        self._log(f'UNLOADING 완료 — drop {dropped}개')
+        return True, dropped
+
+    def run_placing(self, product_name: str = '', target_zone_name: str = '') -> tuple[bool, int]:
+        """진열(DISPLAY_PLACE) 동작. [구현 필요] 실제 진열 궤적/위치 연동."""
+        self._log(f'PLACING 시작 — product={product_name}, zone={target_zone_name}')
         if self._dry_run:
-            self._log(f'(dry_run) place 좌표 기록만 — {product_name} -> {coords}')
             return True, 1
-
-        # [구현 필요] 집은 물체를 들고 이 좌표로 이동 후 내려놓는 실제 동작 보강.
-        if not self.move_to_coords(coords):
-            return False, 0
-        if not self.open_gripper():
-            return False, 0
+        # [구현 필요] 진열 위치로 이동 후 내려놓는 실제 동작.
         return True, 1
-
-    @property
-    def placements(self) -> list[dict]:
-        """차후 재집기를 위한 place 기록(상품명/좌표/zone)."""
-        return list(self._placements)
-
-    def run_inspecting(self, inspect_trajectory: list[list[float]]) -> tuple[bool, int]:
-        self._log('INSPECTING 시작')
-        if self._dry_run:
-            return True, 0  # [구현 필요] inspect_trajectory 기반 실제 검사 동작으로 교체
-        ok = self.execute_grasp_trajectory(inspect_trajectory)
-        if not ok:
-            return False, 0
-        time.sleep(1.0)
-        return True, 0
-
-    def run_unloading(
-        self,
-        pick_trajectory: list[list[float]],
-        place_trajectory: list[list[float]],
-    ) -> tuple[bool, int]:
-        self._log('UNLOADING 시작')
-        if self._dry_run:
-            return True, 1  # [구현 필요] pick_trajectory/place_trajectory 기반 실제 하역 동작으로 교체
-        self.open_gripper()
-        ok = self._execute_pick_and_place(pick_trajectory, place_trajectory)
-        return ok, (1 if ok else 0)
-
-    def run_placing(
-        self,
-        pick_trajectory: list[list[float]],
-        place_trajectory: list[list[float]],
-    ) -> tuple[bool, int]:
-        self._log('PLACING 시작')
-        if self._dry_run:
-            return True, 1  # [구현 필요] pick_trajectory/place_trajectory 기반 실제 진열 동작으로 교체
-        self.open_gripper()
-        ok = self._execute_pick_and_place(pick_trajectory, place_trajectory)
-        return ok, (1 if ok else 0)
 
     def stow_arm(self) -> bool:
         """팔을 안전 복귀 자세(home)로 이동한다."""
         self._log('STOWING_ARM 시작')
-        if self._dry_run:
-            return True  # [구현 필요] _HOME 자세로 실제 복귀 동작으로 교체
-        ok = self.move_to_angles(_HOME, speed=DEFAULT_SPEED)
+        ok = self.move_to_angles(_HOME)
         self.open_gripper()
         return ok
 
-    # ── 서버 스트리밍 제어 메서드 ────────────────────────────────────────
+    # ── picky 적재 슬롯 관리 ──────────────────────────────────────────────
 
-    def stream_joint_angles(self, angles: list[float]) -> bool:
-        """서버 스트리밍 관절각을 즉시 반영 (non-blocking). 센터링 추종 루프에서 사용."""
-        try:
-            self._mc.send_angles(angles, STREAM_SPEED)
+    def load_to_next_slot(self, product_name: str, order_id: int = 0) -> tuple[bool, int]:
+        """집은 상품 1개를 다음 빈 슬롯의 2단계 접근으로 내려놓고 적재 순서를 기록한다.
+
+        place 위치는 상품 종류가 아니라 '집는 순서'로 정해진다. 협소 공간 충돌 방지를 위해
+        approach(1단계) -> place(2단계) -> grip 부분개방(70) -> 다시 approach 로 빠져나온다.
+        어떤 상품이 어느 슬롯에 들어갔는지 기억해 두어, 차후 inspection/unloading 에서 쓴다.
+        """
+        slot = self._next_free_slot()
+        if slot is None:
+            self._log_err('빈 적재 슬롯 없음 — picky 바구니가 가득 참')
+            return False, 0
+
+        approach = LOAD_SLOT_ANGLES[slot]['approach']
+        place    = LOAD_SLOT_ANGLES[slot]['place']
+        self._log(f'LOADING — product={product_name}, slot={slot}, order_id={order_id}')
+
+        if not self._dry_run:
+            # 1단계 approach 를 거쳐 2단계 place 로 들어간다(충돌 방지).
+            if not self.move_to_angles(approach):
+                return False, 0
+            if not self.move_to_angles(place):
+                return False, 0
+            # 완전 개방(100) 대신 70 으로만 살짝 열어 내려놓는다.
+            if not self._set_gripper(GRIPPER_LOAD_OPEN):
+                return False, 0
+            # 항상 1단계 approach 위치로 빠져나와 다음 작업을 준비한다.
+            if not self.move_to_angles(approach):
+                return False, 0
+        else:
+            self._log(f'(dry_run) slot {slot} 적재 기록만 — {product_name}')
+
+        # 적재 성공 후 슬롯 점유 + 순서 기록.
+        self._slot_occupant[slot] = product_name
+        self._placements.append({
+            'slot': slot,
+            'product_name': product_name,
+            'order_id': int(order_id or 0),
+        })
+        return True, 1
+
+    def slot_angles_for_product(self, product_name: str) -> dict | None:
+        """해당 상품이 적재된 슬롯의 2단계 접근 관절각을 반환한다(가장 먼저 적재된 것).
+
+        반환: {'approach': [...], 'place': [...]} (없으면 None).
+        차후 inspection/unloading/place 에서 1단계 approach 를 거쳐 2단계 place 로
+        접근할 때 쓴다.
+        """
+        slot = self._slot_for_product(product_name)
+        return LOAD_SLOT_ANGLES[slot] if slot is not None else None
+
+    def release_slot_for_product(self, product_name: str) -> int | None:
+        """해당 상품이 적재된 슬롯 하나를 비운다(unloading 등으로 꺼낸 뒤 호출).
+
+        비운 슬롯 번호를 반환한다. 해당 상품이 없으면 None.
+        """
+        slot = self._slot_for_product(product_name)
+        if slot is None:
+            self._log_err(f'적재된 슬롯 없음 — product={product_name}')
+            return None
+        self._slot_occupant[slot] = None
+        self._log(f'슬롯 {slot} 비움 — product={product_name}')
+        return slot
+
+    def _next_free_slot(self) -> int | None:
+        for i, occupant in enumerate(self._slot_occupant):
+            if occupant is None:
+                return i
+        return None
+
+    def _slot_for_product(self, product_name: str) -> int | None:
+        for i, occupant in enumerate(self._slot_occupant):
+            if occupant == product_name:
+                return i
+        return None
+
+    @property
+    def placements(self) -> list[dict]:
+        """적재 이력(순서대로): {'slot', 'product_name', 'order_id'}."""
+        return list(self._placements)
+
+    @property
+    def current_loadout(self) -> dict[int, str]:
+        """현재 슬롯별 적재 상품(점유된 슬롯만): {slot: product_name}."""
+        return {i: occ for i, occ in enumerate(self._slot_occupant) if occ is not None}
+
+    # ── INSPECTION 검출 비교 ─────────────────────────────────────────────
+
+    def _expected_counts(self) -> dict[str, int]:
+        """적재 기록(_slot_occupant) 기준 상품별 기대 수량."""
+        counts: dict[str, int] = {}
+        for occupant in self._slot_occupant:
+            if occupant:
+                counts[occupant] = counts.get(occupant, 0) + 1
+        return counts
+
+    def _observe_counts(self) -> dict[str, int]:
+        """관측 자세에서 YOLO-seg 검출을 상품별 수량으로 집계한다."""
+        if self._dry_run:
+            # 시뮬레이션: 적재 기록과 동일하게 검출됐다고 가정.
+            return self._expected_counts()
+
+        time.sleep(self._inspect_settle_sec)  # 검출 안정화 대기
+        with self._detect_lock:
+            msg = self._latest_detection
+
+        counts: dict[str, int] = {}
+        if msg is None:
+            self._log_err('INSPECTION 검출 메시지 없음(detection_topic 확인)')
+            return counts
+
+        seen: set[int] = set()
+        for obj in msg.objects:
+            if obj.confidence < self._inspect_min_confidence:
+                continue
+            if obj.track_id in seen:  # 같은 객체 중복 제거
+                continue
+            seen.add(obj.track_id)
+            counts[obj.class_label] = counts.get(obj.class_label, 0) + 1
+        return counts
+
+    # ── UNLOADING 슬롯별 이송 ────────────────────────────────────────────
+
+    def _unload_slot(self, slot: int, product_name: str) -> bool:
+        """슬롯에서 재파지(고정 2단계) 후 IBVS 로 pickup-space 에 접근해 release 한다."""
+        approach = LOAD_SLOT_ANGLES[slot]['approach']
+        place    = LOAD_SLOT_ANGLES[slot]['place']
+        self._log(f'UNLOADING slot {slot} ({product_name}) -> PICKUP(IBVS)')
+
+        if self._dry_run:
+            self._log(f'(dry_run) slot {slot} {product_name} 재파지 + PICKUP IBVS 드롭 시뮬레이션')
             return True
-        except Exception as e:
-            self._log_err(f'스트리밍 관절 제어 실패: {e}')
+
+        # 1) 슬롯에서 재파지(슬롯은 picky 에 고정 -> 정차 오차 무관, 고정 2단계 접근).
+        if not self.move_to_angles(approach):
             return False
-
-    def execute_grasp_trajectory(self, trajectory: list[list[float]]) -> bool:
-        """학습 알고리즘 기반 파지 궤적을 순차 실행 (blocking). 각 waypoint는 6축 관절각."""
-        self._log(f'파지 궤적 실행 — {len(trajectory)}개 waypoint')
-        for i, angles in enumerate(trajectory):
-            if not self.move_to_angles(angles):
-                self._log_err(f'파지 궤적 {i}번 waypoint 실패')
-                return False
-        return True
-
-    # ── 저수준 이동 메서드 ───────────────────────────────────────────────
-
-    def move_to_angles(self, angles: list[float], speed: int = DEFAULT_SPEED) -> bool:
-        """관절 각도(degree)로 이동하고 완료될 때까지 블로킹."""
-        try:
-            self._mc.send_angles(angles, speed)
-        except Exception as e:
-            self._log_err(f'send_angles 실패: {e}')
+        if not self.move_to_angles(place):
             return False
-        return self._wait_for_stop()
+        if not self.close_gripper():
+            return False
+        if not self.move_to_angles(approach):
+            return False
+        # 2) pickup-space 로 IBVS 접근 후 release(고정 자세 금지 — picky 정차 오차 보정).
+        return self._drop_at_pickup_via_ibvs(product_name)
+
+    def _drop_at_pickup_via_ibvs(self, product_name: str) -> bool:
+        """pickup-space 로 IBVS 접근 후 drop NN + gripper predictor 로 release 한다.
+
+        edge detection + CSRT tracker 로 찾은 놓을 영역에 IBVS 로 수렴(ibvs_done)한 뒤,
+        drop 전용 NN(pick 과 별도 가중치)으로 자세를 보정하고 gripper predictor 가 여는
+        시점을 예측하면 gripper open 으로 내려놓는다(완료 = gripper open).
+        [구현 필요] drop 파이프라인(launch)이 준비되면 pick 과 동일하게 ibvs_nn_pick_agent
+        에 'drop' 요청으로 연동한다(agent 가 set_gripper open 관측을 완료로 보고). drop
+        파이프라인이 직접 release 하므로 cobot 이 별도로 open 하지 않는다.
+        """
+        self._log_err(
+            'PICKUP 드롭 미연동 — drop 파이프라인(edge+CSRT+IBVS+drop NN) 준비 후 agent 연동 필요'
+        )
+        return False
+
+    # ── 저수준 모션(토픽 기반) ───────────────────────────────────────────
+
+    def move_to_angles(self, angles: list[float], speed: int | None = None) -> bool:
+        """관절 각도(degree)를 target_pose 로 발행하고 status 수렴까지 블로킹."""
+        speed = self._default_speed if speed is None else speed
+        if self._dry_run:
+            self._log(f'(dry_run) move_to_angles {angles}')
+            return True
+        self._publish_joint(angles, speed)
+        return self._wait_until_angles(angles)
 
     def move_to_coords(
         self,
         coords: list[float],
-        speed: int = DEFAULT_SPEED,
+        speed: int | None = None,
         mode: int = 0,
     ) -> bool:
-        """Cartesian 좌표 [x, y, z, rx, ry, rz](mm/deg)로 이동하고 블로킹."""
-        try:
-            self._mc.send_coords(coords, speed, mode=mode)
-        except Exception as e:
-            self._log_err(f'send_coords 실패: {e}')
-            return False
-        return self._wait_for_stop()
+        """Cartesian 좌표 [x,y,z,rx,ry,rz](mm/deg)를 target_pose 로 발행하고 블로킹."""
+        speed = self._default_speed if speed is None else speed
+        if self._dry_run:
+            self._log(f'(dry_run) move_to_coords {coords}')
+            return True
+        msg = Float64MultiArray()
+        msg.data = [float(CMD_COORD)] + [float(c) for c in coords] + [float(speed), float(mode)]
+        self._target_pub.publish(msg)
+        return self._wait_until_coords(coords)
 
-    # ── 그리퍼 메서드 ────────────────────────────────────────────────────
+    def execute_grasp_trajectory(self, trajectory: list[list[float]]) -> bool:
+        """관절각 waypoint 목록을 순차 실행(blocking)."""
+        self._log(f'궤적 실행 — {len(trajectory)}개 waypoint')
+        for i, angles in enumerate(trajectory):
+            if not self.move_to_angles(angles):
+                self._log_err(f'궤적 {i}번 waypoint 실패')
+                return False
+        return True
+
+    def _publish_joint(self, angles: list[float], speed: int) -> None:
+        msg = Float64MultiArray()
+        msg.data = [float(CMD_JOINT)] + [float(a) for a in angles] + [float(speed)]
+        self._target_pub.publish(msg)
+
+    def _wait_until_angles(self, target: list[float], timeout: float | None = None) -> bool:
+        timeout = self._motion_timeout if timeout is None else timeout
+        deadline = time.time() + timeout
+        time.sleep(0.3)  # 이동 시작 여유(send_angles 는 비동기)
+        while time.time() < deadline:
+            self._req_status_pub.publish(Empty())
+            time.sleep(STATUS_POLL_INTERVAL_SEC)
+            with self._status_lock:
+                angles = list(self._latest_angles) if self._latest_angles is not None else None
+            if angles is not None and self._converged(angles, target):
+                return True
+        self._log_err(f'관절 이동 타임아웃({timeout}s) — target={target}')
+        return False
+
+    def _wait_until_coords(self, target: list[float], timeout: float | None = None) -> bool:
+        # 위치(x,y,z) 수렴만 본다(자세는 생략). 단위 mm.
+        timeout = self._motion_timeout if timeout is None else timeout
+        deadline = time.time() + timeout
+        time.sleep(0.3)
+        while time.time() < deadline:
+            self._req_status_pub.publish(Empty())
+            time.sleep(STATUS_POLL_INTERVAL_SEC)
+            with self._status_lock:
+                coords = list(self._latest_coords) if self._latest_coords is not None else None
+            if coords is not None and all(
+                abs(coords[i] - target[i]) <= 8.0 for i in range(3)
+            ):
+                return True
+        self._log_err(f'좌표 이동 타임아웃({timeout}s) — target={target}')
+        return False
+
+    @staticmethod
+    def _converged(measured: list[float], target: list[float]) -> bool:
+        return all(abs(m - t) <= JOINT_CONVERGE_TOL_DEG for m, t in zip(measured, target))
+
+    # ── 그리퍼(토픽 기반) ────────────────────────────────────────────────
 
     def open_gripper(self) -> bool:
         return self._set_gripper(GRIPPER_OPEN)
@@ -236,68 +474,44 @@ class CobotController:
     def close_gripper(self) -> bool:
         return self._set_gripper(GRIPPER_CLOSED)
 
-    def _set_gripper(self, value: int) -> bool:
-        try:
-            self._mc.set_gripper_value(value, GRIPPER_SPEED)
-            time.sleep(GRIPPER_WAIT_SEC)
+    def _set_gripper(self, value: int, speed: int = GRIPPER_SPEED) -> bool:
+        if self._dry_run:
+            self._log(f'(dry_run) set_gripper {value}')
             return True
-        except Exception as e:
-            self._log_err(f'그리퍼 제어 실패: {e}')
-            return False
+        msg = Float64MultiArray()
+        msg.data = [float(value), float(speed)]
+        self._gripper_pub.publish(msg)
+        time.sleep(GRIPPER_WAIT_SEC)
+        return True
 
     # ── 비상 정지 ────────────────────────────────────────────────────────
 
     def emergency_stop(self) -> None:
         if self._dry_run:
             return
-        try:
-            self._mc.stop()
-        except Exception as e:
-            self._log_err(f'emergency_stop 실패: {e}')
+        with self._status_lock:
+            angles = list(self._latest_angles) if self._latest_angles is not None else None
+        if angles is None:
+            return
+        # 현재 측정 자세를 목표로 발행해 추가 이동을 멈춘다(임시 hold).
+        # [구현 필요] 드라이버에 정식 stop 명령이 생기면 교체.
+        self._publish_joint(angles, self._default_speed)
 
-    # ── 내부 유틸 ────────────────────────────────────────────────────────
+    # ── status / detection 콜백 ──────────────────────────────────────────
 
-    def _execute_pick_and_place(
-        self,
-        pick_trajectory: list[list[float]],
-        place_trajectory: list[list[float]],
-    ) -> bool:
-        """pick 궤적 실행 후 파지하고, place 궤적 실행 후 내려놓는다."""
-        if not self.execute_grasp_trajectory(pick_trajectory):
-            self._log_err('pick 궤적 실행 실패')
-            return False
-        if not self.close_gripper():
-            self._log_err('그리퍼 닫기 실패')
-            return False
-        if not self.execute_grasp_trajectory(place_trajectory):
-            self._log_err('place 궤적 실행 실패')
-            return False
-        if not self.open_gripper():
-            self._log_err('그리퍼 열기 실패')
-            return False
-        return True
+    def _status_callback(self, msg: Float64MultiArray) -> None:
+        data = list(msg.data)
+        if len(data) < 26:
+            return
+        with self._status_lock:
+            self._latest_angles = [float(v) for v in data[STATUS_ANGLES_SLICE]]
+            self._latest_coords = [float(v) for v in data[STATUS_COORDS_SLICE]]
 
-    def _wait_for_stop(self, timeout: float = MOTION_TIMEOUT_SEC) -> bool:
-        # send_angles/send_coords 모두 non-blocking이라 이동 시작 전 is_moving()==0 타이밍이 존재.
-        # 충분히 대기 후 이동 시작을 확인한 뒤 정지를 기다린다.
-        time.sleep(0.5)
+    def _detection_callback(self, msg: TrackedObjectArray) -> None:
+        with self._detect_lock:
+            self._latest_detection = msg
 
-        # 이동 시작 확인 (최대 2초)
-        start_wait = time.time()
-        while time.time() - start_wait < 2.0:
-            if self._mc.is_moving() == 1:
-                break
-            time.sleep(0.05)
-
-        # 정지 확인
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            if self._mc.is_moving() == 0:
-                return True
-            time.sleep(0.1)
-
-        self._log_err(f'동작 타임아웃 ({timeout}s)')
-        return False
+    # ── 로그 ─────────────────────────────────────────────────────────────
 
     def _log(self, msg: str) -> None:
         self._node.get_logger().info(f'[CobotController] {msg}')
