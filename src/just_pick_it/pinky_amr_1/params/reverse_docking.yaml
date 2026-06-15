@@ -63,6 +63,7 @@
     approach_y_m: 0.18             # 두-마커 후 곡선 이동 목표 깊이(월드 y). 여기서 dock_y 까지 직진 후진
     curve_pos_tol_m: 0.012         # 곡선 이동 도달 허용오차(m)
     curve_kv: 0.6                  # 곡선 후진 선속 게인(v=-kv·dist, reverse_speed 캡)
+    curve_lat_gain: 0.9            # 곡선 횡(델타x) 이동 배율. 약간 서쪽으로 지나쳐 멈추면 줄임(0.10~0.105→0.11)
     # 시퀀스2 라인 횡조향 사용 여부. false=직진 후진(마커는 깊이 정지만). 라인검출이
     # 이 거리에서 불안정해 기본 off. 라인 품질 개선되면 true.
     use_lane_steering: false

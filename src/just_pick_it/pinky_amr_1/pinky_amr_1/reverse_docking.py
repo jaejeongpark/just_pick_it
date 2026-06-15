@@ -188,6 +188,9 @@ class ReverseDocking(Node):
         # 곡선 이동 도달 허용오차(m)와 후진 선속 게인(v=-kv·dist, reverse_speed 캡).
         self.declare_parameter("curve_pos_tol_m", 0.012)
         self.declare_parameter("curve_kv", 0.6)
+        # 곡선 이동의 횡(델타x) 게인. 약간 서(왼)쪽으로 지나쳐 멈추면 <1.0 으로 덜 이동.
+        # 카메라 offset 대신 odom 이동량만 줄여 다른 경로엔 영향 없음.
+        self.declare_parameter("curve_lat_gain", 0.9)
         # 시퀀스2 라인검출 횡조향 사용 여부. 기본 off → arc+recenter 정렬 믿고 직진 후진,
         # 마커는 깊이 정지에만 사용. 라인검출이 이 거리에서 불안정해 끄는 것이 안전.
         self.declare_parameter("use_lane_steering", False)
@@ -299,6 +302,7 @@ class ReverseDocking(Node):
         self._approach_y = float(self.get_parameter("approach_y_m").value)
         self._curve_pos_tol = float(self.get_parameter("curve_pos_tol_m").value)
         self._curve_kv = float(self.get_parameter("curve_kv").value)
+        self._curve_lat_gain = float(self.get_parameter("curve_lat_gain").value)
         self._yaw_align_tol = self.get_parameter("yaw_align_tol_rad").value
         self._yaw_hold_kp   = self.get_parameter("yaw_hold_kp").value
 
@@ -428,7 +432,8 @@ class ReverseDocking(Node):
                 #    world->odom 회전 α 로 목표 월드점을 odom 으로 변환.
                 alpha = oth_m - (math.pi / 2.0 - psi_two)
                 ca, sa = math.cos(alpha), math.sin(alpha)
-                wx = dock_map_x - robot_x
+                # 횡(델타x)만 curve_lat_gain(0.9) 배 — 약간 서쪽으로 지나치는 경향 완화.
+                wx = (dock_map_x - robot_x) * self._curve_lat_gain
                 wy = self._approach_y - robot_y
                 to_x = ox_m + ca * wx - sa * wy
                 to_y = oy_m + sa * wx + ca * wy
