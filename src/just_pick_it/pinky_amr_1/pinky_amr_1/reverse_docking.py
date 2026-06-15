@@ -180,6 +180,9 @@ class ReverseDocking(Node):
         self.declare_parameter("two_marker_fx_scale", 1.48)
         # partner 마커를 화각에 넣기 위한 최대 제자리 회전(rad). 초과하면 못 찾은 것으로 보고 fallback.
         self.declare_parameter("two_marker_max_turn_rad", 0.6)
+        # partner 탐색 회전 속도(rad/s). acquire_rot(0.3)은 너무 빨라 동시검출 구간을
+        # 지나치고 모션블러로 검출 실패 → 느리게. 첫 동시검출에 멈춰 정착 후 확인한다.
+        self.declare_parameter("two_marker_search_omega", 0.08)
         # 시퀀스2 라인검출 횡조향 사용 여부. 기본 off → arc+recenter 정렬 믿고 직진 후진,
         # 마커는 깊이 정지에만 사용. 라인검출이 이 거리에서 불안정해 끄는 것이 안전.
         self.declare_parameter("use_lane_steering", False)
@@ -286,6 +289,8 @@ class ReverseDocking(Node):
             self.get_parameter("two_marker_fx_scale").value)
         self._two_marker_max_turn = float(
             self.get_parameter("two_marker_max_turn_rad").value)
+        self._two_marker_search_omega = float(
+            self.get_parameter("two_marker_search_omega").value)
         self._yaw_align_tol = self.get_parameter("yaw_align_tol_rad").value
         self._yaw_hold_kp   = self.get_parameter("yaw_hold_kp").value
 
@@ -773,9 +778,12 @@ class ReverseDocking(Node):
             return self._align_yaw_to_normal(marker_id)
         start_yaw = od0[2]
 
-        # Phase 1: partner 가 보일 때까지 제자리 회전(둘 다 3프레임 연속 검출).
-        deadline = time.time() + self._recenter_to
-        both = 0
+        # Phase 1: partner 가 보일 때까지 느리게 제자리 회전. 동시검출 구간이 좁고 보드
+        # 검출이 느려서 빠르면 지나친다 → search_omega(느림)로 돌고, 첫 동시검출 즉시 멈춰
+        # 정착(모션블러 제거) 후 정지상태에서 재확인되면 채택. 재확인 실패면 계속 회전.
+        deadline = time.time() + max(self._recenter_to,
+                                     self._two_marker_max_turn / max(self._two_marker_search_omega, 0.01) + 4.0)
+        found = False
         last_log = 0.0
         while time.time() < deadline:
             if self._emergency.is_stopped():
@@ -786,12 +794,22 @@ class ReverseDocking(Node):
             if frame is not None:
                 dets = self._detect_two_markers(frame, lo_id, hi_id)
                 if lo_id in dets and hi_id in dets:
-                    both += 1
-                    if both >= 3:
-                        self._stop()
+                    # 동시검출 → 멈추고 정착 후 정지상태에서 재확인(블러 없는 깨끗한 검출).
+                    self._stop()
+                    time.sleep(0.25)
+                    ok = 0
+                    for _ in range(3):
+                        f2 = self._get_latest_frame()
+                        if f2 is not None:
+                            d2 = self._detect_two_markers(f2, lo_id, hi_id)
+                            if lo_id in d2 and hi_id in d2:
+                                ok += 1
+                        time.sleep(0.05)
+                    if ok >= 2:
+                        self.get_logger().info("TwoMarkerNormal: 양마커 동시검출 확보(정지 확인)")
+                        found = True
                         break
-                else:
-                    both = 0
+                    # 정착 후 안 보이면(지나침/스퍼리어스) 계속 회전.
             od = self._get_odom()
             if od is not None and abs(self._angdiff(od[2], start_yaw)) > self._two_marker_max_turn:
                 self._stop()
@@ -799,14 +817,14 @@ class ReverseDocking(Node):
                     "TwoMarkerNormal: 최대회전 초과로 양마커 미검출 → 단일 psi fallback")
                 return self._align_yaw_to_normal(marker_id)
             twist = Twist()
-            twist.angular.z = self._clamp(turn_dir * self._acquire_rot)
+            twist.angular.z = self._clamp(turn_dir * self._two_marker_search_omega)
             self._cmd_pub.publish(twist)
             if time.time() - last_log > 0.5:
                 self.get_logger().info(
-                    f"TwoMarkerNormal: partner 탐색 회전(dir={turn_dir:+.0f}, both={both})")
+                    f"TwoMarkerNormal: partner 탐색 회전(dir={turn_dir:+.0f}, ω={self._two_marker_search_omega})")
                 last_log = time.time()
             time.sleep(0.05)
-        else:
+        if not found:
             self.get_logger().warn("TwoMarkerNormal: partner 탐색 timeout → 단일 psi fallback")
             return self._align_yaw_to_normal(marker_id)
 
