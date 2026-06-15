@@ -25,6 +25,7 @@ from tkinter.scrolledtext import ScrolledText
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
+from std_srvs.srv import Trigger
 
 from just_pick_it_interfaces.action import ExecuteTask
 
@@ -47,6 +48,7 @@ class TaskDebugGUI:
         self._ui_queue: queue.Queue = queue.Queue()
 
         self._client: ActionClient | None = None
+        self._flush_client = None
         self._goal_handle = None
         self._auto_run = False
         self._next_task_id = 1
@@ -135,6 +137,8 @@ class TaskDebugGUI:
         ttk.Label(status, textvariable=self._cur_var).grid(row=0, column=0, sticky='w', **pad)
         self._progress = ttk.Progressbar(status, length=420, maximum=1.0)
         self._progress.grid(row=1, column=0, sticky='w', **pad)
+        ttk.Button(status, text='바구니 flush(적재 초기화)', command=self._flush_loadout).grid(
+            row=0, column=1, sticky='e', **pad)
 
         # 로그.
         logf = ttk.LabelFrame(self._root, text='Feedback / Result 로그')
@@ -154,8 +158,33 @@ class TaskDebugGUI:
         if self._client is not None:
             self._client.destroy()
         self._client = ActionClient(self._node, ExecuteTask, action_name)
+        # flush 서비스는 액션 이름에서 파생: /COBOT1/execute_task -> /COBOT1/flush_loadout
+        flush_name = (action_name.rsplit('/', 1)[0] + '/flush_loadout'
+                      if '/' in action_name else 'flush_loadout')
+        if self._flush_client is not None:
+            self._node.destroy_client(self._flush_client)
+        self._flush_client = self._node.create_client(Trigger, flush_name)
         self._server_var.set('서버 확인 중...')
         threading.Thread(target=self._check_server, daemon=True).start()
+
+    def _flush_loadout(self) -> None:
+        threading.Thread(target=self._do_flush, daemon=True).start()
+
+    def _do_flush(self) -> None:
+        client = self._flush_client
+        if client is None or not client.wait_for_service(timeout_sec=2.0):
+            self._ui_queue.put(('log', '[flush] 서비스 미연결 — cobot_state_manager 확인'))
+            return
+        self._ui_queue.put(('log', '[flush] picky 적재 초기화 요청'))
+        future = client.call_async(Trigger.Request())
+        future.add_done_callback(self._on_flush_response)
+
+    def _on_flush_response(self, future) -> None:
+        try:
+            resp = future.result()
+            self._ui_queue.put(('log', f'[flush] success={resp.success} :: {resp.message}'))
+        except Exception as exc:  # noqa: BLE001
+            self._ui_queue.put(('log', f'[flush] 오류: {exc}'))
 
     def _check_server(self) -> None:
         ok = self._client.wait_for_server(timeout_sec=3.0)
@@ -309,6 +338,8 @@ class TaskDebugGUI:
     def _handle_event(self, kind: str, payload) -> None:
         if kind == 'server':
             self._server_var.set(payload)
+        elif kind == 'log':
+            self._append_log(payload)
         elif kind == 'accepted':
             self._append_log('    goal ACCEPTED')
         elif kind == 'rejected':

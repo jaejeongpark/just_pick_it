@@ -9,6 +9,8 @@ from rclpy.node import Node
 
 from std_msgs.msg import String
 
+from std_srvs.srv import Trigger
+
 from just_pick_it_interfaces.action import ExecuteTask
 from just_pick_it_interfaces.srv import EmergencyControl
 
@@ -98,6 +100,14 @@ class CobotStateManager(Node):
             EmergencyControl,
             'emergency_control',
             self._handle_emergency,
+            callback_group=cb_group,
+        )
+
+        # picky 적재 슬롯 수동 flush 서비스(UNLOADING 미연동 시 가득 참 해소용).
+        self._flush_srv = self.create_service(
+            Trigger,
+            f'{self._robot_id}/flush_loadout',
+            self._handle_flush_loadout,
             callback_group=cb_group,
         )
 
@@ -388,6 +398,19 @@ class CobotStateManager(Node):
             self._set_state('STANDBY')
 
         # [구현 필요] response 필드 채워서 반환
+        return response
+
+    # ── 적재 슬롯 flush 서비스 콜백 ───────────────────────────────────────
+
+    def _handle_flush_loadout(
+        self,
+        request: Trigger.Request,
+        response: Trigger.Response,
+    ) -> Trigger.Response:
+        cleared = self._controller.flush_loadout()
+        response.success = True
+        response.message = f'{cleared} slot(s) cleared'
+        self.get_logger().info(f'[CobotStateManager] 적재 flush — {cleared}개 슬롯 비움')
         return response
 
     # ── 주기 상태 publish ──────────────────────────────────────────────

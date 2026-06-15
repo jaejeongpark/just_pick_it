@@ -340,6 +340,19 @@ class CobotController:
         """현재 슬롯별 적재 상품(점유된 슬롯만): {slot: product_name}."""
         return {i: occ for i, occ in enumerate(self._slot_occupant) if occ is not None}
 
+    def flush_loadout(self) -> int:
+        """picky 적재 슬롯 점유와 적재 이력을 모두 비운다(수동 리셋용).
+
+        실제 물건을 내리는 게 아니라 내부 상태만 초기화한다. UNLOADING 드롭이 아직
+        미연동이라 슬롯이 가득 차 막힐 때 수동 flush 에 쓴다. task 실행 중이 아닐 때
+        호출해야 한다. 반환값: 비운(점유돼 있던) 슬롯 개수.
+        """
+        cleared = sum(1 for occ in self._slot_occupant if occ is not None)
+        self._slot_occupant = [None] * len(LOAD_SLOT_ANGLES)
+        self._placements.clear()
+        self._log(f'적재 상태 flush — {cleared}개 슬롯 비움')
+        return cleared
+
     # ── INSPECTION 검출 비교 ─────────────────────────────────────────────
 
     def _expected_counts(self) -> dict[str, int]:

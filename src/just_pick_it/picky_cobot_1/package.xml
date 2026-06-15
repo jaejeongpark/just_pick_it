@@ -9,6 +9,7 @@
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
   <depend>just_pick_it_interfaces</depend>
   <!-- ibvs_nn_pick_agent.launch.py 가 detection(yolo_seg_infer)을 include 하고
        nn_inference.launch.py 를 on-demand 실행하므로 perception 패키지에 의존한다 -->
