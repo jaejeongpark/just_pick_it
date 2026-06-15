@@ -126,6 +126,7 @@ class TaskManager:
         self._completed_move_target_by_task: dict[int, str] = {}
         self._cobot_dispatch_warned_at: dict[tuple[str, str], float] = {}
         self._housekeeping_stopped_flows: set[tuple[str, int]] = set()
+        self._emergency_result_task_ids: set[int] = set()
 
         # cobot_task_id -> STOWING_ARM 중 미리 생성한 다음 task id 목록.
         # predecessor COBOT task가 실패하면 이 task들은 CANCELLED 처리한다.
@@ -259,16 +260,44 @@ class TaskManager:
         """
         with self._scheduler_lock:
             self._fleet_paused = True
+            for task in self._repo.list_tasks(status="PAUSED"):
+                task_id = int(task.get("task_id") or 0)
+                robot_name = str(task.get("assigned_robot_name") or "")
+                task_type = str(task.get("task_type") or "")
+                if task_id <= 0:
+                    continue
+                self._emergency_result_task_ids.add(task_id)
+                if task_type in PATH_RESERVED_TASK_TYPES and robot_name:
+                    self._clear_reserved_path_for_task(
+                        task_id,
+                        robot_name,
+                        reason="emergency stop",
+                    )
 
-    def handle_resume(self) -> None:
+    def handle_resume(
+        self,
+        *,
+        resume_task_ids: list[int] | tuple[int, ...] | None = None,
+    ) -> None:
         """Fleet resume 수신 시 실행 가능한 task 흐름을 즉시 재개한다.
 
-        Fleet API가 PAUSED task를 ASSIGNED로 되돌리는 정책이면 여기서 바로
-        dispatch된다. 이미 RUNNING으로 복구되는 정책이면 로봇 emergency service
-        해제 후 기존 action이 이어지고, 이 함수는 대기 작업/누락 보정만 수행한다.
+        Fleet API가 PAUSED task를 ASSIGNED로 되돌리면 여기서 다시 dispatch한다.
+        PICKY action은 emergency stop 때 취소될 수 있으므로 기존 action이 이어진다고
+        가정하지 않는다.
         """
         with self._scheduler_lock:
             self._fleet_paused = False
+            for task_id in resume_task_ids or ():
+                self._emergency_result_task_ids.add(int(task_id))
+                task = self._find_task_by_id(int(task_id)) or {}
+                robot_name = str(task.get("assigned_robot_name") or "")
+                task_type = str(task.get("task_type") or "")
+                if task_type in PATH_RESERVED_TASK_TYPES and robot_name:
+                    self._clear_reserved_path_for_task(
+                        int(task_id),
+                        robot_name,
+                        reason="resume redispatch",
+                    )
             self._complete_ready_charge_tasks()
             self._advance_existing_orders()
             self._advance_existing_display_items()
@@ -386,6 +415,7 @@ class TaskManager:
 
         if result.ok:
             self._move_waypoints_by_task[task_id] = tuple(result.waypoints)
+            self._record_reserved_task_target(task, tuple(result.waypoints))
             self._node.get_logger().info(
                 f"[TaskManager] 복구: task_id={task_id} {robot_name} 점유 재예약 "
                 f"{current_zone} -> {result.waypoints[-1]}"
@@ -413,6 +443,7 @@ class TaskManager:
             )
             if result.ok:
                 self._move_waypoints_by_task[task_id] = tuple(result.waypoints)
+                self._record_reserved_task_target(task, tuple(result.waypoints))
             return
 
         self._traffic.rebuild_dock(robot_name, dock)
@@ -421,6 +452,7 @@ class TaskManager:
         )
         if result.ok:
             self._move_waypoints_by_task[task_id] = tuple(result.waypoints)
+            self._record_reserved_task_target(task, tuple(result.waypoints))
             self._node.get_logger().info(
                 f"[TaskManager] 복구: task_id={task_id} {robot_name} 도크 점유 재예약 -> {dock}"
             )
@@ -1087,14 +1119,28 @@ class TaskManager:
             if self._robot_has_open_task(picky["robot_name"]) or self._robot_has_open_task(cobot["robot_name"]):
                 continue
 
+            picky_name = str(picky["robot_name"])
+            source_zone = self._last_robot_target_zone(picky_name)
+            current_task = self._robot_current_task(picky)
+            if self._is_preemptible_return_home(current_task):
+                pose_zone = self._current_pose_zone_for_robot(picky_name)
+                if pose_zone is not None:
+                    self._node.get_logger().info(
+                        f"[TaskManager] {picky_name} PARKING RETURN_HOME 선점: "
+                        f"source zone을 현재 pose 기준으로 보정 "
+                        f"{source_zone or 'none'} -> {pose_zone}"
+                    )
+                    source_zone = pose_zone
+            if source_zone is None:
+                source_zone = self._default_source_zone(unit["unit_id"])
+
             candidates.append(
                 {
                     "unit_id": unit["unit_id"],
-                    "picky_name": picky["robot_name"],
+                    "picky_name": picky_name,
                     "cobot_name": cobot["robot_name"],
                     "battery_level": picky.get("battery_level") or 0,
-                    "source_zone": self._last_robot_target_zone(picky["robot_name"])
-                    or self._default_source_zone(unit["unit_id"]),
+                    "source_zone": source_zone,
                 }
             )
 
@@ -1256,10 +1302,10 @@ class TaskManager:
             self._mark_housekeeping_stopped_for_task(task)
 
     def _last_robot_target_zone(self, robot_name: str) -> str | None:
-        """해당 PICKY가 마지막으로 성공한 이동 task의 target zone을 반환한다."""
+        """해당 PICKY가 마지막으로 성공한 경로 예약 task의 target zone을 반환한다."""
         tasks = [
             task for task in self._repo.list_tasks(robot_name=robot_name)
-            if task.get("task_type") in MOVE_TASK_TYPES
+            if task.get("task_type") in PATH_RESERVED_TASK_TYPES
             and task.get("status") == "SUCCESS"
             and task.get("target_zone_name")
         ]
@@ -1853,7 +1899,7 @@ class TaskManager:
         return True
 
     def _last_picky_target_zone(self, tasks: list[dict[str, Any]]) -> str | None:
-        """완료된 PICKY 이동 task 중 마지막 target zone을 반환한다."""
+        """완료된 PICKY 경로 예약 task 중 마지막 target zone을 반환한다."""
         sorted_tasks = sorted(
             tasks,
             key=lambda item: int(item.get("sequence_no") or 0),
@@ -1861,7 +1907,7 @@ class TaskManager:
         )
 
         for task in sorted_tasks:
-            if task.get("task_type") not in MOVE_TASK_TYPES:
+            if task.get("task_type") not in PATH_RESERVED_TASK_TYPES:
                 continue
 
             task_id = task.get("task_id")
@@ -2545,9 +2591,9 @@ class TaskManager:
 
         robot_name = str(task.get("assigned_robot_name") or "")
         task_type = str(task.get("task_type") or "")
-        source_zone = task.get("source_zone_name")
         target_zone = task.get("target_zone_name")
 
+        source_zone = self._source_zone_for_dispatch(task, robot_name)
         if not robot_name or not source_zone:
             self._node.get_logger().warn(
                 f"[TaskManager] task_id={task_id} 경로 예약 실패: robot/source 없음"
@@ -2580,7 +2626,54 @@ class TaskManager:
             return False
 
         self._move_waypoints_by_task[task_id] = tuple(result.waypoints)
+        self._record_reserved_task_target(task, tuple(result.waypoints))
         return True
+
+    def _clear_reserved_path_for_task(
+        self,
+        task_id: int,
+        robot_name: str,
+        *,
+        reason: str,
+    ) -> None:
+        """task 재전송 전에 TrafficManager 예약과 로컬 waypoint cache를 비운다."""
+        if task_id not in self._move_waypoints_by_task:
+            return
+
+        self._traffic.release_path(robot_name, task_id)
+        self._move_waypoints_by_task.pop(task_id, None)
+        self._node.get_logger().info(
+            f"[TaskManager] task_id={task_id} 예약경로 해제: {reason}"
+        )
+
+    def _record_reserved_task_target(
+        self,
+        task: dict[str, Any],
+        waypoints: tuple[str, ...],
+    ) -> None:
+        """예약 결과로 확정된 마지막 waypoint를 task target zone에 기록한다."""
+        if not waypoints or task.get("task_id") is None:
+            return
+
+        target_zone = str(waypoints[-1])
+        if task.get("target_zone_name") == target_zone:
+            return
+
+        task_id = int(task["task_id"])
+        updated = self._repo.update_task_target_zone(
+            task_id,
+            target_zone_name=target_zone,
+        )
+        if updated is None:
+            self._node.get_logger().warn(
+                f"[TaskManager] task_id={task_id} target zone 기록 실패: {target_zone}"
+            )
+            return
+
+        task["target_zone_name"] = updated.get("target_zone_name")
+        self._node.get_logger().info(
+            f"[TaskManager] task_id={task_id} target zone 기록: {target_zone}"
+        )
 
     def _dispatch_dock_task(self, task: dict[str, Any]) -> bool:
         """DOCK_IN task를 RUNNING으로 전환하고 DockCommand로 보낸다."""
@@ -2632,7 +2725,7 @@ class TaskManager:
             return self._dock_target_from_waypoints(task, self._move_waypoints_by_task[task_id])
 
         robot_name = str(task.get("assigned_robot_name") or "")
-        source_zone = task.get("source_zone_name")
+        source_zone = self._source_zone_for_dispatch(task, robot_name)
         if not robot_name or not source_zone:
             self._node.get_logger().warn(
                 f"[TaskManager] task_id={task_id} 도크 예약 실패: robot/source 없음"
@@ -2651,7 +2744,45 @@ class TaskManager:
             return None
 
         self._move_waypoints_by_task[task_id] = tuple(result.waypoints)
+        self._record_reserved_task_target(task, tuple(result.waypoints))
         return self._dock_target_from_waypoints(task, tuple(result.waypoints))
+
+    def _source_zone_for_dispatch(self, task: dict[str, Any], robot_name: str) -> str | None:
+        """경로 예약 직전 현재 pose 기준 source zone을 우선 사용한다."""
+        pose_zone = self._current_pose_zone_for_robot(robot_name)
+        task_source = task.get("source_zone_name")
+        if pose_zone is not None:
+            if task_source and str(task_source) != pose_zone:
+                self._node.get_logger().info(
+                    f"[TaskManager] task_id={task.get('task_id')} source zone 재계산: "
+                    f"task_source={task_source} -> pose={pose_zone}"
+                )
+            return pose_zone
+
+        if task_source:
+            return str(task_source)
+
+        return self._default_source_zone(self._unit_id_from_robot_name(robot_name))
+
+    def _current_pose_zone_for_robot(self, robot_name: str) -> str | None:
+        """DB에 저장된 AMCL pose를 TrafficManager graph zone으로 변환한다."""
+        robot = self._robot_by_name(robot_name)
+        if robot is None:
+            return None
+
+        pos_x = robot.get("pos_x")
+        pos_y = robot.get("pos_y")
+        if pos_x is None or pos_y is None:
+            return None
+
+        try:
+            return self._traffic.nearest_zone(float(pos_x), float(pos_y))
+        except (TypeError, ValueError):
+            self._node.get_logger().warn(
+                f"[TaskManager] {robot_name} pose source zone 계산 실패: "
+                f"x={pos_x}, y={pos_y}"
+            )
+            return None
 
     def _dock_target_from_waypoints(
         self,
@@ -2825,6 +2956,22 @@ class TaskManager:
             )
             return
 
+        if not success and self._is_emergency_result(message):
+            known_emergency_task = task_id in self._emergency_result_task_ids
+            if known_emergency_task or self._fleet_paused or current_task_status in {"PAUSED", "ASSIGNED"}:
+                if current_task_status in {"PAUSED", "ASSIGNED"} and task_type in PATH_RESERVED_TASK_TYPES and robot_name:
+                    self._clear_reserved_path_for_task(
+                        task_id,
+                        str(robot_name),
+                        reason="emergency result",
+                    )
+                self._emergency_result_task_ids.discard(task_id)
+                self._node.get_logger().info(
+                    f"[TaskManager] task_id={task_id} emergency result ignored: "
+                    f"status={current_task_status}, message={message}"
+                )
+                return
+
         next_status = self._task_status_from_result(result, success)
         task_succeeded = next_status == "SUCCESS"
         if task_succeeded and task_type in COBOT_TASK_TYPES:
@@ -2877,6 +3024,10 @@ class TaskManager:
         if status in FINAL_TASK_STATUSES:
             return status
         return "SUCCESS" if success else "FAILED"
+
+    def _is_emergency_result(self, message: str) -> bool:
+        """robot action이 emergency stop 때문에 중단됐는지 메시지로 판정한다."""
+        return "emergency" in str(message or "").lower()
 
     def _apply_cobot_result_payload(
         self,
