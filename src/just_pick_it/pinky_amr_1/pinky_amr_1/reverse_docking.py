@@ -168,6 +168,9 @@ class ReverseDocking(Node):
         # 첫 측정이 허용오차 안이라 arc 를 건너뛸 때, 그래도 법선방향으로 이만큼 직진 후진해
         # 두-마커 검출 영역으로 들어간다(standby 에선 두 마커가 안 잡혀 후진이 필수).
         self.declare_parameter("converged_reverse_m", 0.10)
+        # [디버그] true 면 정렬+법선후진까지만 하고 정지(reverse_insert 생략). 그 위치에서
+        # 두-마커 검출 가능 여부를 marker_pose_check 로 확인하기 위한 임시 스캐폴드.
+        self.declare_parameter("debug_stop_after_converge", False)
         # 시퀀스2 라인검출 횡조향 사용 여부. 기본 off → arc+recenter 정렬 믿고 직진 후진,
         # 마커는 깊이 정지에만 사용. 라인검출이 이 거리에서 불안정해 끄는 것이 안전.
         self.declare_parameter("use_lane_steering", False)
@@ -266,6 +269,8 @@ class ReverseDocking(Node):
         self._arc_refine_gain = self.get_parameter("arc_refine_gain").value
         self._arc_max_travel = self.get_parameter("arc_max_travel_m").value
         self._converged_reverse_m = self.get_parameter("converged_reverse_m").value
+        self._debug_stop_after_converge = bool(
+            self.get_parameter("debug_stop_after_converge").value)
         self._yaw_align_tol = self.get_parameter("yaw_align_tol_rad").value
         self._yaw_hold_kp   = self.get_parameter("yaw_hold_kp").value
 
@@ -414,6 +419,17 @@ class ReverseDocking(Node):
                     self._stop()
                     self.get_logger().error("reverse_dock: FAILED — 마커 재정렬")
                     return False
+
+            # [디버그] 정렬+법선 후진까지만 하고 멈춰, 그 위치에서 두-마커 검출이 되는지
+            # 확인한다(true 면 reverse_insert 생략하고 종료 → 카메라 반납됨).
+            if self._debug_stop_after_converge:
+                self._stop()
+                od = self._get_odom()
+                self.get_logger().warn(
+                    "reverse_dock: [DEBUG] 정렬+후진 후 정지 "
+                    f"(odom={od}). 두-마커 검출 확인용 — reverse_insert 생략."
+                )
+                return True
 
             # 3) 후진 전 똑바로 세움(이 헤딩을 odom θ_ref 로 앵커링해 후진 내내 유지).
             self._align_yaw_to_normal(marker_id)
