@@ -1,0 +1,19 @@
+/**/state_machine:
+  ros__parameters:
+    # Fleet Manager가 DockCommand.dock_name으로 넘긴 논리 도크 이름을
+    # PICKY2 로컬 도킹용 marker id와 map pose로 변환한다.
+    #
+    # CHARGING_DOCK_1: 안쪽 도크, ArUco/AprilTag id 0
+    # CHARGING_DOCK_2: 바깥쪽 도크, ArUco/AprilTag id 1
+    #
+    # 도킹 성공 후 reverse_docking이 이 pose를 /picky2/initialpose로 publish해
+    # AMCL pose를 도크 seed 기준으로 보정한다.
+    charging_dock_1.marker_id: 0
+    charging_dock_1.map_x: 0.11
+    charging_dock_1.map_y: 0.08
+    charging_dock_1.map_yaw: 1.5708
+
+    charging_dock_2.marker_id: 1
+    charging_dock_2.map_x: 0.28
+    charging_dock_2.map_y: 0.08
+    charging_dock_2.map_yaw: 1.5708
