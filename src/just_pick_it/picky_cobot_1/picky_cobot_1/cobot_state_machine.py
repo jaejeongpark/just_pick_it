@@ -295,6 +295,20 @@ class CobotStateManager(Node):
             # 한 단위(집기+적재) 완료 시 처리 수량 +1.
             if task_type == 'SORTING_AND_LOAD':
                 processed_qty += last_phase_qty
+                # 더 집을 물건이 남아 있으면 STOWING 하지 않고 center 로 복귀(다음 픽 준비).
+                # STOWING_ARM 은 quantity 가 모두 소진된 마지막에만 수행한다.
+                if unit < units - 1:
+                    self._set_state('SORTING')
+                    if not self._controller.go_to_center():
+                        self._set_state('SAFETY_STOPPED')
+                        goal_handle.abort()
+                        return ExecuteTask.Result(
+                            success=False,
+                            status='FAILED',
+                            message='center 복귀 실패',
+                            processed_quantity=processed_qty,
+                            stock_delta=0,
+                        )
 
         # 비 SORTING_AND_LOAD 는 마지막 phase 가 반환한 수량을 결과로 쓴다.
         if task_type != 'SORTING_AND_LOAD':

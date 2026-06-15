@@ -242,6 +242,14 @@ class CobotController:
         self.open_gripper()
         return ok
 
+    def go_to_center(self) -> bool:
+        """다음 픽 준비를 위해 center pregrasp 자세로 복귀한다.
+
+        SORTING_AND_LOAD 에서 아직 집을 물건이 남았을 때(STOWING 대신) 호출한다.
+        """
+        self._log('center pregrasp 복귀 — 다음 픽 준비')
+        return self.move_to_angles(PREGRASP_ANGLES['center'])
+
     # ── picky 적재 슬롯 관리 ──────────────────────────────────────────────
 
     def load_to_next_slot(self, product_name: str, order_id: int = 0) -> tuple[bool, int]:
