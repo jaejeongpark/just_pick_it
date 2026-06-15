@@ -1,6 +1,6 @@
 # Fleet Manager 작업 현황 (담당 · 결정 · TODO)
 
-갱신: 2026-06-10. 설계·동작은 `docs/Fleet_manager.md`, 인터페이스 계약은 `docs/Fleet_manager_interface.md`.
+갱신: 2026-06-15. 설계·동작은 `docs/Fleet_manager.md`, 인터페이스 계약은 `docs/Fleet_manager_interface.md`.
 
 심각도: **S**(기능 결함) / **R**(견고성) / **C**(문서·정합) / **Q**(테스트).
 
@@ -104,7 +104,7 @@
 
    같은 기간 반영: 콜드 스타트 시 양 충전 도크 점유 초기화, battery 텔레메트리 20s+ 미수신 시 0%로
    처리해 offline 로봇 배정 제외(RobotStateMonitor).
-9. **Reverse Docking 실차 디버깅 + 견고화 (2026-06-10~11, picky1)** — ✅ **완성** (박서우). 1차 정렬에 안정적으로 잡혀 반복 거의 불필요, E2E 도킹 성공. 잔여는 보드 CPU 경량화·N회 정량화(낮음).
+9. **Reverse Docking 실차 디버깅 + 견고화 (2026-06-10~15, picky1)** — ✅ **완성** (박서우). 두 마커 localization 으로 좁은 도크 안정 통과(x ~3~5mm, yaw <1°). 잔여는 보드 CPU 경량화·재캘리브(낮음).
 
    1. **카메라/캘리브레이션 직접화** — reverse_docking 이 ROS Image pub/sub 대신 Picamera2 를 직접
       열고(도킹 중에만) `camera_calibration.yaml` 을 직접 로드. udp_image_sender 는 UDP 전용 원복.
@@ -127,9 +127,22 @@
    - **수치 정정:** marker_world_x 0.07→0.11, marker_world_y 0.655→0.635, cam_fwd 0.05→0.060, marker_size→0.05, dict→36h11, depth_scale 도입.
    - 상세 기록·표: `docs/Reverse_Docking_Design.md` §7.
 
-   **남은 미세조정:** ① 정렬 후 x 가 일정하게 >0.11(잔차 ~1~2cm) → `marker_lat_offset_m` 실측 보정 ②
-   depth 정지 ~4cm 조기(1.36 적용, 실측 미세조정) ③ 정밀도 floor(lateral ~1cm·yaw ~2°)=단일 마커 한계
-   ④ **보드 CPU 과부하**(도킹 비전이 Pi 포화 → 경량화/주기↓) ⑤ N회 반복 정량화(final x·깊이·yaw).
+   **(2026-06-15) 정밀도 완성 — fx 근본원인 + 두 마커.** §7 후에도 "같은 x 인데 깊이마다 x 가
+   달라짐 + 후진 비뚤음 + 끝없는 부호 튜닝"이 남아, 정지 진단툴(`scripts/demo/marker_pose_check.py`)
+   로 두 숨은 원인을 숫자로 격리해 완성:
+   - **fx 오류:** 캘리브 fx(985)가 실제 도킹 영상모드보다 **~1.48배 작음**(센서 crop 불일치). `tx`(횡)는
+     fx 무관(정확)이나 `tz`(깊이)는 fx 비례라 짧게 나옴 → `depth/lateral_scale` 은 그걸 덮던 fudge였음.
+     `lateral_scale` 1.48→1.0(정렬 후 x 1.8cm 과보정 제거).
+   - **두 마커 헤딩:** 단일 평면 마커 yaw 는 pose-flip 으로 구조적 병목(두 마커가 4° 불일치). 도크 마커
+     2개의 **translation 만**(rvec 미사용) 강체정합해 로봇(x,y)·yaw 를 ambiguity 없이(σ±0.05°) 1회 측정.
+   - **6단계 시퀀스:** ①주마커 정렬 ②법선 yaw ③10cm 후진 ④쌍마커 검출+pose 측정(가까우면 2cm씩
+     추가후진 재시도) ⑤odom 정밀 곡선 이동(dock_x, approach_y=0.18, 법선; 횡델타 0.9배 미세보정)
+     ⑥dock_y 까지 직진 후진. `_measure_two_marker_pose` + `_curve_to_pose_odom` 신설.
+   - **결과(실측):** lateral ~3~5mm(0.11), yaw <1°, 깊이의존 편향 제거, 좁은 도크 안정 통과. 상세·비교표는
+     `docs/Reverse_Docking_Design.md` §8, `docs/Reverse_Docking_Summary.md` ④.
+
+   **남은 미세조정(낮음):** ① **보드 CPU 과부하**(도킹 비전이 Pi 포화 → 경량화/주기↓) ② 도킹 영상모드
+   그대로 재캘리브하면 `fx_scale`/`*_scale` fudge 를 1.0 으로 제거 가능(perception 영역) ③ N회 반복 정량화.
 
 10. **주행 견고성 (2026-06-10)** — ✅ 완료 (박서우)
     - **벽 충돌 안전망**: nav2 `use_collision_detection: true` + 짧은 시간지평(local costmap 기반,
@@ -138,7 +151,7 @@
       지워(`예약 task=None`) goal 이 cancel/abort 되고 주문이 빈 메시지로 실패하던 것 → '이동/점유에서
       빠져나올 때(prev active)만' 해제하도록 수정. test 갱신+레이스 케이스 추가(62 pass).
 
-> 박서우 미완(다음 기동·배터리 충전 후): 주문 E2E 실주행 완주, **Reverse Docking 완성(§3-A 9 미해결)**, R1 재시작 복구 실동작, `_at_dock` 부팅 가정 견고화(낮음). 상세는 §3-D.
+> 박서우 미완(다음 기동·배터리 충전 후): 주문 E2E 실주행 완주, R1 재시작 복구 실동작, `_at_dock` 부팅 가정 견고화(낮음). **Reverse Docking 은 완성(§3-A 9).** 상세는 §3-D.
 
 ### 3-B. 이명제 완료 작업
 
