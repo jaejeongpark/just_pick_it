@@ -1250,9 +1250,17 @@ class AreaJacobianIBVSNode(Node):
                     f"before validating detection."
                 )
             elif self.elapsed_in_phase() >= self.search_move_timeout_sec:
+                # 아직 수렴(도착)이 확인되지 않았다. status 가 신선한데 미도착이면 단지
+                # 이동이 크거나 느린 것이므로 진행하지 않고 실제 도착까지 계속 기다린다.
+                # (이동 중 detection 으로 ALIGN/Jacobian 을 시작해 계산이 섞이는 것을 방지)
+                # status 자체가 안 오거나(broken) 과도하게 오래 걸리면(도달 불가 추정) 최후
+                # 수단으로만 진행한다.
+                hard_cap = self.search_move_timeout_sec * 3.0
+                if self.has_fresh_status() and self.elapsed_in_phase() < hard_cap:
+                    return  # 이동 중 — 수렴까지 대기
                 self.get_logger().warn(
-                    f"Arrival not confirmed within {self.search_move_timeout_sec}s "
-                    f"(no fresh status?). Proceeding anyway."
+                    f"Arrival not confirmed within {self.elapsed_in_phase():.1f}s "
+                    f"(fresh_status={self.has_fresh_status()}). Proceeding anyway."
                 )
                 self._search_arrived = True
                 self._search_arrived_time = self.get_clock().now()
