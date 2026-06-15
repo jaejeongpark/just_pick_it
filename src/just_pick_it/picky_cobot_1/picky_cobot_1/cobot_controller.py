@@ -63,6 +63,18 @@ LOAD_SLOT_ANGLES = [
     },
 ]
 
+# IBVS pregrasp(탐색) 자세. center/left/right 고정 관절각. ibvs_controller 가 픽 시작 시
+# 이 자세 중 하나에서 물체를 감지한다(탐색 순서 center -> left -> right).
+# LOADING 3-step 의 1단계(위로 올리기)는 '이번 픽이 감지를 시작한 pregrasp 자세'로 복귀한 뒤
+# 슬롯 approach -> place 로 이동한다. 감지 위치는 토픽으로 노출되지 않으므로 현재 J1(base)에
+# 가장 가까운 자세를 추론해 사용한다.
+# [중요] ibvs_controller.launch.py 의 center/left/right_pregrasp_angles 와 값을 일치시킬 것.
+PREGRASP_ANGLES = {
+    'center': [114.78, -5.09, -9.05, -75.49, 9.05, -107.31],
+    'left':   [147.48, -8.96, -24.08, -59.85, 4.39, -73.12],
+    'right':  [94.39, 1.31, -26.19, -62.84, 3.51, -127.08],
+}
+
 # 상품 수령장소(PICKUP SLOT)는 picky 정차 오차로 위치/자세가 매번 조금씩 틀어지므로
 # 고정 관절각으로 가지 않는다(약 15x10cm 공간이라 픽보다 수렴은 쉬울 것으로 기대).
 # 드롭 파이프라인(perception 측 추후 구현):
@@ -133,6 +145,7 @@ class CobotController:
         self._status_lock = threading.Lock()
         self._latest_angles: list[float] | None = None
         self._latest_coords: list[float] | None = None
+        self._status_seq = 0  # status 수신 카운터(fresh 판정용)
         node.create_subscription(
             Float64MultiArray, f'{ns}/status', self._status_callback, 10,
             callback_group=cb_group,
@@ -248,20 +261,26 @@ class CobotController:
         self._log(f'LOADING — product={product_name}, slot={slot}, order_id={order_id}')
 
         if not self._dry_run:
-            # SORTING(픽)에서 닫은 GRIP 상태를 LOADING 이동 내내 유지한다(이동 중 열지
-            # 않음). 픽->LOADING 핸드오프에서 그리퍼가 확실히 닫혀 있도록 명시적으로
-            # 재-grip 한 뒤 2단계로 이동하고, 슬롯 place 에서만 70 으로 부분 개방한다.
+            # SORTING(픽)에서 닫은 GRIP 을 LOADING 이동 내내 유지한다(이동 중 열지 않음).
+            # 핸드오프에서 그리퍼가 확실히 닫혀 있도록 명시적으로 재-grip.
             if not self.close_gripper():
                 return False, 0
-            # 1단계 approach 를 거쳐 2단계 place 로 들어간다(충돌 방지).
+            # step1: 위로 올리기 — 이번 픽이 감지를 시작한 pregrasp(center/left/right)로 복귀.
+            #         (그래스프 자세에서 슬롯으로 곧장 가지 않고 한 번 들어 올려 충돌 방지)
+            pregrasp = self._current_pregrasp_name()
+            self._log(f'LOADING step1 — pregrasp={pregrasp} 복귀')
+            if not self.move_to_angles(PREGRASP_ANGLES[pregrasp]):
+                return False, 0
+            # step2: 슬롯 approach.
             if not self.move_to_angles(approach):
                 return False, 0
+            # step3: 슬롯 place — 안정적으로 도착할 때까지 확인.
             if not self.move_to_angles(place):
                 return False, 0
-            # 완전 개방(100) 대신 70 으로만 살짝 열어 내려놓는다.
+            # 안정 도착 후 완전 개방(100) 대신 70 으로만 살짝 열어 내려놓는다.
             if not self._set_gripper(GRIPPER_LOAD_OPEN):
                 return False, 0
-            # 항상 1단계 approach 위치로 빠져나와 다음 작업을 준비한다.
+            # approach 위치로 빠져나와 다음 작업을 준비한다.
             if not self.move_to_angles(approach):
                 return False, 0
         else:
@@ -437,16 +456,27 @@ class CobotController:
         self._target_pub.publish(msg)
 
     def _wait_until_angles(self, target: list[float], timeout: float | None = None) -> bool:
+        """target 관절각에 '안정적으로' 도착할 때까지 status 를 폴링한다.
+
+        송신은 send_angles(_async) 라 즉시 리턴하므로, request_status 로 현재 관절각을
+        받아 목표 ±JOINT_CONVERGE_TOL_DEG 이내인지 확인한다. 통과 중 순간 일치 오판을
+        막기 위해 연속 2회 수렴해야 '안정 도착'으로 본다.
+        """
         timeout = self._motion_timeout if timeout is None else timeout
         deadline = time.time() + timeout
         time.sleep(0.3)  # 이동 시작 여유(send_angles 는 비동기)
+        stable = 0
         while time.time() < deadline:
             self._req_status_pub.publish(Empty())
             time.sleep(STATUS_POLL_INTERVAL_SEC)
             with self._status_lock:
                 angles = list(self._latest_angles) if self._latest_angles is not None else None
             if angles is not None and self._converged(angles, target):
-                return True
+                stable += 1
+                if stable >= 2:  # 연속 2회 수렴 = 안정적 도착
+                    return True
+            else:
+                stable = 0
         self._log_err(f'관절 이동 타임아웃({timeout}s) — target={target}')
         return False
 
@@ -470,6 +500,36 @@ class CobotController:
     @staticmethod
     def _converged(measured: list[float], target: list[float]) -> bool:
         return all(abs(m - t) <= JOINT_CONVERGE_TOL_DEG for m, t in zip(measured, target))
+
+    def _get_fresh_angles(self, timeout: float = 1.0) -> list[float] | None:
+        """request_status 로 최신 status 를 받아 현재 관절각을 반환한다(없으면 None)."""
+        with self._status_lock:
+            start_seq = self._status_seq
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self._req_status_pub.publish(Empty())
+            time.sleep(0.15)
+            with self._status_lock:
+                if self._status_seq != start_seq and self._latest_angles is not None:
+                    return list(self._latest_angles)
+        with self._status_lock:
+            return list(self._latest_angles) if self._latest_angles is not None else None
+
+    def _current_pregrasp_name(self) -> str:
+        """현재 J1(base 회전각)에 가장 가까운 pregrasp(center/left/right)를 추론한다.
+
+        IBVS 가 감지 위치(center/left/right)를 토픽으로 노출하지 않으므로, 픽 직후 자세의
+        J1 으로 추론한다(탐색 자세 J1: center~115, left~147, right~94 로 잘 분리됨).
+        status 가 없으면 안전하게 center 를 사용한다.
+        """
+        angles = self._get_fresh_angles()
+        if angles is None:
+            self._log_err('status 없음 — pregrasp 기본값 center 사용')
+            return 'center'
+        j1 = angles[0]
+        name = min(PREGRASP_ANGLES, key=lambda k: abs(PREGRASP_ANGLES[k][0] - j1))
+        self._log(f'pregrasp 판별 — J1={j1:.1f} -> {name}')
+        return name
 
     # ── 그리퍼(토픽 기반) ────────────────────────────────────────────────
 
@@ -511,6 +571,7 @@ class CobotController:
         with self._status_lock:
             self._latest_angles = [float(v) for v in data[STATUS_ANGLES_SLICE]]
             self._latest_coords = [float(v) for v in data[STATUS_COORDS_SLICE]]
+            self._status_seq += 1
 
     def _detection_callback(self, msg: TrackedObjectArray) -> None:
         with self._detect_lock:

@@ -66,6 +66,8 @@ class IbvsNnPickAgent(Node):
         self._lock = threading.Lock()
         self._active_id: str | None = None
         self._last_result: tuple[str, bool] | None = None
+        # 실행 중인 nn_inference subprocess. 노드 종료 시 정리해 고아 방지.
+        self._active_proc: subprocess.Popen | None = None
 
         cb_group = ReentrantCallbackGroup()
         self._result_pub = self.create_publisher(
@@ -130,6 +132,8 @@ class IbvsNnPickAgent(Node):
             self._close_event.clear()
             proc = self._spawn_launch(product_name)
             if proc is not None:
+                with self._lock:
+                    self._active_proc = proc
                 got = self._close_event.wait(timeout=self._pick_timeout)
                 if got:
                     self.get_logger().info(
@@ -145,9 +149,23 @@ class IbvsNnPickAgent(Node):
             if proc is not None:
                 self._terminate(proc)
             with self._lock:
+                self._active_proc = None
                 self._active_id = None
                 self._last_result = (request_id, success)
             self._publish_result(request_id, success)
+
+    def shutdown(self) -> None:
+        """노드 종료 시 실행 중인 nn_inference subprocess 를 정리한다(고아 방지).
+
+        subprocess 는 start_new_session 으로 별도 세션에서 돌기 때문에 agent launch 의
+        SIGINT 가 전달되지 않는다. 따라서 종료 시 명시적으로 process group 을 정리한다.
+        """
+        with self._lock:
+            proc = self._active_proc
+            self._active_proc = None
+        if proc is not None:
+            self.get_logger().info('[IbvsNnPickAgent] 종료 — 실행 중 launch 정리')
+            self._terminate(proc)
 
     # ── set_gripper 관측 ─────────────────────────────────────────────────
 
@@ -223,9 +241,14 @@ def main(args=None) -> None:
     executor.add_node(agent)
     try:
         executor.spin()
+    except KeyboardInterrupt:
+        pass
     finally:
+        agent.shutdown()  # 실행 중 nn_inference subprocess 정리(고아 방지)
         executor.shutdown()
-        rclpy.shutdown()
+        agent.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
