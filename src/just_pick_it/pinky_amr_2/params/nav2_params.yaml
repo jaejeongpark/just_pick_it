@@ -109,7 +109,7 @@ controller_server:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
 
       # 기본 속도들 (Pinky 상황 맞게 나중에 조정 가능)
-      desired_linear_vel: 0.08 # [m/s]
+      desired_linear_vel: 0.10 # [m/s]
       max_linear_accel: 0.5 # [m/s^2]
       max_linear_decel: 0.5 # [m/s^2]
       max_angular_vel: 0.7 # [rad/s]
@@ -170,8 +170,8 @@ local_costmap:
       global_frame: odom
       robot_base_frame: base_footprint
       rolling_window: true
-      width: 3
-      height: 3
+      width: 2
+      height: 2
       resolution: 0.03
       #robot_radius: 0.22
       footprint: "[[0.03, 0.03], [0.03, -0.03], [-0.03, -0.03], [-0.03, 0.03]]"
@@ -315,9 +315,9 @@ obstacle_stop:
     # PICKY2 narrow-map safety filter. This is not obstacle avoidance; it only
     # reduces/blocks forward velocity when a very close object is directly ahead.
     front_angle_center_rad: 3.141592653589793
-    front_angle_limit_rad: 0.08
-    slow_distance_m: 0.18
-    stop_distance_m: 0.12
+    front_angle_limit_rad: 0.10
+    slow_distance_m: 0.12
+    stop_distance_m: 0.10
     hard_stop_distance_m: 0.08
     max_decel_mps2: 0.40
     allow_rotation_when_blocked: true
