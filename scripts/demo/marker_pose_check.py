@@ -105,8 +105,30 @@ def _median(xs):
     return s[n // 2] if n % 2 else 0.5 * (s[n // 2 - 1] + s[n // 2])
 
 
+def _two_marker_pose(P0, P1, M0, M1):
+    """두 마커의 카메라프레임 (tx,tz) 와 월드좌표로 카메라 월드 pose 강체정합.
+
+    P_i=(tx,tz) 카메라프레임(z=전방=월드+y, x=우=월드+x at yaw0).
+    회전 rvec 미사용. 반환 (Cx, Cy, yaw_deg). 깊이 underscale 가 있으면 결과도
+    그만큼 어긋나므로 fx 보정 후 비교용.
+    """
+    (tx0, tz0), (tx1, tz1) = P0, P1
+    (mx0, my0), (mx1, my1) = M0, M1
+    # 마커선 기울기로 카메라 yaw: 카메라프레임 (Δtx,Δtz) vs 월드 (Δx,Δy)
+    theta = math.atan2(tz1 - tz0, tx1 - tx0) - math.atan2(my1 - my0, mx1 - mx0)
+    c, s = math.cos(theta), math.sin(theta)
+    cxs, cys = [], []
+    for (tx, tz), (mx, my) in ((P0, M0), (P1, M1)):
+        vx = c * tx + s * tz      # 월드 x 변위
+        vy = -s * tx + c * tz     # 월드 y 변위
+        cxs.append(mx - vx)
+        cys.append(my - vy)
+    return sum(cxs) / 2, sum(cys) / 2, math.degrees(theta), abs(cxs[0] - cxs[1])
+
+
 def main():
     window_sec = float(sys.argv[1]) if len(sys.argv) > 1 else 2.0
+    fx_scale = float(sys.argv[2]) if len(sys.argv) > 2 else 1.0
     P = load_dock_params()
     MARKER_SIZE = P["MARKER_SIZE"]
     CAM_FWD = P["CAM_FWD"]
@@ -117,6 +139,13 @@ def main():
     FLIP_180 = P["FLIP_180"]
     MARKER_WORLD = P["MARKER_WORLD"]
     K, dist = load_calib()
+    # fx/fy 스케일(가설 검증용). 캘리브 fx 가 실제보다 작으면(영상모드 crop 불일치)
+    # 거리·횡·회전이 전부 어긋난다. fx_scale>1 로 키워 tz 가 실제거리와 맞는지 본다.
+    if fx_scale != 1.0:
+        K = K.copy()
+        K[0, 0] *= fx_scale
+        K[1, 1] *= fx_scale
+        print(f"[fx_scale] fx,fy x{fx_scale} -> fx={K[0,0]:.1f} fy={K[1,1]:.1f}")
     h = MARKER_SIZE / 2.0
     obj = np.array([[-h, h, 0], [h, h, 0], [h, -h, 0], [-h, -h, 0]], dtype=np.float64)
     aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11)
@@ -237,6 +266,16 @@ def main():
                 print(f"  [두-마커 yaw] psi_two={math.degrees(psi_two):+.2f}deg "
                       f"(translation만, pose-flip 없음)  vs 단일 psi: "
                       f"id0={math.degrees(p0_m):+.2f} id1={math.degrees(p1_m):+.2f}deg")
+                # 강체정합 카메라 월드 pose (fx 가 맞으면 실제 카메라 위치와 일치해야 함).
+                if 0 in MARKER_WORLD and 1 in MARKER_WORLD:
+                    Cx, Cy, yaw_deg, resid = _two_marker_pose(
+                        (tx0_m, tz0_m), (tx1_m, tz1_m),
+                        MARKER_WORLD[0], MARKER_WORLD[1])
+                    sep = math.hypot(dtx, dtz)
+                    print(f"  [두-마커 pose] 카메라월드=({Cx:.3f},{Cy:.3f}) yaw={yaw_deg:+.1f}deg "
+                          f"| 두마커간격 측정={sep:.3f}(실제 "
+                          f"{math.hypot(MARKER_WORLD[1][0]-MARKER_WORLD[0][0], MARKER_WORLD[1][1]-MARKER_WORLD[0][1]):.3f}) "
+                          f"정합잔차={resid*1000:.0f}mm")
             print("-" * 70)
     except KeyboardInterrupt:
         pass
