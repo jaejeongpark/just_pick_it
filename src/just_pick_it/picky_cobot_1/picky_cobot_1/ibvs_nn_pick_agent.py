@@ -68,6 +68,8 @@ class IbvsNnPickAgent(Node):
         self._last_result: tuple[str, bool] | None = None
         # 실행 중인 nn_inference subprocess. 노드 종료 시 정리해 고아 방지.
         self._active_proc: subprocess.Popen | None = None
+        # 새 요청 도착 시 진행 중 픽을 선점(중단)하기 위한 플래그.
+        self._preempt = False
 
         cb_group = ReentrantCallbackGroup()
         self._result_pub = self.create_publisher(
@@ -110,10 +112,15 @@ class IbvsNnPickAgent(Node):
                 self._publish_result(request_id, self._last_result[1])
                 return
             if self._active_id is not None:
+                # 다른(새) request_id 도착 = 기존 픽이 더 이상 유효하지 않음(예: 클라이언트
+                # 재시작). 기존 픽을 선점해 중단시킨다. 워커가 정리하고 _active_id 를 비우면
+                # 클라이언트 재전송(retry) 시 새 요청이 수락된다.
                 self.get_logger().warn(
-                    f'[IbvsNnPickAgent] 다른 픽({self._active_id}) 처리 중 — '
-                    f'요청 {request_id} 무시'
+                    f'[IbvsNnPickAgent] 새 요청 {request_id} 수신 — 기존 픽 '
+                    f'{self._active_id} 선점/중단(재전송 시 수락)'
                 )
+                self._preempt = True
+                self._close_event.set()
                 return
             self._active_id = request_id
 
@@ -127,15 +134,24 @@ class IbvsNnPickAgent(Node):
             f'[IbvsNnPickAgent] 픽 시작 — product={product_name}, request_id={request_id}'
         )
         success = False
+        preempted = False
         proc = None
         try:
+            with self._lock:
+                self._preempt = False
             self._close_event.clear()
             proc = self._spawn_launch(product_name)
             if proc is not None:
                 with self._lock:
                     self._active_proc = proc
                 got = self._close_event.wait(timeout=self._pick_timeout)
-                if got:
+                with self._lock:
+                    preempted = self._preempt
+                if preempted:
+                    self.get_logger().warn(
+                        f'[IbvsNnPickAgent] 픽 {request_id} 선점되어 중단'
+                    )
+                elif got:
                     self.get_logger().info(
                         '[IbvsNnPickAgent] grip 닫기 관측 — 픽 성공 판정'
                     )
@@ -151,8 +167,13 @@ class IbvsNnPickAgent(Node):
             with self._lock:
                 self._active_proc = None
                 self._active_id = None
-                self._last_result = (request_id, success)
-            self._publish_result(request_id, success)
+                self._preempt = False
+                # 선점된 경우 결과를 캐시/발행하지 않는다(옛 클라이언트는 이미 떠났고,
+                # 새 요청은 재전송 시 정상 처리되도록 둔다).
+                if not preempted:
+                    self._last_result = (request_id, success)
+            if not preempted:
+                self._publish_result(request_id, success)
 
     def shutdown(self) -> None:
         """노드 종료 시 실행 중인 nn_inference subprocess 를 정리한다(고아 방지).
