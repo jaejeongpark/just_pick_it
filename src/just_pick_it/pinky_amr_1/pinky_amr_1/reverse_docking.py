@@ -191,6 +191,10 @@ class ReverseDocking(Node):
         # 곡선 이동의 횡(델타x) 게인. 약간 서(왼)쪽으로 지나쳐 멈추면 <1.0 으로 덜 이동.
         # 카메라 offset 대신 odom 이동량만 줄여 다른 경로엔 영향 없음.
         self.declare_parameter("curve_lat_gain", 0.9)
+        # 두-마커 검출 실패 시(너무 가까워 partner 화각밖): 법선 복귀 후 이만큼 추가 후진하고
+        # 재시도. 멀어질수록 두 마커 각이 좁아져 화각에 들어온다. 최대 재시도 횟수.
+        self.declare_parameter("two_marker_retry_reverse_m", 0.02)
+        self.declare_parameter("two_marker_max_retries", 5)
         # 시퀀스2 라인검출 횡조향 사용 여부. 기본 off → arc+recenter 정렬 믿고 직진 후진,
         # 마커는 깊이 정지에만 사용. 라인검출이 이 거리에서 불안정해 끄는 것이 안전.
         self.declare_parameter("use_lane_steering", False)
@@ -303,6 +307,10 @@ class ReverseDocking(Node):
         self._curve_pos_tol = float(self.get_parameter("curve_pos_tol_m").value)
         self._curve_kv = float(self.get_parameter("curve_kv").value)
         self._curve_lat_gain = float(self.get_parameter("curve_lat_gain").value)
+        self._two_marker_retry_reverse = float(
+            self.get_parameter("two_marker_retry_reverse_m").value)
+        self._two_marker_max_retries = int(
+            self.get_parameter("two_marker_max_retries").value)
         self._yaw_align_tol = self.get_parameter("yaw_align_tol_rad").value
         self._yaw_hold_kp   = self.get_parameter("yaw_hold_kp").value
 
@@ -421,10 +429,26 @@ class ReverseDocking(Node):
                 return True
 
             # 4) 쌍마커 검출 + 월드 pose 측정(마커 사이를 조준해 둘 다 검출).
+            #    너무 가까우면 partner 가 화각밖이라 실패 → 법선 복귀 후 2cm 더 후진하고
+            #    재시도(멀어질수록 두 마커 각이 좁아져 화각에 들어온다).
+            od_n = self._get_odom()
+            normal_yaw = od_n[2] if od_n is not None else None
             pose = self._measure_two_marker_pose(marker_id)
+            retries = 0
+            while pose is None and retries < self._two_marker_max_retries:
+                retries += 1
+                if normal_yaw is not None:
+                    self._rotate_to_odom_yaw(normal_yaw, "재시도 법선복귀")
+                self.get_logger().warn(
+                    f"reverse_dock: 두-마커 실패 → {self._two_marker_retry_reverse:.2f}m "
+                    f"추가 후진 후 재시도({retries}/{self._two_marker_max_retries})")
+                self._reverse_straight_odom(self._two_marker_retry_reverse)
+                od_n = self._get_odom()
+                normal_yaw = od_n[2] if od_n is not None else normal_yaw
+                pose = self._measure_two_marker_pose(marker_id)
             if pose is None:
                 self.get_logger().warn(
-                    "reverse_dock: 두-마커 측정 실패 → 단일 psi 법선정렬 fallback")
+                    "reverse_dock: 두-마커 측정 실패(재시도 소진) → 단일 psi 법선정렬 fallback")
                 self._align_yaw_to_normal(marker_id)
             else:
                 robot_x, robot_y, psi_two, (ox_m, oy_m, oth_m) = pose
