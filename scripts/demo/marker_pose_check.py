@@ -1,20 +1,31 @@
 #!/usr/bin/env python3
-"""마커 pose 정적 진단 (reverse docking 부호 검증용).
+"""마커 pose 정적 진단 (reverse docking 부호 검증 + Δx 깊이편향 진단용).
 
 로봇을 움직이지 않고, reverse_docking 과 똑같은 파이프라인
 (Picamera2 -> cv2.flip(-1) -> AprilTag 36h11 -> solvePnP IPPE_SQUARE,
-camera_calibration.yaml 직접 로드)으로 마커 pose 를 ~2Hz 로 출력한다.
+camera_calibration.yaml 직접 로드)으로 마커 pose 를 윈도우(기본 2초) 단위로
+평균내어 출력한다.
 
-목적: 로봇을 '아는 위치'(예: STANDBY_ZONE_1 x=0.11,y=0.40, 마커 바라봄)에 두고,
-출력된 tvec/rvec 과 거기서 추정한 robot world (x,y)·yaw 가 실제와 맞는지 확인해
-정렬 부호(tvec[0], rvec[1])를 확정한다.
+목적1 (부호 검증): 로봇을 '아는 위치'에 두고 tvec/rvec, robot world (x,y)·yaw 확인.
+목적2 (Δx 깊이편향 진단): 로봇을 진짜 x(예 0.11)에 정렬해두고 y(깊이)만 옮기며
+  각 깊이의 psi 평균을 비교한다. psi 가 깊이 무관 '상수 편향'이면
+  Δx_full = -(tx·cosψ + tz·sinψ)·scale 의 tz·sinψ 항이 깊이에 비례하는 phantom 을
+  만든다(= '같은 x 인데 깊이 따라 x 가 달라짐'의 원인). 윈도우 평균/표준편차로 확정.
+목적3 (두-마커 가능성): 각 깊이에서 몇 개 마커가 동시 검출되는지, 둘 다 보이면
+  translation 만으로(회전 rvec 안 씀) 계산한 두-마커 yaw 를 단일마커 psi 와 대조한다.
+
+깊이 실험 절차: 로봇을 x=0.11 에 정렬 -> 한 윈도우 요약 읽기 -> y 만 이동(예
+  0.40/0.30/0.20) -> 반복. 각 위치 요약의 psi 가 같은지(상수 편향) 확인.
 
 보드에서 실행(카메라가 다른 노드에 안 잡혀 있어야 함):
-  python3 scripts/demo/marker_pose_check.py
+  python3 scripts/demo/marker_pose_check.py            # 윈도우 2초
+  python3 scripts/demo/marker_pose_check.py 3.0        # 윈도우 3초
 """
 import math
 import os
+import sys
 import time
+from collections import defaultdict
 
 import cv2
 import numpy as np
@@ -76,7 +87,26 @@ def load_calib():
     return K, dist
 
 
+def _mean_std(xs):
+    if not xs:
+        return 0.0, 0.0
+    m = sum(xs) / len(xs)
+    if len(xs) < 2:
+        return m, 0.0
+    var = sum((x - m) ** 2 for x in xs) / (len(xs) - 1)
+    return m, math.sqrt(var)
+
+
+def _median(xs):
+    if not xs:
+        return 0.0
+    s = sorted(xs)
+    n = len(s)
+    return s[n // 2] if n % 2 else 0.5 * (s[n // 2 - 1] + s[n // 2])
+
+
 def main():
+    window_sec = float(sys.argv[1]) if len(sys.argv) > 1 else 2.0
     P = load_dock_params()
     MARKER_SIZE = P["MARKER_SIZE"]
     CAM_FWD = P["CAM_FWD"]
@@ -97,19 +127,30 @@ def main():
     cam.configure(cam.create_video_configuration(main={"size": (CAM_W, CAM_H), "format": "RGB888"}))
     cam.start()
     time.sleep(0.5)
-    print(f"[cam] started {CAM_W}x{CAM_H} flip_180={FLIP_180}")
-    print("로봇을 아는 위치에 두고(마커 바라봄) 아래 값을 실제와 비교하세요. Ctrl-C 종료.\n")
+    print(f"[cam] started {CAM_W}x{CAM_H} flip_180={FLIP_180} window={window_sec:.1f}s")
+    print("로봇을 아는 위치에 두고(마커 바라봄) 윈도우 요약을 실제와 비교하세요. Ctrl-C 종료.\n")
 
+    win_idx = 0
     try:
         while True:
-            frame = cam.capture_array()
-            if FLIP_180:
-                frame = cv2.flip(frame, -1)
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            corners, ids, _ = detector.detectMarkers(gray)
-            if ids is None:
-                print("  (마커 미검출)")
-            else:
+            # ── 한 윈도우 동안 프레임을 모아 마커별 샘플 누적 ──────────────
+            t_end = time.time() + window_sec
+            frames = 0
+            # id -> {tx, tz, ty, psi(채택), cx_px, both(set), e}
+            samp = defaultdict(lambda: defaultdict(list))
+            comb = defaultdict(int)   # 동시검출 조합(예 (0,1)) 빈도
+            while time.time() < t_end:
+                frame = cam.capture_array()
+                if FLIP_180:
+                    frame = cv2.flip(frame, -1)
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                corners, ids, _ = detector.detectMarkers(gray)
+                frames += 1
+                if ids is None:
+                    time.sleep(0.01)
+                    continue
+                seen_ids = tuple(sorted(int(m) for m in ids.flatten()))
+                comb[seen_ids] += 1
                 for i, mid in enumerate(ids.flatten()):
                     mid = int(mid)
                     img_pts = corners[i][0].astype(np.float64)
@@ -118,55 +159,85 @@ def main():
                     )
                     if n < 1:
                         continue
-                    # ±π 평면 모호성: 두 해 모두 psi 계산 후 재투영오차 작은 쪽 채택(안정화)
+                    # ±π 평면 모호성: 두 해 중 재투영오차 작은 쪽 채택(노드 안정화와 동일 취지)
                     cand = []
                     for si in range(n):
                         Rs, _ = cv2.Rodrigues(rvecs[si])
                         psi_s = math.atan2(float(Rs[0, 2]), -float(Rs[2, 2]))
                         e = float(errs[si][0]) if errs is not None else 0.0
-                        cand.append((e, psi_s, rvecs[si], tvecs[si]))
+                        cand.append((e, psi_s, tvecs[si]))
                     cand.sort(key=lambda c: c[0])
-                    _, _, rvec, tvec = cand[0]
-                    tx, ty, tz = (float(v) for v in tvec.flatten())
-                    rx, ry, rz = (float(v) for v in rvec.flatten())
-                    amb = "  ".join(
-                        f"psi={math.degrees(c[1]):+.1f}°(e={c[0]:.2f})" for c in cand
-                    )
-                    # 픽셀 중심 대비 마커 중심 위치(부호 직관 확인용)
-                    cx_px = float(corners[i][0][:, 0].mean())
-                    side = "왼쪽" if cx_px < CAM_W / 2 else "오른쪽"
-                    line = (
-                        f"id={mid} | tvec[x,y,z]=({tx:+.3f},{ty:+.3f},{tz:+.3f}) "
-                        f"rvec=({rx:+.2f},{ry:+.2f},{rz:+.2f}) "
-                        f"| 마커 화면 {side}(cx={cx_px:.0f})"
-                        f"\n      [두 해 psi/재투영오차] {amb}  (채택=오차작은쪽)"
-                    )
-                    if mid in MARKER_WORLD:
-                        mwx, mwy = MARKER_WORLD[mid]
-                        # 헤딩 오차 psi (마커 법선 기준 상대 yaw). 정면 정렬 시 ~0.
-                        Rm, _ = cv2.Rodrigues(rvec)
-                        psi = math.atan2(float(Rm[0, 2]), -float(Rm[2, 2]))
-                        robot_y = mwy - tz * DEPTH_SCALE - CAM_FWD
-                        rx_simple = mwx - tx                                  # psi=0 가정(현재 코드)
-                        rx_dec = mwx - tx * math.cos(psi) + tz * math.sin(psi)   # 헤딩보정 +sin
-                        rx_dec2 = mwx - tx * math.cos(psi) - tz * math.sin(psi)  # 헤딩보정 -sin
-                        line += (
-                            f"\n      robot_y_est={robot_y:.3f}(dock_y {DOCK.get(mid,('?','?'))[1]}) "
-                            f"psi={math.degrees(psi):+.1f}deg "
-                            f"robot_x: simple={rx_simple:.3f} dec+={rx_dec:.3f} dec-={rx_dec2:.3f} "
-                            f"(실제 dock_x {DOCK.get(mid,('?',))[0]})"
-                        )
-                        # ── 보정 후(reverse_docking 노드와 동일 식): tz·sin(psi_n) 디커플링 제거,
-                        #    tx 만(depth 독립). psi_n 은 yaw정렬용 참고로만 표시.
-                        psi_n = psi - YAW_OFFSET
-                        dx = -tx * LATERAL_SCALE + LAT_OFFSET
-                        line += (
-                            f"\n      [보정후] psi_법선기준={math.degrees(psi_n):+.1f}deg(정면시 ~0) "
-                            f"Δx(node)={dx:+.3f} robot_x_est={mwx + dx:.3f} (목표 {mwx:.3f})"
-                        )
-                    print("  " + line)
+                    e0, psi0, tvec0 = cand[0]
+                    tx0, ty0, tz0 = (float(v) for v in tvec0.flatten())
+                    d = samp[mid]
+                    d["tx"].append(tx0)
+                    d["ty"].append(ty0)
+                    d["tz"].append(tz0)
+                    d["psi"].append(psi0)
+                    d["err"].append(e0)
+                    d["cx"].append(float(corners[i][0][:, 0].mean()))
+                time.sleep(0.01)
+
+            # ── 윈도우 요약 출력 ────────────────────────────────────────
+            win_idx += 1
+            ndet = sorted(samp.keys())
+            print(f"===== 윈도우 #{win_idx} | {frames}프레임/{window_sec:.1f}s | "
+                  f"검출 마커 {len(ndet)}개 {ndet} =====")
+            # 동시검출 조합 분포(두-마커 가능성 판단)
+            if comb:
+                combs = "  ".join(
+                    f"{list(k)}:{v}f({100*v/max(frames,1):.0f}%)"
+                    for k, v in sorted(comb.items(), key=lambda kv: -kv[1])
+                )
+                print(f"  동시검출 조합: {combs}")
+
+            for mid in ndet:
+                d = samp[mid]
+                n = len(d["tx"])
+                if n == 0:
+                    continue
+                tx_m, tx_s = _mean_std(d["tx"])
+                tz_m, tz_s = _mean_std(d["tz"])
+                psi_m, psi_s = _mean_std(d["psi"])
+                psi_med = _median(d["psi"])
+                cx_m, _ = _mean_std(d["cx"])
+                side = "왼쪽" if cx_m < CAM_W / 2 else "오른쪽"
+                print(f"  id={mid} (n={n}, 화면{side} cx={cx_m:.0f})")
+                print(f"    tx={tx_m:+.4f}±{tx_s:.4f}  tz={tz_m:+.4f}±{tz_s:.4f}  "
+                      f"psi={math.degrees(psi_m):+.2f}±{math.degrees(psi_s):.2f}deg "
+                      f"(med {math.degrees(psi_med):+.2f})")
+                if mid in MARKER_WORLD:
+                    mwx, mwy = MARKER_WORLD[mid]
+                    psi_n = psi_m - YAW_OFFSET
+                    robot_y = mwy - tz_m * DEPTH_SCALE - CAM_FWD
+                    # Δx 세 가지: full(노드 현행, tz·sinψ 포함) / tx만 / dec-
+                    dx_full = -(tx_m * math.cos(psi_m) + tz_m * math.sin(psi_m)) \
+                        * LATERAL_SCALE + LAT_OFFSET
+                    dx_txonly = -tx_m * LATERAL_SCALE + LAT_OFFSET
+                    # tz·sinψ phantom 단독 크기(깊이편향의 정체)
+                    phantom = -tz_m * math.sin(psi_m) * LATERAL_SCALE
+                    print(f"    psi_법선기준={math.degrees(psi_n):+.2f}deg(정면시~0)  "
+                          f"robot_y_est={robot_y:.3f}(dock_y {DOCK.get(mid,('?','?'))[1]})")
+                    print(f"    Δx_full={dx_full:+.4f}(x={mwx+dx_full:.4f})  "
+                          f"Δx_tx만={dx_txonly:+.4f}(x={mwx+dx_txonly:.4f})  "
+                          f"tz·sinψ_phantom={phantom:+.4f}  (목표 x={mwx:.3f})")
+
+            # ── 두-마커 yaw (translation 만, 회전 rvec 미사용) ───────────────
+            if 0 in samp and 1 in samp and samp[0]["tx"] and samp[1]["tx"]:
+                tx0_m, _ = _mean_std(samp[0]["tx"])
+                tz0_m, _ = _mean_std(samp[0]["tz"])
+                tx1_m, _ = _mean_std(samp[1]["tx"])
+                tz1_m, _ = _mean_std(samp[1]["tz"])
+                dtx, dtz = (tx1_m - tx0_m), (tz1_m - tz0_m)
+                # 두 마커 월드 벡터(0->1)는 +x 축. 카메라 프레임 벡터(dtx,dtz)의
+                # 카메라 +x 대비 각도 = 벽 기준 카메라 yaw(부호는 실측으로 확정).
+                psi_two = math.atan2(dtz, dtx)
+                p0_m, _ = _mean_std(samp[0]["psi"])
+                p1_m, _ = _mean_std(samp[1]["psi"])
+                print(f"  [두-마커 yaw] psi_two={math.degrees(psi_two):+.2f}deg "
+                      f"(translation만, pose-flip 없음)  vs 단일 psi: "
+                      f"id0={math.degrees(p0_m):+.2f} id1={math.degrees(p1_m):+.2f}deg")
             print("-" * 70)
-            time.sleep(0.5)
     except KeyboardInterrupt:
         pass
     finally:
