@@ -26,9 +26,7 @@ TASK_PHASE_STATES = {
     'INSPECTION':       ['INSPECTING'],
     'UNLOAD':           ['UNLOADING'],
     'DISPLAY_SCAN':     ['SCANNING'],
-    'DISPLAY_PLACE':    ['PLACING'],
-    # 임시 테스트용
-    'SORTING_ONLY':     ['SORTING'], #나중에 삭제
+    'DISPLAY_PLACE':    ['PLACING']
 }
 
 
@@ -58,6 +56,7 @@ class CobotStateManager(Node):
         self.declare_parameter('vision_service_timeout_sec', 30.0)
         self.declare_parameter('cobot_port', '/dev/ttyJETCOBOT')
         self.declare_parameter('cobot_baudrate', 1_000_000)
+        self.declare_parameter('dry_run', False)
 
         self._robot_id       = self.get_parameter('robot_id').value
         self._vision_timeout = self.get_parameter('vision_service_timeout_sec').value
@@ -109,6 +108,7 @@ class CobotStateManager(Node):
             self,
             port=self.get_parameter('cobot_port').value,
             baudrate=self.get_parameter('cobot_baudrate').value,
+            dry_run=self.get_parameter('dry_run').value,
         )
 
         # 주기 상태 publish 타이머 (late subscriber 를 위한 cobot_state heartbeat)
@@ -236,9 +236,9 @@ class CobotStateManager(Node):
                     )
 
             self._set_state(phase)
-            feedback.state             = phase
-            feedback.message           = f'{phase} in progress'
-            feedback.progress          = float(idx) / total_phases
+            feedback.state              = phase
+            feedback.message            = f'{phase} in progress'
+            feedback.progress           = float(idx) / total_phases
             feedback.processed_quantity = detected_qty
             goal_handle.publish_feedback(feedback)
 
@@ -255,7 +255,10 @@ class CobotStateManager(Node):
                     stock_delta=0,
                 )
 
-            # 중간 인식 수량 feedback 갱신
+            # 단계 완료 feedback — 다음 단계 진입 전 task manager에 성공 알림
+            feedback.state              = phase
+            feedback.message            = f'{phase} complete'
+            feedback.progress           = float(idx + 1) / total_phases
             feedback.processed_quantity = detected_qty
             goal_handle.publish_feedback(feedback)
 
@@ -303,20 +306,29 @@ class CobotStateManager(Node):
         반환값: (success, detected_quantity)
         """
         if phase == 'SORTING':
-            return self._controller.run_sorting(request)
 
+            # [구현 필요] Vision Server에서 grasp_trajectory 수신 후 교체
+            grasp_trajectory: list[list[float]] = []
+            return self._controller.run_sorting(grasp_trajectory)
         elif phase == 'LOADING':
-            return self._controller.run_loading(request)
+            # [구현 필요] Vision Server에서 pick/place trajectory 수신 후 교체
+            pick_trajectory:  list[list[float]] = []
+            place_trajectory: list[list[float]] = []
+            return self._controller.run_loading(pick_trajectory, place_trajectory)
 
         elif phase == 'INSPECTING':
-            return self._controller.run_inspecting(request)
+            # [구현 필요] Vision Server에서 inspect_trajectory 수신 후 교체
+            inspect_trajectory: list[list[float]] = []
+            return self._controller.run_inspecting(inspect_trajectory)
 
         elif phase == 'UNLOADING':
-            return self._controller.run_unloading(request)
+            # [구현 필요] Vision Server에서 pick/place trajectory 수신 후 교체
+            pick_trajectory:  list[list[float]] = []
+            place_trajectory: list[list[float]] = []
+            return self._controller.run_unloading(pick_trajectory, place_trajectory)
+            # [구현 필요] Vision/학습 서버에서 받은 실제 grasp_trajectory로 교체
+            return self._controller.run_sorting([])
 
-        elif phase == 'SCANNING':
-            # [확정 필요] VisionScanService 인터페이스 타입 확정 후 아래 주석 해제
-            #
             # req = VisionScanService.Request()
             # req.task_id          = request.task_id
             # req.target_zone_name = request.target_zone_name
@@ -329,7 +341,10 @@ class CobotStateManager(Node):
             return True, 0
 
         elif phase == 'PLACING':
-            success, qty = self._controller.run_placing(self._scan_result, request)
+            # [구현 필요] Vision Server에서 pick/place trajectory 수신 후 교체
+            pick_trajectory:  list[list[float]] = []
+            place_trajectory: list[list[float]] = []
+            success, qty = self._controller.run_placing(pick_trajectory, place_trajectory)
             if success:
                 self._scan_result = None
             return success, qty
