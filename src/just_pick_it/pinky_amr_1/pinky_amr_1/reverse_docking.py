@@ -453,7 +453,7 @@ class ReverseDocking(Node):
 
             # 3) 후진 전 법선 정면 정렬. 두-마커 yaw(노이즈 없는 헤딩)로 정밀 정렬하고,
             #    안 되면 단일 psi 로 fallback. 이 헤딩을 reverse_insert 가 θ_ref 로 앵커링.
-            self._align_normal_two_marker(marker_id)
+            self._align_normal_two_marker(marker_id, dock_map_x)
 
             # 4) 그대로 직진 후진 + 마커 깊이로 정지.
             if not self._reverse_insert(marker_id, marker_y, dock_map_y):
@@ -751,7 +751,7 @@ class ReverseDocking(Node):
                 out[mid] = (tvec.flatten(), rvec.flatten())
         return out
 
-    def _align_normal_two_marker(self, marker_id: int) -> bool:
+    def _align_normal_two_marker(self, marker_id: int, dock_x: float) -> bool:
         """두 마커로 법선 헤딩을 정밀 정렬한다(단일 psi 노이즈 회피). best-effort.
 
         법선 정면에선 마커 1개만 보이므로, partner 마커 쪽으로 제자리 회전해 둘 다
@@ -850,21 +850,45 @@ class ReverseDocking(Node):
             self.get_logger().warn("TwoMarkerNormal: psi_two 샘플 부족 → 단일 psi fallback")
             return self._align_yaw_to_normal(marker_id)
 
-        dtx = (sum(txs_hi) / len(txs_hi)) - (sum(txs_lo) / len(txs_lo))
-        dtz = ((sum(tzs_hi) / len(tzs_hi)) - (sum(tzs_lo) / len(tzs_lo))) \
-            * self._two_marker_fx_scale
-        psi_two = math.atan2(dtz, dtx)
+        # tz 만 로컬 fx 보정(전역 depth 경로 무영향). psi_two = 벽 기준 카메라 yaw.
+        mtx_lo = sum(txs_lo) / len(txs_lo)
+        mtz_lo = sum(tzs_lo) / len(tzs_lo) * self._two_marker_fx_scale
+        mtx_hi = sum(txs_hi) / len(txs_hi)
+        mtz_hi = sum(tzs_hi) / len(tzs_hi) * self._two_marker_fx_scale
+        psi_two = math.atan2(mtz_hi - mtz_lo, mtx_hi - mtx_lo)
         theta_turned = sum(yaws) / len(yaws)
         if abs(psi_two) > self._two_marker_max_turn + 0.2:
             self.get_logger().warn(
                 f"TwoMarkerNormal: psi_two={math.degrees(psi_two):+.1f}deg 과대 → 단일 psi fallback")
             return self._align_yaw_to_normal(marker_id)
-        target_yaw = self._wrap(theta_turned + psi_two)
+        target_yaw = self._wrap(theta_turned + psi_two)   # 법선 odom yaw
+
+        # 강체정합 카메라 월드 x → 로봇중심 x(카메라 전방오프셋 역산). 횡오차 dx 산출.
+        c, s = math.cos(psi_two), math.sin(psi_two)
+        cx_lo = self._marker_world[lo_id][0] - (c * mtx_lo + s * mtz_lo)
+        cx_hi = self._marker_world[hi_id][0] - (c * mtx_hi + s * mtz_hi)
+        cam_x = 0.5 * (cx_lo + cx_hi)
+        robot_x = cam_x - self._cam_fwd * math.sin(psi_two)
+        dx = robot_x - dock_x
         self.get_logger().info(
             f"TwoMarkerNormal: psi_two={math.degrees(psi_two):+.1f}deg "
-            f"θ_turned={math.degrees(theta_turned):+.1f} → 목표법선 odom={math.degrees(target_yaw):+.1f}deg")
+            f"목표법선 odom={math.degrees(target_yaw):+.1f}deg robot_x={robot_x:.3f} "
+            f"dx={dx:+.3f}(잔차정합={abs(cx_lo - cx_hi)*1000:.0f}mm)")
 
-        # Phase 3: 목표 법선 odom yaw 로 제자리 회전.
+        # Phase 3: 법선 정면으로 회전(곡선 이동 전, arc 의 횡 기준을 법선에 맞춤).
+        self._rotate_to_odom_yaw(target_yaw, "법선정렬(곡선 전)")
+
+        # Phase 4: 두-마커 횡오차만큼 후진 arc(곡선 이동)로 x=dock_x 진입 → 법선 복귀.
+        if abs(dx) > self._arc_lat_tol:
+            self.get_logger().info(f"TwoMarkerNormal: 곡선 이동 dx={dx:+.3f}m → x={dock_x:.3f}")
+            self._arc_into_line(dx)
+            self._rotate_to_odom_yaw(target_yaw, "법선정렬(곡선 후)")
+        else:
+            self.get_logger().info("TwoMarkerNormal: 횡오차 작아 곡선 생략")
+        return True
+
+    def _rotate_to_odom_yaw(self, target_yaw: float, label: str = "") -> bool:
+        """제자리 회전으로 odom yaw 를 target_yaw 로 맞춘다(P제어). best-effort True."""
         deadline = time.time() + self._recenter_to
         last_log = 0.0
         while time.time() < deadline:
@@ -880,18 +904,18 @@ class ReverseDocking(Node):
             if abs(err) < self._yaw_align_tol:
                 self._stop()
                 self.get_logger().info(
-                    f"TwoMarkerNormal: 법선 정렬 완료 (잔차={math.degrees(err):+.1f}deg)")
+                    f"TwoMarkerNormal: {label} 완료(잔차={math.degrees(err):+.1f}deg)")
                 return True
             twist = Twist()
             twist.angular.z = self._clamp(self._recenter_kp * err)
             self._cmd_pub.publish(twist)
             if time.time() - last_log > 0.5:
                 self.get_logger().info(
-                    f"TwoMarkerNormal: 법선 복귀 중(err={math.degrees(err):+.1f}deg)")
+                    f"TwoMarkerNormal: {label} 중(err={math.degrees(err):+.1f}deg)")
                 last_log = time.time()
             time.sleep(0.05)
         self._stop()
-        self.get_logger().warn("TwoMarkerNormal: 법선 복귀 timeout → 현 정렬 유지")
+        self.get_logger().warn(f"TwoMarkerNormal: {label} timeout")
         return True
 
     @staticmethod
