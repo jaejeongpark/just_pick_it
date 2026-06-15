@@ -183,6 +183,11 @@ class ReverseDocking(Node):
         # partner 탐색 회전 속도(rad/s). acquire_rot(0.3)은 너무 빨라 동시검출 구간을
         # 지나치고 모션블러로 검출 실패 → 느리게. 첫 동시검출에 멈춰 정착 후 확인한다.
         self.declare_parameter("two_marker_search_omega", 0.08)
+        # 두-마커 검출 후 곡선 이동 목표 접근 깊이(월드 y, m). 여기서 dock_y 까지 직진 후진.
+        self.declare_parameter("approach_y_m", 0.18)
+        # 곡선 이동 도달 허용오차(m)와 후진 선속 게인(v=-kv·dist, reverse_speed 캡).
+        self.declare_parameter("curve_pos_tol_m", 0.012)
+        self.declare_parameter("curve_kv", 0.6)
         # 시퀀스2 라인검출 횡조향 사용 여부. 기본 off → arc+recenter 정렬 믿고 직진 후진,
         # 마커는 깊이 정지에만 사용. 라인검출이 이 거리에서 불안정해 끄는 것이 안전.
         self.declare_parameter("use_lane_steering", False)
@@ -291,6 +296,9 @@ class ReverseDocking(Node):
             self.get_parameter("two_marker_max_turn_rad").value)
         self._two_marker_search_omega = float(
             self.get_parameter("two_marker_search_omega").value)
+        self._approach_y = float(self.get_parameter("approach_y_m").value)
+        self._curve_pos_tol = float(self.get_parameter("curve_pos_tol_m").value)
+        self._curve_kv = float(self.get_parameter("curve_kv").value)
         self._yaw_align_tol = self.get_parameter("yaw_align_tol_rad").value
         self._yaw_hold_kp   = self.get_parameter("yaw_hold_kp").value
 
@@ -393,69 +401,45 @@ class ReverseDocking(Node):
                 self.get_logger().error("reverse_dock: FAILED — 마커 미획득")
                 return False
 
-            # 2) 정렬 반복. 핵심: 측정 전에 똑바로 세운다(psi≈0) → Δx 가 phantom 없이 깨끗.
-            #    순서: 초기 recenter → [똑바로세움 → 측정 → arc → recenter] × N.
+            # 2) 주마커 정면 정렬 후 법선 yaw 정렬(단일 psi).
             if not self._recenter_on_marker(marker_id, 0.0):
                 self._stop()
                 self.get_logger().error("reverse_dock: FAILED — 초기 재정렬")
                 return False
-            for p in range(self._align_passes):
-                # 측정 전 똑바로 세움(법선 정면) → 측정이 깨끗해짐.
-                self._align_yaw_to_normal(marker_id)
-                dx = self._measure_lateral_offset(marker_id)
-                if dx is None:
-                    self._stop()
-                    self.get_logger().error("reverse_dock: FAILED — 횡오차 측정 실패")
-                    return False
-                self.get_logger().info(
-                    f"정렬 {p + 1}/{self._align_passes}차: Δx={dx:+.3f}m"
-                )
-                # 수렴 종료: Δx 가 허용오차보다 작으면 정렬된 것으로 보고 종료. 허용오차를
-                # 보수적으로(작게) 둬야 off 인데 작게 측정돼 건너뛰고 후진하는 걸 줄인다.
-                if abs(dx) < self._align_conv_tol:
-                    # 수렴했어도 standby 에선 두 마커가 안 잡힌다(가까워져야 둘 다 보임).
-                    # arc 를 건너뛰면 그 자리에 머물러 두-마커 단계가 실패하므로, 법선방향으로
-                    # 일정 거리(converged_reverse_m) 직진 후진해 두-마커 검출 영역으로 들어간다.
-                    self.get_logger().info(
-                        f"정렬 수렴 (|Δx|={abs(dx):.3f} < {self._align_conv_tol}) → "
-                        f"법선 {self._converged_reverse_m:.2f}m 후진 후 종료"
-                    )
-                    self._reverse_straight_odom(self._converged_reverse_m)
-                    break
-                # 보정 게인: 1차는 first_pass_gain(0.8), 2차+ 는 arc_refine_gain(0.3) 만
-                # 이동해 과보정으로 법선을 지나치는 것을 막는다.
-                gain = self._first_pass_gain if p == 0 else self._arc_refine_gain
-                move_dx = dx * gain
-                self.get_logger().info(
-                    f"  보정: Δx {dx:+.3f} 의 {gain}배 = {move_dx:+.3f}m 이동"
-                )
-                # 부드러운 후진 arc 로 법선 진입(open-loop, odom 으로 종료판단). dx>0 → 서쪽.
-                if not self._arc_into_line(move_dx):
-                    self._stop()
-                    self.get_logger().error("reverse_dock: FAILED — arc 진입")
-                    return False
-                # arc 회전 후 마커 다시 중앙으로(이동 부호로 탐색방향 힌트).
-                if not self._recenter_on_marker(marker_id, move_dx):
-                    self._stop()
-                    self.get_logger().error("reverse_dock: FAILED — 마커 재정렬")
-                    return False
+            self._align_yaw_to_normal(marker_id)
 
-            # [디버그] 정렬+법선 후진까지만 하고 멈춰, 그 위치에서 두-마커 검출이 되는지
-            # 확인한다(true 면 reverse_insert 생략하고 종료 → 카메라 반납됨).
+            # 3) 법선방향 10cm 후진(두-마커 검출 영역 진입).
+            self._reverse_straight_odom(self._converged_reverse_m)
             if self._debug_stop_after_converge:
                 self._stop()
-                od = self._get_odom()
                 self.get_logger().warn(
-                    "reverse_dock: [DEBUG] 정렬+후진 후 정지 "
-                    f"(odom={od}). 두-마커 검출 확인용 — reverse_insert 생략."
-                )
+                    f"reverse_dock: [DEBUG] 후진 후 정지(odom={self._get_odom()}).")
                 return True
 
-            # 3) 후진 전 법선 정면 정렬. 두-마커 yaw(노이즈 없는 헤딩)로 정밀 정렬하고,
-            #    안 되면 단일 psi 로 fallback. 이 헤딩을 reverse_insert 가 θ_ref 로 앵커링.
-            self._align_normal_two_marker(marker_id, dock_map_x)
+            # 4) 쌍마커 검출 + 월드 pose 측정(마커 사이를 조준해 둘 다 검출).
+            pose = self._measure_two_marker_pose(marker_id)
+            if pose is None:
+                self.get_logger().warn(
+                    "reverse_dock: 두-마커 측정 실패 → 단일 psi 법선정렬 fallback")
+                self._align_yaw_to_normal(marker_id)
+            else:
+                robot_x, robot_y, psi_two, (ox_m, oy_m, oth_m) = pose
+                # 5) (dock_x, approach_y, 법선 월드yaw=π/2) 로 odom 정밀 곡선 이동.
+                #    world->odom 회전 α 로 목표 월드점을 odom 으로 변환.
+                alpha = oth_m - (math.pi / 2.0 - psi_two)
+                ca, sa = math.cos(alpha), math.sin(alpha)
+                wx = dock_map_x - robot_x
+                wy = self._approach_y - robot_y
+                to_x = ox_m + ca * wx - sa * wy
+                to_y = oy_m + sa * wx + ca * wy
+                to_yaw = self._wrap(oth_m + psi_two)
+                self.get_logger().info(
+                    f"reverse_dock: 두-마커 robot=({robot_x:.3f},{robot_y:.3f}) "
+                    f"psi_two={math.degrees(psi_two):+.1f}deg → 곡선목표 "
+                    f"odom=({to_x:.3f},{to_y:.3f},{math.degrees(to_yaw):+.1f}deg)")
+                self._curve_to_pose_odom(to_x, to_y, to_yaw)
 
-            # 4) 그대로 직진 후진 + 마커 깊이로 정지.
+            # 6) dock_y 까지 직진 후진 + 마커 깊이로 정지.
             if not self._reverse_insert(marker_id, marker_y, dock_map_y):
                 self._stop()
                 self.get_logger().error("reverse_dock: FAILED — 후진 도킹")
@@ -751,21 +735,20 @@ class ReverseDocking(Node):
                 out[mid] = (tvec.flatten(), rvec.flatten())
         return out
 
-    def _align_normal_two_marker(self, marker_id: int, dock_x: float) -> bool:
-        """두 마커로 법선 헤딩을 정밀 정렬한다(단일 psi 노이즈 회피). best-effort.
+    def _measure_two_marker_pose(self, marker_id: int):
+        """두 마커로 로봇 월드 pose 를 측정한다. (robot_x, robot_y, psi_two, (ox,oy,oθ)) 또는 None.
 
-        법선 정면에선 마커 1개만 보이므로, partner 마커 쪽으로 제자리 회전해 둘 다
-        잡은 뒤 두-마커 yaw(psi_two)를 측정하고, odom 으로 psi_two 만큼 되돌려 법선
-        정면을 만든다. psi_two = atan2((tz1-tz0)·fx, tx1-tx0) (월드 x 작은쪽=0, 큰쪽=1).
-        목표 법선 odom yaw = θ_turned + psi_two (실차 확정: 우회전 시 psi_two>0, 좌로 복귀).
-        실패(양마커 미검출/과대 psi/odom 없음) 시 단일 psi 로 fallback.
+        법선 정면에선 마커 1개만 보이므로 partner 쪽으로 느리게 회전해 둘 다 잡은 뒤,
+        translation 만으로(회전 rvec 안 씀) 강체정합해 로봇중심 월드 (x,y) 와 벽 기준
+        yaw(psi_two)를 낸다. psi_two=atan2((tz1-tz0)·fx, tx1-tx0) (월드 x 작은쪽=0,큰쪽=1).
+        tz 만 로컬 fx 보정(전역 depth 경로 무영향). 같은 순간의 odom 도 함께 반환해
+        호출부가 world->odom 변환에 쓴다. 실패 시 None.
         """
         if not self._use_two_marker_normal:
-            return self._align_yaw_to_normal(marker_id)
-        # partner = marker_world 의 다른 id. 월드 x 로 lo(작음)/hi(큼) 정렬.
+            return None
         others = [i for i in self._marker_world if i != marker_id]
         if not others:
-            return self._align_yaw_to_normal(marker_id)
+            return None
         partner = others[0]
         lo_id, hi_id = sorted(
             (marker_id, partner), key=lambda i: self._marker_world[i][0])
@@ -774,13 +757,13 @@ class ReverseDocking(Node):
 
         od0 = self._get_odom()
         if od0 is None:
-            self.get_logger().warn("TwoMarkerNormal: odom 없음 → 단일 psi fallback")
-            return self._align_yaw_to_normal(marker_id)
+            self.get_logger().warn("TwoMarker: odom 없음")
+            return None
         start_yaw = od0[2]
 
         # Phase 1: partner 가 보일 때까지 느리게 제자리 회전. 동시검출 구간이 좁고 보드
-        # 검출이 느려서 빠르면 지나친다 → search_omega(느림)로 돌고, 첫 동시검출 즉시 멈춰
-        # 정착(모션블러 제거) 후 정지상태에서 재확인되면 채택. 재확인 실패면 계속 회전.
+        # 검출이 느려 빠르면 지나친다 → search_omega(느림)로 돌고, 첫 동시검출 즉시 멈춰
+        # 정착(모션블러 제거) 후 정지상태에서 재확인되면 채택.
         deadline = time.time() + max(self._recenter_to,
                                      self._two_marker_max_turn / max(self._two_marker_search_omega, 0.01) + 4.0)
         found = False
@@ -794,7 +777,6 @@ class ReverseDocking(Node):
             if frame is not None:
                 dets = self._detect_two_markers(frame, lo_id, hi_id)
                 if lo_id in dets and hi_id in dets:
-                    # 동시검출 → 멈추고 정착 후 정지상태에서 재확인(블러 없는 깨끗한 검출).
                     self._stop()
                     time.sleep(0.25)
                     ok = 0
@@ -806,30 +788,29 @@ class ReverseDocking(Node):
                                 ok += 1
                         time.sleep(0.05)
                     if ok >= 2:
-                        self.get_logger().info("TwoMarkerNormal: 양마커 동시검출 확보(정지 확인)")
+                        self.get_logger().info("TwoMarker: 양마커 동시검출 확보(정지 확인)")
                         found = True
                         break
-                    # 정착 후 안 보이면(지나침/스퍼리어스) 계속 회전.
             od = self._get_odom()
             if od is not None and abs(self._angdiff(od[2], start_yaw)) > self._two_marker_max_turn:
                 self._stop()
-                self.get_logger().warn(
-                    "TwoMarkerNormal: 최대회전 초과로 양마커 미검출 → 단일 psi fallback")
-                return self._align_yaw_to_normal(marker_id)
+                self.get_logger().warn("TwoMarker: 최대회전 초과로 양마커 미검출")
+                return None
             twist = Twist()
             twist.angular.z = self._clamp(turn_dir * self._two_marker_search_omega)
             self._cmd_pub.publish(twist)
             if time.time() - last_log > 0.5:
                 self.get_logger().info(
-                    f"TwoMarkerNormal: partner 탐색 회전(dir={turn_dir:+.0f}, ω={self._two_marker_search_omega})")
+                    f"TwoMarker: partner 탐색 회전(dir={turn_dir:+.0f}, ω={self._two_marker_search_omega})")
                 last_log = time.time()
             time.sleep(0.05)
         if not found:
-            self.get_logger().warn("TwoMarkerNormal: partner 탐색 timeout → 단일 psi fallback")
-            return self._align_yaw_to_normal(marker_id)
+            self.get_logger().warn("TwoMarker: partner 탐색 timeout")
+            return None
 
-        # Phase 2: psi_two + odom yaw 윈도우 평균 측정.
-        txs_lo, tzs_lo, txs_hi, tzs_hi, yaws = [], [], [], [], []
+        # Phase 2: 두 마커 tx,tz + odom(x,y,yaw) 윈도우 평균.
+        txs_lo, tzs_lo, txs_hi, tzs_hi = [], [], [], []
+        oxs, oys, oys_yaw = [], [], []
         t_end = time.time() + 2.0
         while len(txs_lo) < self._measure_frames and time.time() < t_end:
             frame = self._get_latest_frame()
@@ -844,48 +825,94 @@ class ReverseDocking(Node):
                 tzs_hi.append(float(dets[hi_id][0][2]))
                 od = self._get_odom()
                 if od is not None:
-                    yaws.append(od[2])
+                    oxs.append(od[0])
+                    oys.append(od[1])
+                    oys_yaw.append(od[2])
             time.sleep(0.03)
-        if len(txs_lo) < 3 or not yaws:
-            self.get_logger().warn("TwoMarkerNormal: psi_two 샘플 부족 → 단일 psi fallback")
-            return self._align_yaw_to_normal(marker_id)
+        if len(txs_lo) < 3 or not oys_yaw:
+            self.get_logger().warn("TwoMarker: 샘플 부족")
+            return None
 
-        # tz 만 로컬 fx 보정(전역 depth 경로 무영향). psi_two = 벽 기준 카메라 yaw.
+        # tz 만 로컬 fx 보정. psi_two = 벽 기준 카메라 yaw(strong, translation 기반).
         mtx_lo = sum(txs_lo) / len(txs_lo)
         mtz_lo = sum(tzs_lo) / len(tzs_lo) * self._two_marker_fx_scale
         mtx_hi = sum(txs_hi) / len(txs_hi)
         mtz_hi = sum(tzs_hi) / len(tzs_hi) * self._two_marker_fx_scale
         psi_two = math.atan2(mtz_hi - mtz_lo, mtx_hi - mtx_lo)
-        theta_turned = sum(yaws) / len(yaws)
         if abs(psi_two) > self._two_marker_max_turn + 0.2:
             self.get_logger().warn(
-                f"TwoMarkerNormal: psi_two={math.degrees(psi_two):+.1f}deg 과대 → 단일 psi fallback")
-            return self._align_yaw_to_normal(marker_id)
-        target_yaw = self._wrap(theta_turned + psi_two)   # 법선 odom yaw
+                f"TwoMarker: psi_two={math.degrees(psi_two):+.1f}deg 과대")
+            return None
 
-        # 강체정합 카메라 월드 x → 로봇중심 x(카메라 전방오프셋 역산). 횡오차 dx 산출.
+        # 강체정합 카메라 월드 (x,y) → 로봇중심(카메라 전방오프셋 역산).
         c, s = math.cos(psi_two), math.sin(psi_two)
         cx_lo = self._marker_world[lo_id][0] - (c * mtx_lo + s * mtz_lo)
         cx_hi = self._marker_world[hi_id][0] - (c * mtx_hi + s * mtz_hi)
+        cy_lo = self._marker_world[lo_id][1] - (-s * mtx_lo + c * mtz_lo)
+        cy_hi = self._marker_world[hi_id][1] - (-s * mtx_hi + c * mtz_hi)
         cam_x = 0.5 * (cx_lo + cx_hi)
+        cam_y = 0.5 * (cy_lo + cy_hi)
         robot_x = cam_x - self._cam_fwd * math.sin(psi_two)
-        dx = robot_x - dock_x
+        robot_y = cam_y - self._cam_fwd * math.cos(psi_two)
+        odom_at = (sum(oxs) / len(oxs), sum(oys) / len(oys),
+                   sum(oys_yaw) / len(oys_yaw))
         self.get_logger().info(
-            f"TwoMarkerNormal: psi_two={math.degrees(psi_two):+.1f}deg "
-            f"목표법선 odom={math.degrees(target_yaw):+.1f}deg robot_x={robot_x:.3f} "
-            f"dx={dx:+.3f}(잔차정합={abs(cx_lo - cx_hi)*1000:.0f}mm)")
+            f"TwoMarker: robot=({robot_x:.3f},{robot_y:.3f}) "
+            f"psi_two={math.degrees(psi_two):+.1f}deg "
+            f"정합잔차x={abs(cx_lo - cx_hi)*1000:.0f}mm")
+        return robot_x, robot_y, psi_two, odom_at
 
-        # Phase 3: 법선 정면으로 회전(곡선 이동 전, arc 의 횡 기준을 법선에 맞춤).
-        self._rotate_to_odom_yaw(target_yaw, "법선정렬(곡선 전)")
+    def _curve_to_pose_odom(self, tx: float, ty: float, tyaw: float) -> bool:
+        """odom 기준 (tx,ty,tyaw) 로 후진 곡선 이동(정밀 정차). best-effort True.
 
-        # Phase 4: 두-마커 횡오차만큼 후진 arc(곡선 이동)로 x=dock_x 진입 → 법선 복귀.
-        if abs(dx) > self._arc_lat_tol:
-            self.get_logger().info(f"TwoMarkerNormal: 곡선 이동 dx={dx:+.3f}m → x={dock_x:.3f}")
-            self._arc_into_line(dx)
-            self._rotate_to_odom_yaw(target_yaw, "법선정렬(곡선 후)")
-        else:
-            self.get_logger().info("TwoMarkerNormal: 횡오차 작아 곡선 생략")
-        return True
+        후진으로 목표점에 접근하므로 '로봇 뒤쪽이 목표를 향하도록' 조향한다:
+        목표 desired heading = atan2(-ey,-ex)(rear 가 목표를 가리키는 body yaw). v<0 로
+        후진하며 ω=kp·(desired-cur). 목표점 도달(거리<tol) 후 tyaw 로 제자리 회전.
+        """
+        deadline = time.time() + self._arc_to * 2.0
+        start = self._get_odom()
+        start_dist = math.hypot(tx - start[0], ty - start[1]) if start else 0.0
+        min_dist = start_dist
+        last_log = 0.0
+        while time.time() < deadline:
+            if self._emergency.is_stopped():
+                self._stop()
+                deadline += self._wait_if_paused()
+                continue
+            od = self._get_odom()
+            if od is None:
+                time.sleep(0.05)
+                continue
+            cx, cy, cth = od
+            ex, ey = tx - cx, ty - cy
+            dist = math.hypot(ex, ey)
+            min_dist = min(min_dist, dist)
+            if dist < self._curve_pos_tol:
+                # 목표점 도달 → 종료 자세(법선)로 제자리 회전.
+                self._stop()
+                self.get_logger().info(f"Curve: 목표점 도달(dist={dist:.3f}) → 법선 회전")
+                return self._rotate_to_odom_yaw(tyaw, "곡선 종료자세")
+            theta_des = math.atan2(-ey, -ex)   # rear 가 목표를 향하는 body yaw
+            herr = self._angdiff(theta_des, cth)
+            v = -min(self._reverse_speed, max(0.02, self._curve_kv * dist))
+            omega = self._clamp(self._recenter_kp * herr)
+            # 발산 가드: 목표에서 멀어지기만 하면(조향 부호 의심) 정지하고 종료자세만 시도.
+            if dist > min_dist + 0.05:
+                self._stop()
+                self.get_logger().warn("Curve: 목표서 멀어짐(조향 의심) → 곡선 중단, 법선 회전")
+                return self._rotate_to_odom_yaw(tyaw, "곡선 종료자세")
+            twist = Twist()
+            twist.linear.x = v
+            twist.angular.z = omega
+            self._cmd_pub.publish(twist)
+            if time.time() - last_log > 0.5:
+                self.get_logger().info(
+                    f"Curve: dist={dist:.3f} herr={math.degrees(herr):+.1f}deg v={v:.3f}")
+                last_log = time.time()
+            time.sleep(0.05)
+        self._stop()
+        self.get_logger().warn("Curve: timeout → 법선 회전")
+        return self._rotate_to_odom_yaw(tyaw, "곡선 종료자세")
 
     def _rotate_to_odom_yaw(self, target_yaw: float, label: str = "") -> bool:
         """제자리 회전으로 odom yaw 를 target_yaw 로 맞춘다(P제어). best-effort True."""
