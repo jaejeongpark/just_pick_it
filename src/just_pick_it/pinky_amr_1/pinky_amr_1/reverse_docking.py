@@ -112,6 +112,10 @@ class ReverseDocking(Node):
             "calibration_yaml",
             "package://just_pick_it_perception/result/camera_calibration.yaml",
         )
+        # 캘리브 fx 가 실제 도킹 영상모드(picamera2 crop)보다 작게 잡혀 tz(깊이)·회전이
+        # 어긋난다(실측 D/tz=1.48). fx,fy 에 이 배율을 곱해 보정한다. tx(횡)는 fx 무관이라
+        # 영향 없음. 제대로는 도킹 영상모드 그대로 재캘리브가 정답(이건 stopgap).
+        self.declare_parameter("fx_scale", 1.0)
         # 카메라 소스: 'picamera2'(보드 직접, 기본) 또는 'ros_topic'(sim/테스트 폴백).
         # 직접 모드는 도킹 중에만 카메라를 열어 ROS Image pub/sub 오버헤드를 없앤다.
         self.declare_parameter("camera_source", "picamera2")
@@ -161,6 +165,9 @@ class ReverseDocking(Node):
         self.declare_parameter("arc_refine_gain", 0.3)
         # arc 1회 최대 횡이동(m). phantom 으로 큰 Δx 가 나와도 벽으로 돌진 못하게 캡.
         self.declare_parameter("arc_max_travel_m", 0.06)
+        # 첫 측정이 허용오차 안이라 arc 를 건너뛸 때, 그래도 법선방향으로 이만큼 직진 후진해
+        # 두-마커 검출 영역으로 들어간다(standby 에선 두 마커가 안 잡혀 후진이 필수).
+        self.declare_parameter("converged_reverse_m", 0.10)
         # 시퀀스2 라인검출 횡조향 사용 여부. 기본 off → arc+recenter 정렬 믿고 직진 후진,
         # 마커는 깊이 정지에만 사용. 라인검출이 이 거리에서 불안정해 끄는 것이 안전.
         self.declare_parameter("use_lane_steering", False)
@@ -221,6 +228,16 @@ class ReverseDocking(Node):
             self._dist_coeffs = np.array(
                 self.get_parameter("dist_coeffs").value, dtype=np.float64
             )
+        # fx,fy 보정(영상모드 crop 으로 캘리브 fx 가 작게 잡힘). tx 는 fx 무관이라 영향 없고
+        # tz(깊이)·회전만 보정된다. 기본 1.0 이면 무동작.
+        self._fx_scale = float(self.get_parameter("fx_scale").value)
+        if self._fx_scale != 1.0:
+            self._cam_matrix = self._cam_matrix.copy()
+            self._cam_matrix[0, 0] *= self._fx_scale
+            self._cam_matrix[1, 1] *= self._fx_scale
+            self.get_logger().info(
+                f"fx_scale={self._fx_scale} 적용 → fx={self._cam_matrix[0, 0]:.1f}"
+            )
         self._cam_fwd = self.get_parameter("camera_forward_offset_m").value
         self._depth_scale = self.get_parameter("depth_scale").value
         self._lateral_scale = self.get_parameter("lateral_scale").value
@@ -248,6 +265,7 @@ class ReverseDocking(Node):
         self._first_pass_gain = self.get_parameter("first_pass_gain").value
         self._arc_refine_gain = self.get_parameter("arc_refine_gain").value
         self._arc_max_travel = self.get_parameter("arc_max_travel_m").value
+        self._converged_reverse_m = self.get_parameter("converged_reverse_m").value
         self._yaw_align_tol = self.get_parameter("yaw_align_tol_rad").value
         self._yaw_hold_kp   = self.get_parameter("yaw_hold_kp").value
 
@@ -370,9 +388,14 @@ class ReverseDocking(Node):
                 # 수렴 종료: Δx 가 허용오차보다 작으면 정렬된 것으로 보고 종료. 허용오차를
                 # 보수적으로(작게) 둬야 off 인데 작게 측정돼 건너뛰고 후진하는 걸 줄인다.
                 if abs(dx) < self._align_conv_tol:
+                    # 수렴했어도 standby 에선 두 마커가 안 잡힌다(가까워져야 둘 다 보임).
+                    # arc 를 건너뛰면 그 자리에 머물러 두-마커 단계가 실패하므로, 법선방향으로
+                    # 일정 거리(converged_reverse_m) 직진 후진해 두-마커 검출 영역으로 들어간다.
                     self.get_logger().info(
-                        f"정렬 수렴 (|Δx|={abs(dx):.3f} < {self._align_conv_tol}) → 반복 종료"
+                        f"정렬 수렴 (|Δx|={abs(dx):.3f} < {self._align_conv_tol}) → "
+                        f"법선 {self._converged_reverse_m:.2f}m 후진 후 종료"
                     )
+                    self._reverse_straight_odom(self._converged_reverse_m)
                     break
                 # 보정 게인: 1차는 first_pass_gain(0.8), 2차+ 는 arc_refine_gain(0.3) 만
                 # 이동해 과보정으로 법선을 지나치는 것을 막는다.
@@ -773,6 +796,55 @@ class ReverseDocking(Node):
             time.sleep(0.05)
         self._stop()
         self.get_logger().warn(f"Arc: timeout (이동 {progress:.3f}/{need:.3f}m)")
+        return False
+
+    def _reverse_straight_odom(self, dist: float) -> bool:
+        """현재 헤딩(법선)을 odom 으로 유지하며 dist(m) 만큼 직진 후진. 거리 도달 시 True.
+
+        수렴(횡오차 작음) 시 arc 를 건너뛰면 standby 에 머물러 두-마커가 안 잡히므로,
+        법선방향으로 일정 거리 들어가 두-마커 검출 영역으로 진입할 때 쓴다. 시작 odom
+        yaw 를 θ_ref 로 잡고 yaw_hold 로 곧게 후진한다(reverse_insert 와 동일 원리).
+        """
+        if dist <= 0.0:
+            return True
+        od0 = self._get_odom()
+        if od0 is None:
+            self.get_logger().error("ReverseStraight: odom 없음 → 생략")
+            return False
+        ox0, oy0, theta_ref = od0
+        deadline = time.time() + self._arc_to
+        last_log = 0.0
+        while time.time() < deadline:
+            if self._emergency.is_stopped():
+                self._stop()
+                deadline += self._wait_if_paused()
+                continue
+            od = self._get_odom()
+            if od is None:
+                time.sleep(0.05)
+                continue
+            ox, oy, oyaw = od
+            traveled = math.hypot(ox - ox0, oy - oy0)
+            if traveled >= dist:
+                self._stop()
+                self.get_logger().info(f"ReverseStraight: {traveled:.3f}/{dist:.3f}m 도달")
+                return True
+            yaw_drift = math.atan2(math.sin(oyaw - theta_ref),
+                                   math.cos(oyaw - theta_ref))
+            omega = -self._yaw_hold_kp * yaw_drift
+            if time.time() - last_log > 0.5:
+                self.get_logger().info(
+                    f"ReverseStraight: {traveled:.3f}/{dist:.3f}m "
+                    f"yaw_drift={math.degrees(yaw_drift):+.1f}deg"
+                )
+                last_log = time.time()
+            twist = Twist()
+            twist.linear.x = -self._reverse_speed
+            twist.angular.z = self._clamp(omega)
+            self._cmd_pub.publish(twist)
+            time.sleep(0.05)
+        self._stop()
+        self.get_logger().warn(f"ReverseStraight: timeout ({dist:.3f}m 미달)")
         return False
 
     def _odom_cb(self, msg: Odometry):
