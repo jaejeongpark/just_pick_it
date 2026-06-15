@@ -272,7 +272,13 @@ def main():
                         (tx0_m, tz0_m), (tx1_m, tz1_m),
                         MARKER_WORLD[0], MARKER_WORLD[1])
                     sep = math.hypot(dtx, dtz)
-                    print(f"  [두-마커 pose] 카메라월드=({Cx:.3f},{Cy:.3f}) yaw={yaw_deg:+.1f}deg "
+                    # 로봇중심 = 카메라 - 전방오프셋(헤딩방향). 카메라는 중심보다 0.06 앞이라
+                    # 그대로 비교하면 yaw 만큼 옆으로 나가 보인다. 역산해 실제 로봇 x,y 로.
+                    yr = math.radians(yaw_deg)
+                    rcx = Cx - CAM_FWD * math.sin(yr)
+                    rcy = Cy - CAM_FWD * math.cos(yr)
+                    print(f"  [두-마커 pose] 카메라월드=({Cx:.3f},{Cy:.3f}) "
+                          f"로봇중심=({rcx:.3f},{rcy:.3f}) yaw={yaw_deg:+.1f}deg "
                           f"| 두마커간격 측정={sep:.3f}(실제 "
                           f"{math.hypot(MARKER_WORLD[1][0]-MARKER_WORLD[0][0], MARKER_WORLD[1][1]-MARKER_WORLD[0][1]):.3f}) "
                           f"정합잔차={resid*1000:.0f}mm")
