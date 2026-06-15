@@ -248,6 +248,11 @@ class CobotController:
         self._log(f'LOADING — product={product_name}, slot={slot}, order_id={order_id}')
 
         if not self._dry_run:
+            # SORTING(픽)에서 닫은 GRIP 상태를 LOADING 이동 내내 유지한다(이동 중 열지
+            # 않음). 픽->LOADING 핸드오프에서 그리퍼가 확실히 닫혀 있도록 명시적으로
+            # 재-grip 한 뒤 2단계로 이동하고, 슬롯 place 에서만 70 으로 부분 개방한다.
+            if not self.close_gripper():
+                return False, 0
             # 1단계 approach 를 거쳐 2단계 place 로 들어간다(충돌 방지).
             if not self.move_to_angles(approach):
                 return False, 0
