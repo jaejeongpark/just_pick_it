@@ -53,8 +53,12 @@
     first_pass_gain: 1.0       # 1차 보정 이동 비율(Δx 정확해져 전량 이동)
     arc_refine_gain: 0.3       # 2차+ 보정 이동 비율 (과보정으로 법선 지나침 방지)
     arc_max_travel_m: 0.06     # arc 1회 최대 횡이동(벽 돌진 방지 캡)
-    converged_reverse_m: 0.10  # 첫 측정이 허용오차 안일 때도 법선으로 이만큼 후진(두-마커 영역 진입)
-    debug_stop_after_converge: true   # [임시] 정렬+후진까지만 하고 정지(두-마커 검출 위치 확인용). 확인 후 false 로
+    converged_reverse_m: 0.07  # 첫 측정이 허용오차 안일 때도 법선으로 이만큼 후진(두-마커 영역 진입). 10cm 는 도크까지 너무 빠듯해 7cm
+    debug_stop_after_converge: false  # [임시] 정렬+후진까지만 하고 정지(두-마커 검출 위치 확인용)
+    # 후진 직전 법선 헤딩을 두-마커 yaw 로 정밀 정렬(단일 psi 노이즈 회피). 부호 의심되면 false.
+    use_two_marker_normal: true
+    two_marker_fx_scale: 1.48      # psi_two 의 tz 차에만 적용(실측 D/tz). 전역 depth 경로 무영향
+    two_marker_max_turn_rad: 0.6   # partner 화각진입 최대 제자리 회전. 초과 시 단일 psi fallback
     # 시퀀스2 라인 횡조향 사용 여부. false=직진 후진(마커는 깊이 정지만). 라인검출이
     # 이 거리에서 불안정해 기본 off. 라인 품질 개선되면 true.
     use_lane_steering: false
