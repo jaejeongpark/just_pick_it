@@ -15,6 +15,7 @@ WS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source ~/venv/jazzy/bin/activate 2>/dev/null || true
 source /opt/ros/jazzy/setup.bash
 source "$WS_ROOT/install/setup.bash"
+source "$WS_ROOT/scripts/dds_env.sh"   # 디스커버리 서버 env(공용)
 export ROS_DOMAIN_ID=25
 
 DEFAULT_MAP="$WS_ROOT/src/pinky_pro/pinky_navigation/map/sync_map.yaml"
@@ -26,8 +27,11 @@ if [[ ! -f "$MAP_PATH" ]]; then
 fi
 
 echo "=== [PICKY1] Nav2 — 로봇 토픽 대기 (/picky1/scan, /picky1/odom) ==="
-until ros2 topic list 2>/dev/null | grep -q '/picky1/scan' && \
-      ros2 topic list 2>/dev/null | grep -q '/picky1/odom'; do
+# 디스커버리 서버에선 그래프 조회(topic list)에 super client 가 필요하다(데이터 매칭은
+# 일반 클라이언트로 되지만 "토픽 목록"은 full graph 라야 보임). --no-daemon 으로
+# 데몬 상태와 무관하게 현재 env(서버)로 조회한다. nav 노드 자체는 일반 클라이언트.
+until topics=$(ROS_SUPER_CLIENT=true ros2 topic list --no-daemon 2>/dev/null); \
+      echo "$topics" | grep -q '/picky1/scan' && echo "$topics" | grep -q '/picky1/odom'; do
     printf '\r[대기] bringup의 /picky1/scan, /picky1/odom 확인 중...'
     sleep 2
 done

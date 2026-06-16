@@ -13,6 +13,7 @@ WS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source ~/venv/jazzy/bin/activate 2>/dev/null || true
 source /opt/ros/jazzy/setup.bash
 source "$WS_ROOT/install/setup.bash"
+source "$WS_ROOT/scripts/dds_env.sh"   # 디스커버리 서버 env(공용)
 export ROS_DOMAIN_ID=25
 
 echo "=== [PICKY1] Bringup (namespace /picky1, ROS_DOMAIN_ID=$ROS_DOMAIN_ID) ==="
