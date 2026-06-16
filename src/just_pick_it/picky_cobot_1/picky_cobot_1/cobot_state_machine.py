@@ -88,7 +88,7 @@ class CobotStateManager(Node):
         self._task_action_server = ActionServer(
             self,
             ExecuteTask,
-            f'{self._robot_id}/execute_task',
+            f'{self._robot_id.lower()}/execute_task',
             execute_callback=self._execute_task,
             goal_callback=self._on_task_goal,
             cancel_callback=self._on_task_cancel,

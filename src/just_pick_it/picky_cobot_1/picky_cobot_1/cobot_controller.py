@@ -171,6 +171,9 @@ class CobotController:
         반환값: (success, 집은 개수 0/1)
         """
         self._log(f'SORTING 시작 — product={product_name}')
+        if self._dry_run:
+            self._log(f'(dry_run) SORTING 시뮬레이션 — product={product_name}')
+            return True, 1
         if not self._pick.pick(product_name):
             return False, 0
         return True, 1
