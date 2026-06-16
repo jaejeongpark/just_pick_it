@@ -121,12 +121,12 @@
     # docking_test_20260615_132622에서 marker_z=0.483m로 success 처리됐지만,
     # marker_lat=0.162m, axis_err=-801px 상태라 물리적으로는 박으면서 회전했다.
     # 처음에는 충돌 여유를 보려고 marker_z 0.46m부터 시작했지만, 실차에서
-    # 약 7cm 정도 덜 들어간 상태로 멈춰 0.53m로 올린다. tolerance 0.02 기준
-    # 실제 성공 판정은 약 0.51m부터다.
+    # 약 7cm 정도 덜 들어간 상태로 멈춰 0.54m로 올린다. tolerance 0.02 기준
+    # 실제 성공 판정은 약 0.52m부터다.
     # PICKY1 담당자 실측 marker_y는 약 0.635m다. STANDBY_ZONE_2 y=0.40에서
     # 관측된 marker_z 약 0.22m를 함께 보면 카메라/실측 offset이 약 1~2cm라,
     # CHARGING_DOCK_2 y=0.08 기준 계산상 목표 marker_z는 약 0.54m지만,
-    # 물리 충돌 여유와 실제 카메라 시야를 보면서 0.53m부터 다시 테스트한다.
+    # 물리 충돌 여유와 실제 카메라 시야를 보면서 0.54m부터 다시 테스트한다.
     # reverse_distance_m은 성공 기준이 아니라 marker 거리 추정 실패/오차에 대비한
     # 안전 상한이다. 기존 odom 기준으로 되돌려 비교하려면 reverse_stop_mode를
     # odom_distance로 바꾼다.

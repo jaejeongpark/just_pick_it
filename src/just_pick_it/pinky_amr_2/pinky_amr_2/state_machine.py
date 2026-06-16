@@ -3,7 +3,7 @@
 
 Fleet Manager가 보내는 MoveCommand / DockCommand / EmergencyControl 계약을
 PICKY2 namespace 안에서 제공한다. 1차 통합판은 PICKY1에서 검증된 Nav2
-이동과 AprilTag/ArUco 정렬 + odom 거리 기반 후진 도킹 구현을 사용한다.
+이동과 AprilTag/ArUco 정렬 + marker distance 기준 후진 도킹 구현을 사용한다.
 """
 
 import math
@@ -419,7 +419,7 @@ class Amr2StateMachine(Node):
         return CancelResponse.ACCEPT
 
     def _execute_dock(self, goal_handle) -> DockCommand.Result:
-        """DOCK_IN task 수신 시 marker 정렬 + odom 거리 기반 후진 도킹을 수행한다."""
+        """DOCK_IN task 수신 시 marker 정렬 + marker distance 기준 후진 도킹을 수행한다."""
         request = goal_handle.request
         dock_name = request.dock_name
         start_zone_name = request.start_zone_name

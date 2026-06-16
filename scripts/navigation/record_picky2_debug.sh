@@ -17,7 +17,7 @@
 #   PICKY2_DEBUG_BASE=./bags              저장 루트 변경
 #   PICKY2_DEBUG_PROFILE=light            light 또는 full
 #   PICKY2_DEBUG_MAX_BAG_DURATION=600     bag 자동 split 시간(초)
-#   PICKY2_DEBUG_RECORD_CAMERA=1          /picky2/camera 계열과 docking/debug_image도 bag에 포함
+#   PICKY2_DEBUG_RECORD_CAMERA=0          /picky2/camera 계열과 docking/debug_image 기록 여부
 #   PICKY2_DEBUG_MCAP_PRESET=none         none은 MCAP 기본 인덱스를 남김, fastwrite는 분석 경고가 날 수 있음
 #   PICKY2_DEBUG_WITH_PC_MONITOR=1        PC CPU/메모리 감시 로그 추가
 #   PICKY2_DEBUG_LIFECYCLE_INTERVAL=0     lifecycle 상태 주기 기록(초, 0이면 비활성)
@@ -31,6 +31,9 @@ WS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source ~/venv/jazzy/bin/activate 2>/dev/null || true
 source /opt/ros/jazzy/setup.bash
 source "$WS_ROOT/install/setup.bash"
+if [[ "${USE_DDS:-1}" != "0" && -f "$WS_ROOT/scripts/dds_env.sh" ]]; then
+    source "$WS_ROOT/scripts/dds_env.sh"
+fi
 
 set -u
 
@@ -39,7 +42,7 @@ BASE_DIR="${PICKY2_DEBUG_BASE:-$WS_ROOT/bags}"
 OUT_DIR="$BASE_DIR/$RUN_NAME"
 DEBUG_PROFILE="${PICKY2_DEBUG_PROFILE:-light}"
 MAX_BAG_DURATION="${PICKY2_DEBUG_MAX_BAG_DURATION:-600}"
-RECORD_CAMERA="${PICKY2_DEBUG_RECORD_CAMERA:-1}"
+RECORD_CAMERA="${PICKY2_DEBUG_RECORD_CAMERA:-0}"
 MCAP_PRESET="${PICKY2_DEBUG_MCAP_PRESET:-none}"
 WITH_PC_MONITOR="${PICKY2_DEBUG_WITH_PC_MONITOR:-0}"
 LIFECYCLE_INTERVAL="${PICKY2_DEBUG_LIFECYCLE_INTERVAL:-0}"
