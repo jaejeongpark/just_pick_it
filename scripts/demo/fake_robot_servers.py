@@ -147,7 +147,7 @@ class FakeRobotServers(Node):
         self._picky_pose_hz = env_float("DEMO_PICKY_POSE_HZ", 1.0)
         self._dock_speed_mps = env_float("DEMO_DOCK_LINEAR_SPEED_MPS", 0.05)
         self._battery_standby_threshold = env_float("DEMO_PICKY_BATTERY_STANDBY_THRESHOLD", 30.0)
-        self._battery_drain_per_flow = env_float("DEMO_PICKY_BATTERY_DRAIN_PER_FLOW", 30.0)
+        self._battery_drain_per_flow = env_float("DEMO_PICKY_BATTERY_DRAIN_PER_FLOW", 0.0)
         self._charge_complete_seconds = env_float("DEMO_PICKY_CHARGE_COMPLETE_SECONDS", 5.0)
         self._cobot_auto_complete = env_bool("DEMO_COBOT_AUTO_COMPLETE", True)
         # 실로봇 혼합 테스트용 선택 mock. 실제 AMR(picky1) 주행 테스트 중에는
@@ -173,7 +173,7 @@ class FakeRobotServers(Node):
         for name in (PICKY_NAMES if self._mock_picky else ()):
             ns = name.lower()
             x, y, theta = INITIAL_PICKY_POSES[name]
-            runtime = PickyRuntime(name=name, x=x, y=y, theta=theta)
+            runtime = PickyRuntime(name=name, x=x, y=y, theta=theta, battery_percent=100.0)
             self._picky[name] = runtime
             self._state_pubs[name] = self.create_publisher(String, f"/{ns}/picky_state", 10)
             self._battery_pubs[name] = self.create_publisher(Float32, f"/{ns}/battery/percent", 10)
@@ -856,6 +856,9 @@ class FakeRobotServers(Node):
 
 def main() -> None:
     load_demo_env_defaults()
+    demo_domain = os.environ.get("DEMO_ROS_DOMAIN_ID")
+    if demo_domain:
+        os.environ["ROS_DOMAIN_ID"] = demo_domain
     rclpy.init()
     node = FakeRobotServers()
     executor = MultiThreadedExecutor(num_threads=8)
