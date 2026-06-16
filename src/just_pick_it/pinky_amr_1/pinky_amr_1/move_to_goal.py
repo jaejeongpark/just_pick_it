@@ -302,28 +302,6 @@ class MoveToGoal(Node):
         )
         return False
 
-    def _yaw_correction(self, target_yaw: float) -> bool:
-        """제자리 회전으로 최종 yaw 보정."""
-        deadline = time.time() + 8.0
-        KP = 1.2
-
-        while time.time() < deadline:
-            with self._lock:
-                err = normalize_angle(target_yaw - self._cur_yaw)
-
-            if abs(err) <= self._yaw_tol:
-                self._stop_robot()
-                return True
-
-            twist = Twist()
-            twist.angular.z = max(min(KP * err, 0.3), -0.3)
-            self._cmd_pub.publish(twist)
-            time.sleep(0.05)
-
-        self._stop_robot()
-        self.get_logger().warn("Yaw correction timeout")
-        return False
-
     def _stop_robot(self):
         self._cmd_pub.publish(Twist())
 

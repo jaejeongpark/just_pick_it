@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
 """
-Reverse Docking - 마커 깊이 + 노란 주차라인 정밀 정렬 후진 도킹
+Reverse Docking - 두 ArUco 마커 localization + odom 정밀 곡선 이동 후진 도킹
 
-설계 (좁은 도크 정밀 도킹용):
-  역할 분담
-    - ArUco 마커(상시 가시): 깊이(정지 시점) + 시작 coarse 정렬 + 도킹 후 /initialpose 보정
-    - 노란 주차라인:        lateral + yaw 정밀 정렬. 두 라인의 대칭선(채널 중심)을
-                            이미지 중심·수직(법선)으로 PID. 후진할수록 더 잘 보인다.
-    - 라인 검출 신뢰도(conf)로 "마커 coarse → 라인 정밀" 블렌딩.
-      시작(라인 일부만 보임)=마커 위주, 삽입(라인 충분)=라인 위주. ω 는 항상 한 값으로
-      합쳐 매끄럽게 움직인다(lateral+yaw 합산).
-    - 정지: 마커까지 거리로 추정한 로봇 world y 가 dock_y 에 도달하면.
+설계 (좁은 도크 정밀 도킹용, 2026-06-15 최종):
+  단일 평면 마커 rvec(yaw)는 pose-flip 으로 ±5~8° 노이즈라 헤딩 병목. 도크의 마커 2개
+  (id0,id1, 같은 벽)의 translation 만으로(회전 rvec 미사용) 강체정합해 로봇 (x,y)·벽기준
+  yaw 를 ambiguity 없이 1회 측정하고, 실제 이동은 noise 없는 odom 으로 한다.
 
-  좌표/부호 전제 (실차 브링업에서 검증·튜닝 대상):
+  6단계 시퀀스 (reverse_dock):
+    1. 주마커(id0) 향해 정렬 (acquire + recenter)
+    2. 법선 yaw 정렬 (단일 psi, 대략)
+    3. 법선방향 converged_reverse_m 직진 후진 (두-마커 검출 영역 진입)
+    4. 쌍마커 검출 + 월드 pose 측정 (마커 사이로 회전 → 둘 다 검출 → robot_x,y·psi_two;
+       가까워 partner 화각밖이면 2cm 씩 추가 후진 재시도)
+    5. odom 정밀 곡선 이동 (dock_x, approach_y, 법선 yaw 로 후진 곡선 + 종료자세 회전)
+    6. dock_y 까지 직진 후진 + 마커 깊이로 정지 → /initialpose 보정
+
+  좌표 전제:
     - 로봇은 헤드(+x_body, 전방 카메라)가 +y_world(마커 쪽)를 보며 -y 로 후진해 도크에 들어간다.
-    - solvePnP tvec: 카메라(optical) 기준. tvec[0]>0 = 마커가 우측, tvec[2] = 카메라→마커 거리.
-    - 후진 시 조향 부호는 전진과 반대(마커가 우측이면 좌회전).
+    - solvePnP tvec: 카메라(optical) 기준. tvec[0]>0 = 마커 우측, tvec[2] = 카메라→마커 거리.
+    - tx 는 fx 무관(정확), tz 는 fx 비례(영상모드 crop 으로 짧게 → fx_scale 보정).
 
-마커 월드 좌표는 state_manager 가 아니라 이 노드 설정(marker_id 별)에 둔다.
+마커 월드 좌표는 이 노드 설정(marker_id 별)에 둔다.
 reverse_dock(marker_id, dock_map_x, dock_map_y, dock_map_yaw) 를 state_manager 가 호출.
 """
 
@@ -37,44 +41,6 @@ from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Image
-
-
-class PID:
-    def __init__(self, kp: float, ki: float, kd: float):
-        self.kp, self.ki, self.kd = kp, ki, kd
-        self._integral = 0.0
-        self._prev_err = 0.0
-        self._prev_t = time.time()
-
-    def reset(self):
-        self._integral = 0.0
-        self._prev_err = 0.0
-        self._prev_t = time.time()
-
-    def compute(self, err: float) -> float:
-        now = time.time()
-        dt = max(now - self._prev_t, 1e-4)
-        self._integral += err * dt
-        d = (err - self._prev_err) / dt
-        out = self.kp * err + self.ki * self._integral + self.kd * d
-        self._prev_err = err
-        self._prev_t = now
-        return out
-
-
-class LaneResult:
-    """노란 주차라인 검출 결과.
-
-    lateral_px : 채널 중심선의 이미지 중심 대비 수평 오프셋(px). +면 중심이 우측.
-    yaw_rad    : 채널 중심선의 수직 대비 기울기(rad). +면 위로 갈수록 우측으로 기욺.
-    conf       : 검출 신뢰도 0..1 (양쪽 라인 존재 + 픽셀 수 기반).
-    """
-    __slots__ = ("lateral_px", "yaw_rad", "conf")
-
-    def __init__(self, lateral_px: float, yaw_rad: float, conf: float):
-        self.lateral_px = lateral_px
-        self.yaw_rad = yaw_rad
-        self.conf = conf
 
 
 class ReverseDocking(Node):
@@ -127,50 +93,25 @@ class ReverseDocking(Node):
         # base_link(중심) 에서 카메라가 전방(+x_body=+y_world)으로 떨어진 거리(m).
         # 마커 거리로 로봇 base 의 world y 를 추정할 때 보정에 쓴다(URDF 기준 근사).
         self.declare_parameter("camera_forward_offset_m", 0.05)
-        # solvePnP tvec 이 실측보다 짧게 나옴(캘리브/검출 규약). 그런데 그 비율이 거리에
-        # 따라 달라(가까움 ~1.48, 도크 원거리 ~1.36) 깊이정지(원거리)와 횡측정(가까움)을
-        # 분리한다. depth_scale: robot_y(도크 정지)용, lateral_scale: Δx(횡 측정)용.
+        # solvePnP tz(깊이)가 fx(영상모드 crop)로 짧게 나오는 걸 보정(robot_y 정지용).
+        # tx(횡)는 fx 무관이라 별도 스케일 불필요.
         self.declare_parameter("depth_scale", 1.36)
-        self.declare_parameter("lateral_scale", 1.48)
-        # 마커 좌표 횡 바이어스 보정(m). 정렬 후 x 가 일정하게 +쪽(동)으로 남으면 +값으로
-        # Δx 를 키워 더 서쪽으로 보낸다(실측 final_x - 0.11 만큼).
-        self.declare_parameter("marker_lat_offset_m", 0.0)
         # 마커 정면 정렬 시 rvec[1]≈π 인데, 마커 장착 미세 기울기 등으로 도크-정렬 헤딩과
         # 몇 도 어긋날 수 있다. yaw 목표를 이만큼 보정(도). +면 더 회전(rvec[1] 목표를 +방향).
         self.declare_parameter("marker_yaw_offset_deg", 0.0)
 
-        # ── 시작 coarse 정렬 (마커 상대) ────────────────────────────────
+        # ── 마커 탐색/재중심 ────────────────────────────────────────────
         self.declare_parameter("acquire_rotate_speed", 0.3)   # 마커 탐색 회전(rad/s)
-        self.declare_parameter("marker_lat_kp", 1.0)          # tvec[0] coarse 횡 게인
-        self.declare_parameter("marker_yaw_kp", 0.8)          # rvec[1] coarse yaw 게인
         # 채널 안에서 마커 상실 시: 후진을 멈추고 제자리 회전으로 마커를 카메라 중앙에
         # 되돌리는 재중심 단계. kp=중심 정렬 회전 게인, tol=중앙 허용 bearing(rad).
         self.declare_parameter("recenter_kp", 0.8)
         self.declare_parameter("recenter_tol_rad", 0.05)
         self.declare_parameter("recenter_timeout_sec", 6.0)
-        # 시퀀스1 = 마커로 법선 횡오차 1회 측정 → 부드러운 후진 arc 로 진입.
-        #   arc_omega: arc 회전율(rad/s, 작을수록 큰 반경=회전 적고 후진 많음)
-        #   arc_lat_tol_m: odom 횡이동 종료 허용오차, arc_timeout_sec: arc 최대 시간
-        #   measure_frames: 법선 횡오차 1회 측정 평균 프레임수
-        self.declare_parameter("arc_omega", 0.25)
-        self.declare_parameter("arc_lat_tol_m", 0.005)
+        # 후진/측정 공통: 후진 직진 timeout, 두-마커 측정 평균 프레임수.
         self.declare_parameter("arc_timeout_sec", 20.0)
         self.declare_parameter("measure_frames", 10)
-        # 측정 Δx 가 이보다 작으면 이미 정렬된 것으로 보고 arc 생략·반복 종료(노이즈/phantom
-        # 추종 방지). rvec 잔여 yaw 로 인한 측정 phantom 바닥(~2~3cm)보다 약간 크게.
-        self.declare_parameter("align_conv_tol_m", 0.03)
-        # 정렬 보정 게인: 1차는 first_pass_gain, 2차+ 는 arc_refine_gain 비율만 이동
-        # (과보정으로 법선 지나침 방지).
-        self.declare_parameter("first_pass_gain", 0.8)
-        self.declare_parameter("arc_refine_gain", 0.3)
-        # arc 1회 최대 횡이동(m). phantom 으로 큰 Δx 가 나와도 벽으로 돌진 못하게 캡.
-        self.declare_parameter("arc_max_travel_m", 0.06)
-        # 첫 측정이 허용오차 안이라 arc 를 건너뛸 때, 그래도 법선방향으로 이만큼 직진 후진해
-        # 두-마커 검출 영역으로 들어간다(standby 에선 두 마커가 안 잡혀 후진이 필수).
+        # 법선 정렬 후 두-마커 검출 영역으로 진입하기 위한 법선방향 직진 후진량(m).
         self.declare_parameter("converged_reverse_m", 0.10)
-        # [디버그] true 면 정렬+법선후진까지만 하고 정지(reverse_insert 생략). 그 위치에서
-        # 두-마커 검출 가능 여부를 marker_pose_check 로 확인하기 위한 임시 스캐폴드.
-        self.declare_parameter("debug_stop_after_converge", False)
         # 후진 직전 법선 헤딩을 두-마커 yaw 로 정밀 정렬(단일 psi 노이즈 회피). 두 마커를
         # 보려면 마커 사이를 조준해야 하므로 partner 쪽으로 제자리 회전해 둘 다 잡은 뒤
         # psi_two 만큼 되돌려 법선 정면을 만든다. 실패 시 단일 psi(_align_yaw_to_normal) fallback.
@@ -195,27 +136,10 @@ class ReverseDocking(Node):
         # 재시도. 멀어질수록 두 마커 각이 좁아져 화각에 들어온다. 최대 재시도 횟수.
         self.declare_parameter("two_marker_retry_reverse_m", 0.02)
         self.declare_parameter("two_marker_max_retries", 5)
-        # 시퀀스2 라인검출 횡조향 사용 여부. 기본 off → arc+recenter 정렬 믿고 직진 후진,
-        # 마커는 깊이 정지에만 사용. 라인검출이 이 거리에서 불안정해 끄는 것이 안전.
-        self.declare_parameter("use_lane_steering", False)
-        # [측정→arc→재정렬] 반복 횟수(잔여 횡오차 수렴).
-        self.declare_parameter("align_passes", 2)
         # yaw 정렬 완료 허용오차(rad). 마커 fronto-parallel(법선 정면)까지 제자리 회전.
         self.declare_parameter("yaw_align_tol_rad", 0.04)   # ~2.3deg
         # 후진 중 odom yaw 헤딩 유지 P게인. θ_ref(법선)에서 벗어나면 되돌린다.
         self.declare_parameter("yaw_hold_kp", 1.0)
-
-        # ── 정밀 정렬 (노란 라인) ───────────────────────────────────────
-        self.declare_parameter("lane_lat_kp", 0.004)          # lateral_px 게인
-        self.declare_parameter("lane_yaw_kp", 0.8)            # yaw_rad 게인
-        self.declare_parameter("lane_yellow_lower", [20, 100, 100])  # HSV
-        self.declare_parameter("lane_yellow_upper", [35, 255, 255])
-        self.declare_parameter("lane_min_pixels", 150)        # 한쪽 라인 최소 픽셀(conf 0)
-        self.declare_parameter("lane_full_pixels", 1200)      # 이 이상이면 conf 1
-        # 노란선이 3줄(왼|중앙(공유)|오)이라 컬럼 히스토그램으로 라인을 분리한 뒤
-        # dock1=왼쪽 2줄, dock2=오른쪽 2줄을 채널로 쓴다. 컬럼이 라인인지 판정하는 임계
-        # (ROI 세로 대비 그 컬럼의 노란픽셀 비율).
-        self.declare_parameter("lane_col_active_ratio", 0.25)
 
         # ── 후진/정지 ───────────────────────────────────────────────────
         self.declare_parameter("reverse_speed", 0.04)         # 후진 속도(m/s)
@@ -267,8 +191,6 @@ class ReverseDocking(Node):
             )
         self._cam_fwd = self.get_parameter("camera_forward_offset_m").value
         self._depth_scale = self.get_parameter("depth_scale").value
-        self._lateral_scale = self.get_parameter("lateral_scale").value
-        self._marker_lat_offset = self.get_parameter("marker_lat_offset_m").value
         self._marker_yaw_offset = math.radians(self.get_parameter("marker_yaw_offset_deg").value)
 
         self._camera_source = self.get_parameter("camera_source").value
@@ -277,24 +199,12 @@ class ReverseDocking(Node):
         self._flip_180 = bool(self.get_parameter("flip_camera_180").value)
 
         self._acquire_rot   = self.get_parameter("acquire_rotate_speed").value
-        self._marker_lat_kp = self.get_parameter("marker_lat_kp").value
-        self._marker_yaw_kp = self.get_parameter("marker_yaw_kp").value
         self._recenter_kp  = self.get_parameter("recenter_kp").value
         self._recenter_tol = self.get_parameter("recenter_tol_rad").value
         self._recenter_to  = self.get_parameter("recenter_timeout_sec").value
-        self._arc_omega     = self.get_parameter("arc_omega").value
-        self._arc_lat_tol   = self.get_parameter("arc_lat_tol_m").value
         self._arc_to        = self.get_parameter("arc_timeout_sec").value
         self._measure_frames = int(self.get_parameter("measure_frames").value)
-        self._use_lane      = bool(self.get_parameter("use_lane_steering").value)
-        self._align_passes  = int(self.get_parameter("align_passes").value)
-        self._align_conv_tol = self.get_parameter("align_conv_tol_m").value
-        self._first_pass_gain = self.get_parameter("first_pass_gain").value
-        self._arc_refine_gain = self.get_parameter("arc_refine_gain").value
-        self._arc_max_travel = self.get_parameter("arc_max_travel_m").value
         self._converged_reverse_m = self.get_parameter("converged_reverse_m").value
-        self._debug_stop_after_converge = bool(
-            self.get_parameter("debug_stop_after_converge").value)
         self._use_two_marker_normal = bool(
             self.get_parameter("use_two_marker_normal").value)
         self._two_marker_fx_scale = float(
@@ -313,16 +223,6 @@ class ReverseDocking(Node):
             self.get_parameter("two_marker_max_retries").value)
         self._yaw_align_tol = self.get_parameter("yaw_align_tol_rad").value
         self._yaw_hold_kp   = self.get_parameter("yaw_hold_kp").value
-
-        self._lane_lat_kp = self.get_parameter("lane_lat_kp").value
-        self._lane_yaw_kp = self.get_parameter("lane_yaw_kp").value
-        self._yellow_lo = tuple(int(v) for v in self.get_parameter("lane_yellow_lower").value)
-        self._yellow_hi = tuple(int(v) for v in self.get_parameter("lane_yellow_upper").value)
-        self._lane_min_px  = int(self.get_parameter("lane_min_pixels").value)
-        self._lane_full_px = int(self.get_parameter("lane_full_pixels").value)
-        self._lane_col_ratio = self.get_parameter("lane_col_active_ratio").value
-        self._dock_left = True       # reverse_dock 에서 marker_id 로 설정(dock1=좌/dock2=우)
-        self._dbg_line_xs: list[int] = []   # 디버그: 마지막 검출 라인 x 들
 
         self._reverse_speed = self.get_parameter("reverse_speed").value
         self._stop_tol      = self.get_parameter("stop_y_tolerance_m").value
@@ -345,10 +245,6 @@ class ReverseDocking(Node):
             [ h, -h, 0.0],
             [-h, -h, 0.0],
         ], dtype=np.float64)
-
-        # ── PID (정밀 정렬용 라인 lateral/yaw) ──────────────────────────
-        self._lane_lat_pid = PID(self._lane_lat_kp, 0.0, 0.0005)
-        self._lane_yaw_pid = PID(self._lane_yaw_kp, 0.0, 0.05)
 
         # ── 카메라/퍼블리셔 ─────────────────────────────────────────────
         self._bridge = CvBridge()
@@ -393,16 +289,12 @@ class ReverseDocking(Node):
             )
             return False
         marker_x, marker_y = self._marker_world[marker_id]
-        # dock1(marker 0, world x 작음) = 왼쪽 채널(왼+중앙 라인), dock2 = 오른쪽(중앙+오).
-        self._dock_left = (marker_id == 0)
 
         self.get_logger().info(
             f"reverse_dock: marker={marker_id}@world({marker_x:.3f},{marker_y:.3f}), "
             f"dock=({dock_map_x:.3f},{dock_map_y:.3f},"
             f"{math.degrees(dock_map_yaw):.1f}deg)"
         )
-        self._lane_lat_pid.reset()
-        self._lane_yaw_pid.reset()
 
         # picamera2 모드는 도킹 동안만 카메라를 열고, 끝나면(성공/실패 무관) 반납한다.
         self._open_camera()
@@ -422,11 +314,6 @@ class ReverseDocking(Node):
 
             # 3) 법선방향 10cm 후진(두-마커 검출 영역 진입).
             self._reverse_straight_odom(self._converged_reverse_m)
-            if self._debug_stop_after_converge:
-                self._stop()
-                self.get_logger().warn(
-                    f"reverse_dock: [DEBUG] 후진 후 정지(odom={self._get_odom()}).")
-                return True
 
             # 4) 쌍마커 검출 + 월드 pose 측정(마커 사이를 조준해 둘 다 검출).
             #    너무 가까우면 partner 가 화각밖이라 실패 → 법선 복귀 후 2cm 더 후진하고
@@ -531,7 +418,7 @@ class ReverseDocking(Node):
         return False
 
     # ====================================================================== #
-    # 단계 C: 후진 삽입 (라인 정밀 + 마커 깊이)
+    # 단계 C: 후진 삽입 (마커 깊이 정지)
     # ====================================================================== #
 
     def _reverse_insert(
@@ -545,8 +432,8 @@ class ReverseDocking(Node):
         헤딩 유지: 진입 직후 odom yaw 를 θ_ref(=법선 헤딩)로 앵커링하고, 후진 내내
         odom yaw=θ_ref 로 P제어해 헤딩을 정밀하게 고정한다(psi 노이즈 안 씀). 작은 yaw
         오차도 후진하며 x 드리프트로 누적되므로, 흔들림 없이 일정 헤딩으로 곧게 내려간다.
-        라인은 use_lane_steering=true 일 때만 횡조향(기본 off). 마커 상실 시 재중심.
-        정지: 로봇 world y(= marker_y - 마커거리·scale - 카메라 전방오프셋) <= dock_y
+        마커 상실 시 제자리 회전으로 재중심. 정지: 로봇 world y(= marker_y - 마커거리·scale
+        - 카메라 전방오프셋) <= dock_y.
         """
         deadline = time.time() + self._insert_to
         last_tx = 0.0
@@ -597,13 +484,9 @@ class ReverseDocking(Node):
                 return True
 
             # 헤딩 유지: odom yaw 를 θ_ref 로 P제어(노이즈 없는 정밀 직진). odom yaw 증가=CCW
-            # 이므로 (yaw-θ_ref)>0 이면 CW(-)로 보정. use_lane_steering=true 면 라인 PID 우선.
-            lane = self._detect_lane(frame)
+            # 이므로 (yaw-θ_ref)>0 이면 CW(-)로 보정.
             yaw_drift = 0.0
-            if self._use_lane and lane is not None and lane.conf > 0.0:
-                omega = -(self._lane_lat_pid.compute(lane.lateral_px)
-                          + self._lane_yaw_pid.compute(lane.yaw_rad))
-            elif theta_ref is not None:
+            if theta_ref is not None:
                 od = self._get_odom()
                 if od is not None:
                     yaw_drift = math.atan2(math.sin(od[2] - theta_ref),
@@ -613,14 +496,9 @@ class ReverseDocking(Node):
                 omega = 0.0
 
             if time.time() - last_log > 0.5:
-                lane_s = (
-                    f"conf={lane.conf:.2f} lat={lane.lateral_px:.0f}px yaw={lane.yaw_rad:.3f}"
-                    if lane is not None else "none"
-                )
                 self.get_logger().info(
                     f"Insert: dist={marker_dist:.3f} robot_y={robot_y:.3f}/dock={dock_y:.3f} "
-                    f"yaw_drift={math.degrees(yaw_drift):+.1f}deg lane[{lane_s}] "
-                    f"lines={self._dbg_line_xs} omega={omega:.3f}"
+                    f"yaw_drift={math.degrees(yaw_drift):+.1f}deg omega={omega:.3f}"
                 )
                 last_log = time.time()
 
@@ -983,114 +861,6 @@ class ReverseDocking(Node):
     def _wrap(a: float) -> float:
         return math.atan2(math.sin(a), math.cos(a))
 
-    def _measure_lateral_offset(self, marker_id: int):
-        """마커를 여러 프레임 평균내어 법선(마커 x선)까지의 횡오차 Δx 를 1회 계산.
-
-        Δx = robot_x - marker_x = -(tx·cos(psi) + tz·sin(psi)).  (정적검증: dec-)
-        psi 는 정면(rvec_y≈±π)에서 ±부호 모호성이 있어, 프레임별 psi 대신 법선벡터
-        성분(R[0,2], R[2,2])을 평균해 한 번만 psi 를 구한다(노이즈·flip 완화).
-        Δx>0 이면 로봇이 법선보다 +x(동)쪽 → 서쪽으로 이동해야 함. 실패 시 None.
-        """
-        txs, tzs, nxs, nzs = [], [], [], []
-        deadline = time.time() + 3.0
-        while len(txs) < self._measure_frames and time.time() < deadline:
-            frame = self._get_latest_frame()
-            if frame is None:
-                time.sleep(0.03)
-                continue
-            m = self._detect_aruco(frame, marker_id)
-            if m is None:
-                time.sleep(0.03)
-                continue
-            tvec, rvec = m
-            R, _ = cv2.Rodrigues(np.asarray(rvec, dtype=np.float64).reshape(3, 1))
-            txs.append(float(tvec[0]))
-            tzs.append(float(tvec[2]))
-            nxs.append(float(R[0, 2]))
-            nzs.append(float(R[2, 2]))
-            time.sleep(0.03)
-        if len(txs) < 3:
-            self.get_logger().warn("Measure: 마커 샘플 부족")
-            return None
-        tx = sum(txs) / len(txs)
-        tz = sum(tzs) / len(tzs)
-        psi = math.atan2(sum(nxs) / len(nxs), -sum(nzs) / len(nzs))
-        # solvePnP tvec 이 실측보다 짧게 나오므로 lateral_scale(측정거리 기준 ~1.48)을 곱해
-        # 실제 거리(m)로. 깊이정지(원거리)용 depth_scale 과 분리(측정·정지 거리가 달라 비율 다름).
-        dx = (-(tx * math.cos(psi) + tz * math.sin(psi)) * self._lateral_scale
-              + self._marker_lat_offset)
-        self.get_logger().info(
-            f"Measure: Δx={dx:+.3f}m (tx={tx:.3f} tz={tz:.3f} "
-            f"psi={math.degrees(psi):+.1f}deg, lat_scale={self._lateral_scale}, "
-            f"offset={self._marker_lat_offset}, n={len(txs)})"
-        )
-        return dx
-
-    def _arc_into_line(self, dx: float) -> bool:
-        """부드러운 후진 arc 로 법선(마커 x선)까지 횡이동 |Δx|. odom 상대 횡변위로 종료 판단.
-
-        Δx>0(로봇이 법선보다 +x=동쪽) → 서쪽(로봇 왼쪽)으로 이동해야 하므로 후진+CW(ω<0).
-        odom 으로 시작점 대비 '오른쪽 방향' 변위를 적분해 |Δx| 만큼 가면 정지(단일 매끄러운 호).
-        부호가 반대로 가면 odom 으로 감지해 ω 를 한 번 뒤집는다(부호 오류에 강건).
-        """
-        if abs(dx) < self._arc_lat_tol:
-            self.get_logger().info(f"Arc: 이미 법선 근처(Δx={dx:+.3f}m), 생략")
-            return True
-        odom0 = self._get_odom()
-        if odom0 is None:
-            self.get_logger().error("Arc: odom 없음 → 실패")
-            return False
-        ox0, oy0, oyaw0 = odom0
-        # 시작 시 로봇 오른쪽(≈world +x) 단위벡터. 변위를 여기 투영해 횡이동량 측정.
-        rdx, rdy = math.sin(oyaw0), -math.cos(oyaw0)
-        omega = -math.copysign(self._arc_omega, dx)   # Δx>0 → ω<0(CW)=왼쪽(서)
-        move_sign = -math.copysign(1.0, dx)           # 법선 쪽으로 가는 오른쪽-변위 부호
-        # phantom 으로 큰 Δx 가 나와도 벽으로 돌진 못하게 이동량 캡.
-        need = min(abs(dx), self._arc_max_travel)
-        if need < abs(dx):
-            self.get_logger().warn(
-                f"Arc: |Δx|={abs(dx):.3f} 가 상한 {self._arc_max_travel} 초과 → {need} 로 제한"
-            )
-        deadline = time.time() + self._arc_to
-        start = time.time()
-        flipped = False
-        progress = 0.0
-        last_log = 0.0
-        while time.time() < deadline:
-            if self._emergency.is_stopped():
-                self._stop()
-                deadline += self._wait_if_paused()
-                continue
-            od = self._get_odom()
-            if od is None:
-                time.sleep(0.05)
-                continue
-            ox, oy, _ = od
-            lat = (ox - ox0) * rdx + (oy - oy0) * rdy   # 시작프레임 기준 오른쪽 변위
-            progress = move_sign * lat                  # 법선 쪽으로 간 거리(양수면 정방향)
-            if progress >= need:
-                self._stop()
-                self.get_logger().info(f"Arc: 법선 도달 (이동 {progress:.3f}/{need:.3f}m)")
-                return True
-            # 방향 반대 감지(1.5s 지나도 음의 진행) → ω 한 번 반전.
-            if not flipped and (time.time() - start) > 1.5 and progress < -self._arc_lat_tol:
-                omega = -omega
-                flipped = True
-                self.get_logger().warn("Arc: 방향 반대 감지 → omega 부호 반전")
-            if time.time() - last_log > 0.5:
-                self.get_logger().info(
-                    f"Arc: 진행 {progress:.3f}/{need:.3f}m (lat={lat:+.3f})"
-                )
-                last_log = time.time()
-            twist = Twist()
-            twist.linear.x = -self._reverse_speed
-            twist.angular.z = self._clamp(omega)
-            self._cmd_pub.publish(twist)
-            time.sleep(0.05)
-        self._stop()
-        self.get_logger().warn(f"Arc: timeout (이동 {progress:.3f}/{need:.3f}m)")
-        return False
-
     def _reverse_straight_odom(self, dist: float) -> bool:
         """현재 헤딩(법선)을 odom 으로 유지하며 dist(m) 만큼 직진 후진. 거리 도달 시 True.
 
@@ -1177,80 +947,6 @@ class ReverseDocking(Node):
                 return tvec.flatten(), rvec.flatten()
 
         return None
-
-    def _detect_lane(self, frame) -> LaneResult | None:
-        """노란 주차라인(3줄: 왼|중앙(공유)|오) 중 도크 채널 2줄의 대칭선을 낸다.
-
-        하단 ROI 에서 컬럼 히스토그램으로 라인 클러스터를 분리해 x 순 정렬한 뒤,
-        dock1(좌)은 가장 왼쪽 2줄(왼+중앙), dock2(우)는 가장 오른쪽 2줄(중앙+오)을
-        채널로 선택한다. 그 중심선(대칭선)의 수평 오프셋·기울기·신뢰도를 반환.
-        """
-        h, w = frame.shape[:2]
-        roi = frame[h // 2:, :]              # 하단 절반(바닥)
-        rh = roi.shape[0]
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        yellow = cv2.inRange(hsv, self._yellow_lo, self._yellow_hi)
-
-        lines = self._find_lines(yellow, rh)   # [(x_bottom, ang, px), ...] x 오름차순
-        self._dbg_line_xs = [round(x) for (x, _, _) in lines]
-        if len(lines) < 2:
-            return None
-        # 중앙선은 dock1·dock2 공유. dock1=왼쪽 2줄, dock2=오른쪽 2줄을 채널로 선택.
-        (lx, l_ang, l_px), (rx, r_ang, r_px) = (
-            (lines[0], lines[1]) if self._dock_left else (lines[-2], lines[-1])
-        )
-
-        center_x = (lx + rx) / 2.0
-        center_ang = (l_ang + r_ang) / 2.0
-        lateral_px = center_x - w / 2.0          # +면 중심이 우측
-        yaw_rad = center_ang                     # 수직 대비 기울기(우측+)
-
-        m = min(l_px, r_px)
-        conf = (m - self._lane_min_px) / max(self._lane_full_px - self._lane_min_px, 1)
-        conf = float(max(0.0, min(1.0, conf)))
-        if conf <= 0.0:
-            return None
-        return LaneResult(lateral_px, yaw_rad, conf)
-
-    def _find_lines(self, yellow, rh: int):
-        """노란 마스크에서 수직 라인 클러스터를 x 오름차순으로 반환한다.
-
-        컬럼별 노란 픽셀이 ROI 세로의 lane_col_active_ratio 이상이면 라인 컬럼으로 보고,
-        인접 라인 컬럼을 묶어 한 라인으로 피팅한다. 반환: [(x_bottom, ang, px), ...].
-        """
-        col_count = (yellow > 0).sum(axis=0)
-        active = col_count > (rh * self._lane_col_ratio)
-        w = yellow.shape[1]
-        lines = []
-        c = 0
-        while c < w:
-            if not active[c]:
-                c += 1
-                continue
-            c0 = c
-            while c < w and active[c]:
-                c += 1
-            fit = self._fit_line(yellow[:, c0:c], c0)
-            if fit is not None:
-                lines.append(fit)
-        lines.sort(key=lambda t: t[0])
-        return lines
-
-    def _fit_line(self, mask, x_offset: int):
-        """마스크 비영 픽셀을 직선 피팅. (하단 x, 수직대비각rad, 픽셀수) 또는 None."""
-        pts = cv2.findNonZero(mask)
-        if pts is None or len(pts) < self._lane_min_px:
-            return None
-        pts = pts.reshape(-1, 2).astype(np.float32)
-        vx, vy, x0, y0 = cv2.fitLine(pts, cv2.DIST_L2, 0, 0.01, 0.01).flatten()
-        if abs(vy) < 1e-6:
-            return None
-        rh = mask.shape[0]
-        # 하단 행(y=rh-1)에서의 x (로봇에 가장 가까운 지점)
-        x_bottom = x0 + (rh - 1 - y0) * (vx / vy) + x_offset
-        # 수직(이미지 아래방향) 대비 기울기. vx/vy 가 0이면 완전 수직.
-        ang = math.atan2(vx, abs(vy))   # +면 위로 갈수록 우측
-        return float(x_bottom), float(ang), int(len(pts))
 
     # ====================================================================== #
     # 위치 보정

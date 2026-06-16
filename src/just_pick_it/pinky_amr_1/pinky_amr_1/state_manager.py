@@ -69,11 +69,6 @@ def quat_to_yaw(q) -> float:
     return math.atan2(siny, cosy)
 
 
-def normalize_angle(a: float) -> float:
-    """각도를 (-pi, pi] 로 정규화한다."""
-    return math.atan2(math.sin(a), math.cos(a))
-
-
 
 
 class StateManager(Node):
