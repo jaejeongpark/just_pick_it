@@ -29,16 +29,21 @@ amcl:
     save_pose_rate: 0.5
     sigma_hit: 0.2
     tf_broadcast: true
-    transform_tolerance: 1.0
-    update_min_a: 0.1
-    update_min_d: 0.15
+    transform_tolerance: 0.3
+    update_min_a: 0.05
+    update_min_d: 0.10
     z_hit: 0.5
     z_max: 0.05
     z_rand: 0.5
     z_short: 0.05
     scan_topic: scan
     set_initial_pose: true
-    initial_pose: [0, 0, 0]
+    # PICKY1 시작 도크 = CHARGING_DOCK_1 (절대좌표, map=절대 프레임). 헤드는 +y(위) 방향.
+    initial_pose:
+      x: 0.11
+      y: 0.08
+      z: 0.0
+      yaw: 1.5708
 
 bt_navigator:
   ros__parameters:
@@ -46,7 +51,10 @@ bt_navigator:
     robot_base_frame: base_link
     odom_topic: odom
     bt_loop_duration: 10
-    default_server_timeout: 20
+    # controller_frequency 10Hz(=100ms 루프)면 follow_path 취소 응답이 ~100ms 걸려
+    # server_timeout 100ms 와 겹쳐 'Failed to get result in node halt!' 간헐 발생
+    # (경유지 취소 꼬임→다음 goal 못 감→정지). 느린 controller+CPU 지터를 견디게 상향.
+    default_server_timeout: 300
     wait_for_service_timeout: 1000
     action_server_result_timeout: 900.0
     navigators: ["navigate_to_pose", "navigate_through_poses"]
@@ -86,34 +94,40 @@ controller_server:
     # Progress checker
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
-      required_movement_radius: 0.5
-      movement_time_allowance: 10.0
+      required_movement_radius: 0.1
+      movement_time_allowance: 15.0
 
     # Goal checker
     general_goal_checker:
       stateful: True
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.25
-      yaw_goal_tolerance: 0.25
+      xy_goal_tolerance: 0.01
+      yaw_goal_tolerance: 0.125
 
     # ★ 여기부터: Regulated Pure Pursuit 컨트롤러 설정
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
 
       # 기본 속도들 (Pinky 상황 맞게 나중에 조정 가능)
-      desired_linear_vel: 0.20      # [m/s]
+      desired_linear_vel: 0.10      # [m/s]  주행속도 절반(0.20 에서)
       max_linear_accel: 0.5         # [m/s^2]
       max_linear_decel: 0.5         # [m/s^2]
-      max_angular_vel: 1.0          # [rad/s]
+      max_angular_vel: 0.5          # [rad/s]  절반(1.0 에서)
 
       # 경로 추종 관련
-      lookahead_dist: 0.6
-      min_lookahead_dist: 0.3
-      max_lookahead_dist: 0.9
+      # 소형 아레나(2x1m) 코너 cut 방지: lookahead 를 줄여 RPP 가 경유지를 바짝 추종.
+      # 실효 lookahead = clamp(속도*lookahead_time, min, max). 저속에서 min 이 지배적.
+      lookahead_dist: 0.25
+      min_lookahead_dist: 0.10
+      max_lookahead_dist: 0.45
       lookahead_time: 1.5
       transform_tolerance: 0.2
       use_velocity_scaled_lookahead_dist: true
+      # 소형 아레나: 평소엔 global planner 경로만 따르되, odom 누적/amcl 오차로 벽을
+      # 향할 때를 대비해 충돌검사를 켠다(local costmap=실시간 스캔이라 amcl 무관).
+      # 짧은 시간지평으로 '임박한' 충돌에만 멈춰 유연성을 최대한 유지한다.
       use_collision_detection: true
+      max_allowed_time_to_collision_up_to_carrot: 1.0
       use_interpolation: true
 
       # ========= 회전 우선 관련 핵심 파라미터 =========
@@ -125,7 +139,7 @@ controller_server:
       rotate_to_heading_min_angle: 0.35
 
       # 3) 회전 속도 (in-place 회전일 때 angular vel)
-      rotate_to_heading_angular_vel: 1.0
+      rotate_to_heading_angular_vel: 0.5
 
       # 4) 회전할 때는 전진 속도 0에 가깝게 (거의 제자리 회전)
       max_angular_accel: 3.2
@@ -144,8 +158,10 @@ controller_server:
       inflation_cost_scaling_factor: 3.0
       regulated_linear_scaling_min_radius: 0.5
       regulated_linear_scaling_min_speed: 0.05
-      use_cost_regulated_linear_velocity_scaling: true
-      cost_scaling_dist: 0.6
+      # 소형 아레나에선 어디든 벽 0.6m 이내라, 비용 기반 감속을 켜면 항상 최저속으로
+      # 기어간다. 끄거나(아래) cost_scaling_dist 를 아주 작게 둔다.
+      use_cost_regulated_linear_velocity_scaling: false
+      cost_scaling_dist: 0.15
       cost_scaling_gain: 1.5
 
 
@@ -159,14 +175,14 @@ local_costmap:
       rolling_window: true
       width: 3
       height: 3
-      resolution: 0.05
+      resolution: 0.03
       #robot_radius: 0.22
-      footprint: '[[0.06, 0.06], [0.06, -0.06], [-0.06, -0.06], [-0.06, 0.06]]'
+      footprint: '[[0.03, 0.03], [0.03, -0.03], [-0.03, -0.03], [-0.03, 0.03]]'
       plugins: ["voxel_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.15
+        inflation_radius: 0.09
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: True
@@ -178,7 +194,7 @@ local_costmap:
         mark_threshold: 0
         observation_sources: scan
         scan:
-          topic: /scan
+          topic: scan
           max_obstacle_height: 2.0
           clearing: True
           marking: True
@@ -195,14 +211,14 @@ local_costmap:
 global_costmap:
   global_costmap:
     ros__parameters:
-      footprint_padding: 0.03
+      footprint_padding: 0.0
       update_frequency: 1.0
       publish_frequency: 1.0
       global_frame: map
       robot_base_frame: base_footprint
       #robot_radius: 0.22
-      footprint: '[[0.06, 0.06], [0.06, -0.06], [-0.06, -0.06], [-0.06, 0.06]]'
-      resolution: 0.05
+      footprint: '[[0.03, 0.03], [0.03, -0.03], [-0.03, -0.03], [-0.03, 0.03]]'
+      resolution: 0.03
       track_unknown_space: true
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       obstacle_layer:
@@ -210,7 +226,7 @@ global_costmap:
         enabled: True
         observation_sources: scan
         scan:
-          topic: /scan
+          topic: scan
           max_obstacle_height: 2.0
           clearing: True
           marking: True
@@ -225,7 +241,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.15
+        inflation_radius: 0.09
       always_send_full_costmap: True
 
 # The yaml_filename does not need to be specified since it going to be set by defaults in launch.
@@ -249,7 +265,7 @@ planner_server:
     costmap_update_timeout: 1.0
     GridBased:
       plugin: "nav2_navfn_planner::NavfnPlanner"
-      tolerance: 0.5
+      tolerance: 0.25
       use_astar: false
       allow_unknown: true
 
@@ -306,8 +322,8 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: False
     feedback: "OPEN_LOOP"
-    max_velocity: [0.25, 0.0, 1.5]
-    min_velocity: [-0.25, 0.0, -1.5]
+    max_velocity: [0.125, 0.0, 0.75]
+    min_velocity: [-0.125, 0.0, -0.75]
     max_accel: [2.5, 0.0, 3.2]
     max_decel: [-2.5, 0.0, -3.2]
     odom_topic: "odom"

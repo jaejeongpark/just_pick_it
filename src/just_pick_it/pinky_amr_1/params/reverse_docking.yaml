@@ -2,67 +2,103 @@
   ros__parameters:
 
     # ------------------------------------------------------------------ #
-    # ArUco
+    # ArUco 마커
     # ------------------------------------------------------------------ #
-    aruco_marker_dict: 0          # cv2.aruco.DICT_4X4_50
-    marker_size_m: 0.10           # 마커 실측 한 변 길이 (m)
+    aruco_marker_dict: "DICT_APRILTAG_36h11"   # 팀 perception 표준 (도크 마커)
+    marker_size_m: 0.05           # 마커 실측 한 변 길이 (m)
+
+    # 마커 월드 좌표 (marker_id 별 병렬 배열, map=zone 절대 프레임 좌하단 원점).
+    # 가로벽(y≈0.655)에 도크를 바라보게(법선 -y) 부착. depth 정지/coarse 정렬에 사용.
+    #   marker 0 -> CHARGING_DOCK_1 마커,  marker 1 -> CHARGING_DOCK_2 마커
+    marker_ids: [0, 1]
+    marker_world_x: [0.11, 0.28]
+    marker_world_y: [0.635, 0.635]
 
     # ------------------------------------------------------------------ #
-    # 카메라 — 비전 담당 캘리브레이션 후 실측값으로 교체
-    # Pinky Pi (RPi Camera Module 3 Wide, 1080p 기준 placeholder)
+    # 카메라 — 비전팀 캘리브레이션 실측값 적용
+    # PICKY1: just_pick_it_perception/result/camera_calibration.yaml (해상도 1280x720)
+    # 주의: camera/image_raw 가 1280x720 으로 발행돼야 이 intrinsic 이 유효하다.
     # ------------------------------------------------------------------ #
-    camera_matrix:
-      - 777.0,   0.0, 960.0
-      - 0.0,   777.0, 540.0
-      - 0.0,     0.0,   1.0
-    dist_coeffs: [0.0, 0.0, 0.0, 0.0, 0.0]   # [k1, k2, p1, p2, k3]
+    # 3x3 내부 파라미터를 행 우선(row-major) 9개 실수로 평탄화. DOUBLE_ARRAY 9개.
+    camera_matrix: [985.2905146973088,               0.0, 639.6788580985803,
+                                  0.0, 985.1639226270551, 356.3337085069538,
+                                  0.0,               0.0,               1.0]
+    dist_coeffs: [-0.009886920170813706, 0.04109867043833388, -0.0012477127326946092, 0.00016340382023196295, -0.053581046132224315]   # [k1, k2, p1, p2, k3]
     camera_topic: "camera/image_raw"
+    # base_link 중심에서 카메라가 전방(+y_world)으로 떨어진 거리(URDF 근사). 깊이 정지 보정용.
+    camera_forward_offset_m: 0.060   # robot(lidar)-marker 0.235 - camera-marker 0.175
+    depth_scale: 1.38                # 도크(원거리) 정지용. fx 가 ~1.48배 작아 tz 가 짧게 나오는 보정(실측 D/tz=1.48, 0.8cm 여유로 1.38). ↑면 더 일찍 정지
+    # 횡 스케일: solvePnP tx 는 fx 와 무관하게 이미 미터단위 정확(실측: 로봇 정렬 x=0.11
+    # 에서 tx=-0.009, 마커간격 0.174 vs 실제 0.170). 1.48 은 9mm tx 를 1.8cm 로 부풀려
+    # 횡 과보정을 만들던 가짜 fudge(=fx 보정비율이 잘못 횡에 섞인 것) -> 1.0 정정.
+    lateral_scale: 1.0
+    marker_lat_offset_m: 0.0         # lateral_scale 정정으로 가짜 바이어스 제거
 
     # ------------------------------------------------------------------ #
-    # 거리 임계값
+    # 단계 A: 마커 획득 + 시작 coarse 정렬 (마커 상대)
     # ------------------------------------------------------------------ #
-    dock_switch_distance: 0.20    # Phase 2->3 전환 거리 (m), ArUco 불안정 구간 진입
+    acquire_rotate_speed: 0.3     # 마커 탐색 제자리 회전 (rad/s)
+    marker_lat_kp: 0.6            # coarse 횡 게인 (tvec[0] 기반) — 진동 완화로 하향
+    marker_yaw_kp: 0.6            # coarse yaw 게인 (rvec[1] 기반)
+    # 후진 직전 odom 고정 회전량(도). +1 = 마커정렬 후 무조건 1° 우회전(헤딩 좌잔차 보정).
+    # yaw_align/측정엔 영향 없음(다 끝난 뒤 회전). 더 좌면 키우고, 우로 지나치면 줄이거나 -로.
+    marker_yaw_offset_deg: 1.0
+
+    # 시퀀스1: 마커로 법선 횡오차 1회 측정 → 부드러운 후진 arc 로 진입(odom 으로 종료판단).
+    arc_omega: 0.25            # arc 회전율(rad/s). 작을수록 큰 반경(회전 적고 후진 많음).
+    arc_lat_tol_m: 0.005       # odom 횡이동 종료 허용오차(m)
+    arc_timeout_sec: 20.0
+    measure_frames: 10         # 법선 횡오차 1회 측정 평균 프레임수
+    align_conv_tol_m: 0.01     # Δx<이면 정렬 종료. 0.12~0.13(1~2cm 동)이 통과해 dock2 치우쳐 0.015->0.01 로 좁힘
+    first_pass_gain: 1.0       # 1차 보정 이동 비율(Δx 정확해져 전량 이동)
+    arc_refine_gain: 0.3       # 2차+ 보정 이동 비율 (과보정으로 법선 지나침 방지)
+    arc_max_travel_m: 0.06     # arc 1회 최대 횡이동(벽 돌진 방지 캡)
+    converged_reverse_m: 0.10  # 첫 측정이 허용오차 안일 때도 법선으로 이만큼 후진(두-마커 영역 진입). 7cm 는 두-마커 검출에 부족
+    debug_stop_after_converge: false  # [임시] 정렬+후진까지만 하고 정지(두-마커 검출 위치 확인용)
+    # 후진 직전 법선 헤딩을 두-마커 yaw 로 정밀 정렬(단일 psi 노이즈 회피). 부호 의심되면 false.
+    use_two_marker_normal: true
+    two_marker_fx_scale: 1.48      # psi_two 의 tz 차에만 적용(실측 D/tz). 전역 depth 경로 무영향
+    two_marker_max_turn_rad: 0.6   # partner 화각진입 최대 제자리 회전. 초과 시 단일 psi fallback
+    two_marker_search_omega: 0.08  # partner 탐색 회전 속도(rad/s). 느리게 해 동시검출 구간 안 지나치게
+    approach_y_m: 0.18             # 두-마커 후 곡선 이동 목표 깊이(월드 y). 여기서 dock_y 까지 직진 후진
+    curve_pos_tol_m: 0.012         # 곡선 이동 도달 허용오차(m)
+    curve_kv: 0.6                  # 곡선 후진 선속 게인(v=-kv·dist, reverse_speed 캡)
+    curve_lat_gain: 0.9            # 곡선 횡(델타x) 이동 배율. 약간 서쪽으로 지나쳐 멈추면 줄임(0.10~0.105→0.11)
+    two_marker_retry_reverse_m: 0.02  # 두-마커 검출 실패 시 법선복귀 후 추가 후진(가까우면 partner 화각밖)
+    two_marker_max_retries: 5      # 두-마커 검출 추가후진 재시도 최대 횟수
+    # 시퀀스2 라인 횡조향 사용 여부. false=직진 후진(마커는 깊이 정지만). 라인검출이
+    # 이 거리에서 불안정해 기본 off. 라인 품질 개선되면 true.
+    use_lane_steering: false
+    # [측정→arc→재정렬] 반복 횟수. 최종 yaw 정렬 허용오차(rad). 후진 중 odom 헤딩유지 게인.
+    align_passes: 2
+    yaw_align_tol_rad: 0.04
+    yaw_hold_kp: 1.0
+    # 마커 상실/재정렬 시 제자리 회전 재중심. kp=중심 정렬 게인, tol=중앙 허용 bearing(rad).
+    recenter_kp: 0.8
+    recenter_tol_rad: 0.05
+    recenter_timeout_sec: 6.0
 
     # ------------------------------------------------------------------ #
-    # Phase 0: 마커 탐색 및 yaw 정렬
+    # 정밀 정렬 — 노란 주차라인 (대칭선 → 법선)
+    # lateral + yaw 를 합쳐 ω 한 값으로. 후진할수록 라인이 더 잡혀 신뢰도↑.
     # ------------------------------------------------------------------ #
-    rotate_kp: 1.5
-    rotate_ki: 0.0
-    rotate_kd: 0.1
-    rotate_thresh_rad: 0.05       # rvec[1] 허용 오차 (rad, 약 3도)
+    lane_lat_kp: 0.002            # 대칭선 수평오프셋(px) 게인 — 횡 진동 주범, 절반 하향
+    lane_yaw_kp: 0.6             # 대칭선 기울기(rad) 게인 (heading 감쇠항)
+    lane_yellow_lower: [20, 100, 100]   # 노란 테이프 HSV (OpenCV H:0-179)
+    lane_yellow_upper: [35, 255, 255]
+    lane_min_pixels: 150          # 한쪽 라인 최소 픽셀 (이하면 신뢰도 0)
+    lane_full_pixels: 1200        # 이 이상이면 신뢰도 1 (라인 완전 가시)
 
     # ------------------------------------------------------------------ #
-    # Phase 1: 횡방향 pre-alignment
+    # 후진 / 정지
     # ------------------------------------------------------------------ #
-    prealign_kp: 1.2
-    prealign_thresh_m: 0.03       # tvec[0] 허용 오차 (m)
-
-    # ------------------------------------------------------------------ #
-    # Phase 2: ArUco 후진 PID
-    # 제어 부호 반전 주의: 후진 시 lateral/yaw 보정 방향이 전진과 반대
-    # ------------------------------------------------------------------ #
-    lat_kp: 1.0                   # tvec[0] 횡방향 오차 게인
-    lat_ki: 0.0
-    lat_kd: 0.05
-    yaw_kp: 0.8                   # rvec[1] yaw 오차 게인
-    yaw_ki: 0.0
-    yaw_kd: 0.05
-    reverse_speed: 0.05           # 최대 후진 속도 (m/s)
-
-    # ------------------------------------------------------------------ #
-    # Phase 3: 주차라인 중심 추종 + 파란 정지선 감지
-    # ------------------------------------------------------------------ #
-    lane_kp: 0.003                # 주차라인 횡방향 오차 게인 (pixel 기반)
-    final_speed: 0.03             # 최종 접근 후진 속도 (m/s)
-
-    # 파란 마킹테이프 정지선 (HSV, OpenCV 기준 H: 0-179)
-    # 실내 조명 변화 시 S/V 하한 조정 필요
-    tape_hsv_lower: [100, 100, 50]
-    tape_hsv_upper: [130, 255, 255]
-    tape_coverage_thresh: 0.5     # 가로 픽셀의 50% 이상 덮이면 정지
+    reverse_speed: 0.04           # 후진 속도 (m/s)
+    stop_y_tolerance_m: 0.01      # dock_y 도달 허용오차 (m)
+    settle_sec: 0.5               # 정지 후 안정화 대기 (s)
 
     # ------------------------------------------------------------------ #
     # 공통
     # ------------------------------------------------------------------ #
-    max_angular_vel: 0.4          # 모든 단계 angular.z 상한 (rad/s)
-    aruco_timeout_sec: 30.0       # Phase 0 마커 탐색 최대 대기 시간 (s)
+    max_angular_vel: 0.25         # angular.z 상한 (rad/s) — 큰 각 스윙 캡으로 진동 완화
+    acquire_timeout_sec: 30.0     # 마커 획득 최대 대기 (s)
+    insert_timeout_sec: 40.0      # 후진 삽입 최대 시간 (s)

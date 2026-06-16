@@ -1,8 +1,12 @@
 from sqlalchemy.orm import Session
 
-from just_pick_it_db.models import Order, OrderItem, PickupSlot, Product, Robot, StockingItem, Task
+from just_pick_it_db.models import Order, OrderItem, PickupSlot, Product, Robot, DisplayItem, Task
 from just_pick_it_db.services.robot_runtime_policy import FINAL_TASK_STATUSES, UNAVAILABLE_ROBOT_STATUSES
-from just_pick_it_db.services.stocking_service import FINAL_STOCKING_ITEM_STATUSES, resolve_stock_delta
+from just_pick_it_db.services.display_service import (
+    FINAL_DISPLAY_ITEM_STATUSES,
+    queue_auto_display_if_low_stock,
+    resolve_stock_delta,
+)
 
 
 ORDER_PRIORITY = 2
@@ -19,7 +23,7 @@ PICKY_STATE_BY_TASK = {
     "MOVE_TO_PRODUCT": "MOVING_TO_PRODUCT",
     "MOVE_TO_PICKUP": "MOVING_TO_PICKUP",
     "MOVE_TO_STOCK": "MOVING_TO_STOCK",
-    "MOVE_TO_STORAGE": "MOVING_TO_STORAGE",
+    "MOVE_TO_DISPLAY": "MOVING_TO_DISPLAY",
     "RETURN_HOME": "RETURNING",
     "DOCK_IN": "DOCKING",
     "CHARGE": "CHARGING",
@@ -29,11 +33,15 @@ COBOT_STATE_BY_TASK = {
     "SORTING_AND_LOAD": "SORTING",
     "INSPECTION": "INSPECTING",
     "UNLOAD": "UNLOADING",
-    "STOCKING_PICK": "STOCKING_SORTING",
-    "STOCKING_PLACE": "STOCKING_PLACING",
+    "DISPLAY_SCAN": "SCANNING",
+    "DISPLAY_PLACE": "PLACING",
 }
 
 COBOT_TASKS_REQUIRING_PICKY_WAIT = frozenset(COBOT_STATE_BY_TASK)
+
+ORDER_FLOW_RELEASE_TASKS = frozenset({"UNLOAD"})
+DISPLAY_FLOW_RELEASE_TASKS = frozenset({"DISPLAY_PLACE"})
+HOUSEKEEPING_RELEASE_TASKS = frozenset({"CHARGE"})
 
 
 def create_order_workflow(_db: Session, order: Order) -> None:
@@ -64,7 +72,7 @@ def apply_task_runtime_state(db: Session, task: Task, previous_status: str | Non
     elif task.status == "SUCCESS":
         finish_runtime_task(db, task, previous_status=previous_status)
     elif task.status in ("FAILED", "CANCELLED"):
-        update_stocking_item_status(db, task, "FAILED" if task.status == "FAILED" else "CANCELLED")
+        update_display_item_status(db, task, "FAILED" if task.status == "FAILED" else "CANCELLED")
         clear_robot_task(db, task)
         clear_companion_picky_waiting(db, task)
         if task.status == "FAILED" and task.order_id:
@@ -83,13 +91,35 @@ def start_runtime_task(db: Session, task: Task) -> None:
         apply_robot_state_for_task(robot, task.task_type)
         mark_companion_picky_waiting(db, task, robot)
 
-    update_stocking_item_status(db, task, "IN_PROGRESS")
+    update_display_item_status(db, task, "IN_PROGRESS")
 
     if order:
         if task.task_type == "INSPECTION":
             reserve_pickup_slot(db, order)
+        elif task.task_type == "MOVE_TO_PRODUCT":
+            queue_auto_display_for_order_items(db, order)
 
         order.status = ORDER_STATUS_BY_RUNNING_TASK.get(task.task_type, order.status)
+
+
+def queue_auto_display_for_order_items(db: Session, order: Order) -> None:
+    order_items = (
+        db.query(OrderItem)
+        .filter(OrderItem.order_id == order.order_id)
+        .all()
+    )
+    product_ids = {item.product_id for item in order_items}
+    if not product_ids:
+        return
+
+    products = (
+        db.query(Product)
+        .filter(Product.product_id.in_(product_ids))
+        .with_for_update()
+        .all()
+    )
+    for product in products:
+        queue_auto_display_if_low_stock(db, product)
 
 
 def finish_runtime_task(
@@ -98,11 +128,12 @@ def finish_runtime_task(
     previous_status: str | None = None,
 ) -> None:
     order = db.get(Order, task.order_id) if task.order_id else None
-    clear_robot_task(db, task)
-    clear_companion_picky_waiting(db, task)
+    release_robot = should_release_robot_after_success(task)
+    clear_robot_task(db, task, release_robot=release_robot)
+    clear_companion_picky_waiting(db, task, release_robot=release_robot)
 
-    if task.task_type == "STOCKING_PLACE":
-        apply_stocking_success(db, task, previous_status)
+    if task.task_type == "DISPLAY_PLACE":
+        apply_display_success(db, task, previous_status)
 
     mark_picky_waiting_for_next_cobot_task(db, task)
 
@@ -129,7 +160,18 @@ def apply_robot_state_for_task(robot: Robot, task_type: str) -> None:
         robot.cobot_state = COBOT_STATE_BY_TASK.get(task_type, robot.cobot_state)
 
 
-def clear_robot_task(db: Session, task: Task) -> None:
+def should_release_robot_after_success(task: Task) -> bool:
+    """성공한 task 이후 robot_status를 IDLE로 풀어도 되는지 판단한다."""
+    if task.order_id is not None:
+        return task.task_type in ORDER_FLOW_RELEASE_TASKS | HOUSEKEEPING_RELEASE_TASKS
+
+    if task.display_item_id is not None or task.display_batch_id is not None:
+        return task.task_type in DISPLAY_FLOW_RELEASE_TASKS | HOUSEKEEPING_RELEASE_TASKS
+
+    return True
+
+
+def clear_robot_task(db: Session, task: Task, *, release_robot: bool = True) -> None:
     if not task.assigned_robot_id:
         return
 
@@ -140,7 +182,7 @@ def clear_robot_task(db: Session, task: Task) -> None:
 
     robot.current_task_id = None
 
-    if robot.robot_status not in UNAVAILABLE_ROBOT_STATUSES:
+    if release_robot and robot.robot_status not in UNAVAILABLE_ROBOT_STATUSES:
         robot.robot_status = "IDLE"
 
     if robot.robot_type == "PICKY":
@@ -166,7 +208,12 @@ def mark_companion_picky_waiting(db: Session, task: Task, robot: Robot) -> None:
     picky.picky_state = "WAITING_FOR_COBOT"
 
 
-def clear_companion_picky_waiting(db: Session, task: Task) -> None:
+def clear_companion_picky_waiting(
+    db: Session,
+    task: Task,
+    *,
+    release_robot: bool = True,
+) -> None:
     """COBOT 작업 종료 시 같은 unit의 PICKY 대기 상태를 해제한다."""
     if task.task_type not in COBOT_TASKS_REQUIRING_PICKY_WAIT:
         return
@@ -180,7 +227,7 @@ def clear_companion_picky_waiting(db: Session, task: Task) -> None:
         return
 
     picky.current_task_id = None
-    if picky.robot_status not in UNAVAILABLE_ROBOT_STATUSES:
+    if release_robot and picky.robot_status not in UNAVAILABLE_ROBOT_STATUSES:
         picky.robot_status = "IDLE"
     picky.picky_state = "STANDBY"
 
@@ -211,13 +258,15 @@ def mark_picky_waiting_for_next_cobot_task(db: Session, finished_task: Task) -> 
 
 
 def find_next_open_task(db: Session, task: Task) -> Task | None:
-    """같은 주문/입고 흐름에서 현재 task 다음 미완료 task를 찾는다."""
+    """같은 주문/진열 흐름에서 현재 task 다음 미완료 task를 찾는다."""
     query = db.query(Task).filter(Task.sequence_no > task.sequence_no)
 
     if task.order_id is not None:
         query = query.filter(Task.order_id == task.order_id)
-    elif task.stocking_item_id is not None:
-        query = query.filter(Task.stocking_item_id == task.stocking_item_id)
+    elif task.display_batch_id is not None:
+        query = query.filter(Task.display_batch_id == task.display_batch_id)
+    elif task.display_item_id is not None:
+        query = query.filter(Task.display_item_id == task.display_item_id)
     else:
         return None
 
@@ -281,40 +330,40 @@ def update_order_items(db: Session, order: Order, status: str) -> None:
         item.status = status
 
 
-def update_stocking_item_status(db: Session, task: Task, status: str) -> None:
-    if task.stocking_item_id is None:
+def update_display_item_status(db: Session, task: Task, status: str) -> None:
+    if task.display_item_id is None:
         return
 
-    stocking_item = db.get(StockingItem, task.stocking_item_id)
+    display_item = db.get(DisplayItem, task.display_item_id)
 
-    if stocking_item and stocking_item.status not in FINAL_STOCKING_ITEM_STATUSES:
-        stocking_item.status = status
+    if display_item and display_item.status not in FINAL_DISPLAY_ITEM_STATUSES:
+        display_item.status = status
 
 
-def apply_stocking_success(
+def apply_display_success(
     db: Session,
     task: Task,
     previous_status: str | None = None,
 ) -> int | None:
-    if previous_status == "SUCCESS" or task.stocking_item_id is None:
+    if previous_status == "SUCCESS" or task.display_item_id is None:
         return None
 
-    stocking_item = db.get(StockingItem, task.stocking_item_id)
+    display_item = db.get(DisplayItem, task.display_item_id)
 
-    if not stocking_item or stocking_item.status == "COMPLETED":
-        return stocking_item.stock_delta if stocking_item else None
+    if not display_item or display_item.status == "COMPLETED":
+        return display_item.stock_delta if display_item else None
 
-    product = db.get(Product, stocking_item.product_id)
+    product = db.get(Product, display_item.product_id)
 
     if not product:
         return None
 
-    stock_delta = resolve_stock_delta(stocking_item)
+    stock_delta = resolve_stock_delta(display_item)
 
     if stock_delta is None:
         return None
 
     product.stock_qty += stock_delta
-    stocking_item.stock_delta = stock_delta
-    stocking_item.status = "COMPLETED"
+    display_item.stock_delta = stock_delta
+    display_item.status = "COMPLETED"
     return stock_delta

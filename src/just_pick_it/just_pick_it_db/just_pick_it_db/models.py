@@ -63,7 +63,7 @@ picky_state_enum = ENUM(
     "WAITING_FOR_COBOT",
     "MOVING_TO_PICKUP",
     "MOVING_TO_STOCK",
-    "MOVING_TO_STORAGE",
+    "MOVING_TO_DISPLAY",
     "RETURNING",
     "DOCKING",
     "ERROR_RECOVERY",
@@ -77,9 +77,8 @@ cobot_state_enum = ENUM(
     "LOADING",
     "INSPECTING",
     "UNLOADING",
-    "STOCKING_SORTING",
-    "STOCKING_LOADING",
-    "STOCKING_PLACING",
+    "SCANNING",
+    "PLACING",
     "STOWING_ARM",
     "SAFETY_STOPPED",
     name="cobot_state",
@@ -93,9 +92,9 @@ task_type_enum = ENUM(
     "INSPECTION",
     "UNLOAD",
     "MOVE_TO_STOCK",
-    "STOCKING_PICK",
-    "MOVE_TO_STORAGE",
-    "STOCKING_PLACE",
+    "MOVE_TO_DISPLAY",
+    "DISPLAY_SCAN",
+    "DISPLAY_PLACE",
     "RETURN_HOME",
     "DOCK_IN",
     "CHARGE",
@@ -129,21 +128,21 @@ exception_type_enum = ENUM(
     create_type=False,
 )
 
-stocking_policy_enum = ENUM(
+display_policy_enum = ENUM(
     "REQUESTED_QUANTITY",
-    "ALL_DETECTED",
-    name="stocking_policy",
+    "ALL_PROCESSED",
+    name="display_policy",
     create_type=False,
 )
 
-stocking_item_status_enum = ENUM(
+display_item_status_enum = ENUM(
     "REQUESTED",
     "ASSIGNED",
     "IN_PROGRESS",
     "COMPLETED",
     "FAILED",
     "CANCELLED",
-    name="stocking_item_status",
+    name="display_item_status",
     create_type=False,
 )
 
@@ -207,23 +206,24 @@ class OrderItem(Base):
     status = Column(order_item_status_enum, nullable=False, default="WAITING")
 
 
-class StockingItem(Base):
-    __tablename__ = "stocking_item"
+class DisplayItem(Base):
+    __tablename__ = "display_item"
     __table_args__ = (
         CheckConstraint(
-            "(stocking_policy = 'REQUESTED_QUANTITY' AND requested_quantity IS NOT NULL) "
-            "OR (stocking_policy = 'ALL_DETECTED' AND requested_quantity IS NULL)",
-            name="ck_stocking_item_policy_quantity",
+            "(display_policy = 'REQUESTED_QUANTITY' AND requested_quantity IS NOT NULL) "
+            "OR (display_policy = 'ALL_PROCESSED' AND requested_quantity IS NULL)",
+            name="ck_display_item_policy_quantity",
         ),
     )
 
-    stocking_item_id = Column(Integer, primary_key=True)
+    display_item_id = Column(Integer, primary_key=True)
+    display_batch_id = Column(Integer)
     product_id = Column(Integer, ForeignKey("product.product_id"), nullable=False)
     requested_quantity = Column(Integer)
-    detected_quantity = Column(Integer)
+    processed_quantity = Column(Integer)
     stock_delta = Column(Integer)
-    stocking_policy = Column(stocking_policy_enum, nullable=False)
-    status = Column(stocking_item_status_enum, nullable=False, default="REQUESTED")
+    display_policy = Column(display_policy_enum, nullable=False)
+    status = Column(display_item_status_enum, nullable=False, default="REQUESTED")
     assigned_unit_id = Column(Integer, ForeignKey("robot_unit.unit_id"))
 
 
@@ -256,19 +256,24 @@ class Task(Base):
     __tablename__ = "task"
     __table_args__ = (
         CheckConstraint(
-            "NOT (order_item_id IS NOT NULL AND stocking_item_id IS NOT NULL)",
-            name="ck_task_item_or_stocking_item",
+            "NOT (order_item_id IS NOT NULL AND display_item_id IS NOT NULL)",
+            name="ck_task_item_or_display_item",
         ),
         CheckConstraint(
-            "stocking_item_id IS NULL OR (order_id IS NULL AND order_item_id IS NULL)",
-            name="ck_task_stocking_without_order",
+            "display_item_id IS NULL OR (order_id IS NULL AND order_item_id IS NULL)",
+            name="ck_task_display_without_order",
+        ),
+        CheckConstraint(
+            "display_batch_id IS NULL OR (order_id IS NULL AND order_item_id IS NULL)",
+            name="ck_task_display_batch_without_order",
         ),
     )
 
     task_id = Column(Integer, primary_key=True)
     order_id = Column(Integer, ForeignKey("orders.order_id"))
     order_item_id = Column(Integer, ForeignKey("order_item.item_id"))
-    stocking_item_id = Column(Integer, ForeignKey("stocking_item.stocking_item_id"))
+    display_item_id = Column(Integer, ForeignKey("display_item.display_item_id"))
+    display_batch_id = Column(Integer)
     sequence_no = Column(Integer, nullable=False)
     assigned_robot_id = Column(Integer, ForeignKey("robot.robot_id"))
     task_type = Column(task_type_enum, nullable=False)

@@ -13,7 +13,7 @@ from just_pick_it_db.models import (
     Product,
     Robot,
     RobotUnit,
-    StockingItem,
+    DisplayItem,
     Task,
     TaskEvent,
     Zone,
@@ -28,9 +28,11 @@ from just_pick_it_db.services.status_service import (
     build_task_summary,
     build_zone_pose,
 )
-from just_pick_it_db.services.stocking_service import (
-    build_stocking_item_summary,
-    create_stocking_item_record,
+from just_pick_it_db.services.display_service import (
+    build_display_item_summary,
+    create_display_item_record,
+    has_appendable_display_item,
+    queue_auto_display_if_low_stock,
 )
 from just_pick_it_db.services.workflow_service import (
     ORDER_PRIORITY,
@@ -64,7 +66,7 @@ class FleetRepository:
     """Fleet Manager 의 단일 DB 접근 계층(Repository).
 
     역할:
-    - Fleet Manager 내부 모듈(TaskManager 등)이 주문/작업/로봇/zone/입고 데이터를
+    - Fleet Manager 내부 모듈(TaskManager 등)이 주문/작업/로봇/zone/진열 데이터를
       읽고 쓰는 단일 진입점이다.
     - 이전에는 Fleet API HTTP API 를 호출했으나, 통합(Phase 2) 이후에는
       just_pick_it_db 를 통해 PostgreSQL 에 직접 접근한다.
@@ -238,15 +240,31 @@ class FleetRepository:
             raise RepoError(f"{task_type} task must be assigned to {expected_robot_type}")
 
     def _validate_task_refs(self, db, task: dict) -> Robot | None:
-        stocking_item_id = task.get("stocking_item_id")
+        display_item_id = task.get("display_item_id")
+        display_batch_id = task.get("display_batch_id")
         order_id = task.get("order_id")
         order_item_id = task.get("order_item_id")
+        display_item = None
 
-        if stocking_item_id is not None:
+        if display_item_id is not None or display_batch_id is not None:
             if order_id is not None or order_item_id is not None:
-                raise RepoError("stocking task cannot reference order or order_item")
-            if not db.get(StockingItem, stocking_item_id):
-                raise RepoError("stocking item not found")
+                raise RepoError("display task cannot reference order or order_item")
+        if display_item_id is not None:
+            display_item = db.get(DisplayItem, display_item_id)
+            if display_item is None:
+                raise RepoError("display item not found")
+        if display_batch_id is not None:
+            display_batch_id = int(display_batch_id)
+            if display_item is not None:
+                if display_item.display_batch_id != display_batch_id:
+                    raise RepoError("display item does not belong to display batch")
+            elif (
+                db.query(DisplayItem)
+                .filter(DisplayItem.display_batch_id == display_batch_id)
+                .first()
+                is None
+            ):
+                raise RepoError("display batch not found")
 
         if order_id is not None and not db.get(Order, order_id):
             raise RepoError("order not found")
@@ -275,8 +293,10 @@ class FleetRepository:
             return task["sequence_no"]
 
         task_query = db.query(Task)
-        if task.get("stocking_item_id") is not None:
-            task_query = task_query.filter(Task.stocking_item_id == task["stocking_item_id"])
+        if task.get("display_batch_id") is not None:
+            task_query = task_query.filter(Task.display_batch_id == task["display_batch_id"])
+        elif task.get("display_item_id") is not None:
+            task_query = task_query.filter(Task.display_item_id == task["display_item_id"])
         elif task.get("order_id") is not None:
             task_query = task_query.filter(Task.order_id == task["order_id"])
         elif task.get("order_item_id") is not None:
@@ -285,7 +305,8 @@ class FleetRepository:
             task_query = task_query.filter(
                 Task.order_id.is_(None),
                 Task.order_item_id.is_(None),
-                Task.stocking_item_id.is_(None),
+                Task.display_item_id.is_(None),
+                Task.display_batch_id.is_(None),
             )
             if robot is not None:
                 task_query = task_query.filter(Task.assigned_robot_id == robot.robot_id)
@@ -575,6 +596,12 @@ class FleetRepository:
                             new_quantity = quantities_by_item_id[item.item_id]
                             stock_delta = new_quantity - item.quantity
                             product.stock_qty -= stock_delta
+                            if stock_delta != 0:
+                                self._queue_auto_display_if_low_stock(
+                                    db,
+                                    product,
+                                    require_active_context=True,
+                                )
                             item.quantity = new_quantity
 
                 if status is not None:
@@ -727,6 +754,37 @@ class FleetRepository:
             self._log().warn(f"[FleetRepository] task_id={task_id} 상태 변경 실패: {exc}")
             return None
 
+    def update_task_target_zone(
+        self,
+        task_id: int,
+        *,
+        target_zone_name: str | None,
+    ) -> dict[str, Any] | None:
+        """실행 시점에 확정된 task 목적지 zone을 기록한다."""
+        try:
+            with session_scope() as db:
+                task = (
+                    db.query(Task)
+                    .filter(Task.task_id == task_id)
+                    .with_for_update()
+                    .one_or_none()
+                )
+                if not task:
+                    raise RepoError("task not found")
+
+                if target_zone_name is None:
+                    task.target_zone_id = None
+                else:
+                    zone = db.query(Zone).filter(Zone.zone_name == target_zone_name).one_or_none()
+                    if not zone:
+                        raise RepoError("target zone not found")
+                    task.target_zone_id = zone.zone_id
+
+                return build_task_summary(db, task)
+        except RepoError as exc:
+            self._log().warn(f"[FleetRepository] task_id={task_id} target zone 변경 실패: {exc}")
+            return None
+
     def create_task_event(
         self,
         task_id: int,
@@ -833,7 +891,8 @@ class FleetRepository:
                     new_task = Task(
                         order_id=task.get("order_id"),
                         order_item_id=task.get("order_item_id"),
-                        stocking_item_id=task.get("stocking_item_id"),
+                        display_item_id=task.get("display_item_id"),
+                        display_batch_id=task.get("display_batch_id"),
                         sequence_no=self._resolve_task_sequence_no(db, task, robot),
                         assigned_robot_id=robot.robot_id if robot else None,
                         task_type=task["task_type"],
@@ -948,36 +1007,74 @@ class FleetRepository:
             return None
 
     # ==================================================================
-    # Stocking
+    # Display
     # ==================================================================
 
-    def list_requested_stocking_items(self) -> list[dict[str, Any]]:
-        """REQUESTED 상태의 stocking_item 목록을 조회한다."""
+    def _queue_auto_display_if_low_stock(
+        self,
+        db,
+        product: Product,
+        *,
+        require_active_context: bool = False,
+    ) -> None:
+        """상품 재고가 부족이면 자동 진열 요청을 생성한다."""
+        if require_active_context and not self._has_active_auto_display_context(db):
+            return
+
+        display_item = queue_auto_display_if_low_stock(db, product)
+        if display_item is None:
+            return
+        db.flush()
+        self._log().info(
+            "[FleetRepository] low stock auto display queued: "
+            f"product_id={product.product_id}, stock_qty={product.stock_qty}, "
+            f"stock_delta={display_item.stock_delta}, display_item_id={display_item.display_item_id}"
+        )
+
+    def _has_active_auto_display_context(self, db) -> bool:
+        """주문 생성 시점에 자동진열을 즉시 queue해도 되는 흐름이 있는지 확인한다.
+
+        이미 IN_PROGRESS인 진열에는 새 주문의 부족 상품을 붙이지 않는다. 아직 수행 전인
+        진열이 있거나 다른 주문 흐름이 진행 중일 때만 주문 생성 시점에 자동 진열을 queue한다.
+        """
+        if has_appendable_display_item(db):
+            return True
+
+        return (
+            db.query(Order)
+            .filter(Order.status.in_(("SORTING", "DELIVERING", "INSPECTING")))
+            .first()
+            is not None
+        )
+
+    def list_requested_display_items(self) -> list[dict[str, Any]]:
+        """REQUESTED 상태의 display_item 목록을 조회한다."""
         with session_scope() as db:
-            stocking_items = (
-                db.query(StockingItem)
-                .filter(StockingItem.status == "REQUESTED")
-                .order_by(StockingItem.stocking_item_id.desc())
+            display_items = (
+                db.query(DisplayItem)
+                .filter(DisplayItem.status == "REQUESTED")
+                .order_by(DisplayItem.display_batch_id.asc(), DisplayItem.display_item_id.asc())
                 .limit(50)
                 .all()
             )
-            return [build_stocking_item_summary(db, item) for item in stocking_items]
+            return [build_display_item_summary(db, item) for item in display_items]
 
-    def create_stocking_item(
+    def create_display_item(
         self,
         *,
         product_id: int,
+        display_batch_id: int | None = None,
         requested_quantity: int | None = None,
-        detected_quantity: int | None = None,
+        processed_quantity: int | None = None,
         stock_delta: int | None = None,
-        stocking_policy: str | None = None,
+        display_policy: str | None = None,
         assigned_unit_id: int | None = None,
     ) -> dict[str, Any]:
-        """입고 요청 stocking_item 을 생성한다.
+        """진열 요청 display_item 을 생성한다.
 
-        Web Gateway 의 LLM client 가 STOCKING 명령을 파싱하면 이 메서드를 통해
-        REQUESTED 상태의 stocking_item 을 만든다. 이후 TaskManager 가 idle/polling 때
-        list_requested_stocking_items() 로 가져가 입고 task 를 생성한다.
+        Web Gateway 의 LLM client 가 DISPLAY 명령을 파싱하면 이 메서드를 통해
+        REQUESTED 상태의 display_item 을 만든다. 이후 TaskManager 가 idle/polling 때
+        list_requested_display_items() 로 가져가 진열 task 를 생성한다.
         """
         with session_scope() as db:
             if not db.get(Product, product_id):
@@ -986,13 +1083,14 @@ class FleetRepository:
                 self._validate_robot_unit(db, assigned_unit_id)
 
             try:
-                stocking_item = create_stocking_item_record(
+                display_item = create_display_item_record(
                     db,
                     product_id=product_id,
+                    display_batch_id=display_batch_id,
                     requested_quantity=requested_quantity,
-                    detected_quantity=detected_quantity,
+                    processed_quantity=processed_quantity,
                     stock_delta=stock_delta,
-                    stocking_policy=stocking_policy,
+                    display_policy=display_policy,
                     status="REQUESTED",
                     assigned_unit_id=assigned_unit_id,
                 )
@@ -1000,54 +1098,58 @@ class FleetRepository:
                 raise RepoError(str(exc), 400) from exc
 
             db.flush()
-            return build_stocking_item_summary(db, stocking_item)
+            return build_display_item_summary(db, display_item)
 
-    def update_stocking_item(
+    def update_display_item(
         self,
-        stocking_item_id: int,
+        display_item_id: int,
         *,
         status: str | None = None,
+        display_batch_id: int | None = None,
         assigned_unit_id: int | None = None,
-        detected_quantity: int | None = None,
+        processed_quantity: int | None = None,
         stock_delta: int | None = None,
     ) -> dict[str, Any] | None:
-        """stocking_item 상태나 입고 수량 정보를 갱신한다."""
+        """display_item 상태나 진열 수량 정보를 갱신한다."""
         if (
             status is None
+            and display_batch_id is None
             and assigned_unit_id is None
-            and detected_quantity is None
+            and processed_quantity is None
             and stock_delta is None
         ):
-            self._log().warn(f"[FleetRepository] stocking_item_id={stocking_item_id} 변경 인자 없음")
+            self._log().warn(f"[FleetRepository] display_item_id={display_item_id} 변경 인자 없음")
             return None
 
         try:
             with session_scope() as db:
-                stocking_item = (
-                    db.query(StockingItem)
-                    .filter(StockingItem.stocking_item_id == stocking_item_id)
+                display_item = (
+                    db.query(DisplayItem)
+                    .filter(DisplayItem.display_item_id == display_item_id)
                     .with_for_update()
                     .one_or_none()
                 )
-                if not stocking_item:
-                    raise RepoError("stocking item not found")
+                if not display_item:
+                    raise RepoError("display item not found")
 
                 if assigned_unit_id is not None:
                     self._validate_robot_unit(db, assigned_unit_id)
-                    stocking_item.assigned_unit_id = assigned_unit_id
+                    display_item.assigned_unit_id = assigned_unit_id
+                if display_batch_id is not None:
+                    display_item.display_batch_id = display_batch_id
 
-                if detected_quantity is not None:
-                    stocking_item.detected_quantity = detected_quantity
+                if processed_quantity is not None:
+                    display_item.processed_quantity = processed_quantity
                 if stock_delta is not None:
-                    stocking_item.stock_delta = stock_delta
+                    display_item.stock_delta = stock_delta
                 if status is not None:
-                    stocking_item.status = status
+                    display_item.status = status
 
                 db.flush()
-                return build_stocking_item_summary(db, stocking_item)
+                return build_display_item_summary(db, display_item)
         except RepoError as exc:
             self._log().warn(
-                f"[FleetRepository] stocking_item_id={stocking_item_id} 상태 변경 실패: {exc}"
+                f"[FleetRepository] display_item_id={display_item_id} 상태 변경 실패: {exc}"
             )
             return None
 
@@ -1110,6 +1212,11 @@ class FleetRepository:
 
             for pid, qty in quantities.items():
                 products_by_id[pid].stock_qty -= qty
+                self._queue_auto_display_if_low_stock(
+                    db,
+                    products_by_id[pid],
+                    require_active_context=True,
+                )
                 db.add(
                     OrderItem(
                         order_id=order.order_id,
@@ -1173,10 +1280,13 @@ class FleetRepository:
             if not product:
                 raise RepoError("product not found", 404)
             zone_id = self._resolve_storage_zone_id(db, storage_zone_id, storage_location)
+            stock_changed = product.stock_qty != stock_qty
             product.name = name
             product.image_url = image_url
             product.stock_qty = stock_qty
             product.storage_zone_id = zone_id
+            if stock_changed:
+                self._queue_auto_display_if_low_stock(db, product)
             db.flush()
             return build_product_summary(db, product)
 
@@ -1186,7 +1296,10 @@ class FleetRepository:
             product = db.get(Product, product_id)
             if not product:
                 raise RepoError("product not found", 404)
+            stock_changed = product.stock_qty != stock_qty
             product.stock_qty = stock_qty
+            if stock_changed:
+                self._queue_auto_display_if_low_stock(db, product)
             db.flush()
             return build_product_summary(db, product)
 
@@ -1236,33 +1349,97 @@ class FleetRepository:
             return {"status": "ok", "paused_task_ids": paused_task_ids}
 
     def apply_resume(self) -> dict[str, Any]:
-        """재개 DB 전이: EMERGENCY_STOP 로봇의 PAUSED task 를 RUNNING 으로 되돌린다."""
+        """재개 DB 전이: EMERGENCY_STOP 로봇의 PAUSED task 를 재전송 가능 상태로 돌린다."""
         with session_scope() as db:
             robots = db.query(Robot).filter(Robot.robot_status == "EMERGENCY_STOP").all()
 
             resumed_task_ids: list[int] = []
+            resumed_task_id_set: set[int] = set()
             for robot in robots:
                 task = db.get(Task, robot.current_task_id) if robot.current_task_id else None
-                if task and task.status == "PAUSED":
-                    previous_status = task.status
-                    task.status = "RUNNING"
+                if task and task.status == "PAUSED" and task.task_id not in resumed_task_id_set:
+                    task.status = "ASSIGNED"
                     db.add(
                         TaskEvent(
                             task_id=task.task_id,
                             robot_id=robot.robot_id,
                             from_status="PAUSED",
-                            to_status="RUNNING",
+                            to_status="ASSIGNED",
                             event_name="RESUME",
-                            reason="resume",
+                            reason="resume: redispatch from current pose",
                             created_at=datetime.now(UTC),
                         )
                     )
-                    apply_task_runtime_state(db, task, previous_status=previous_status)
+                    for attached_robot in (
+                        db.query(Robot)
+                        .filter(Robot.current_task_id == task.task_id)
+                        .all()
+                    ):
+                        attached_robot.current_task_id = None
+                        if attached_robot.robot_status == "EMERGENCY_STOP":
+                            attached_robot.robot_status = "IDLE"
+
                     resumed_task_ids.append(task.task_id)
+                    resumed_task_id_set.add(task.task_id)
                 else:
+                    robot.current_task_id = None
                     robot.robot_status = "IDLE"
 
             return {"status": "ok", "resumed_task_ids": resumed_task_ids}
+
+    # ==================================================================
+    # 재시작 복구 (R1 / A'')
+    # ==================================================================
+
+    def list_recovery_tasks(self) -> list[dict[str, Any]]:
+        """재시작 복구용: RUNNING task와 담당 로봇의 현재 pose/state를 함께 조회한다.
+
+        TaskManager 가 (1) 로봇 현재 위치 기준 점유 재예약(`pos_x/pos_y` + target),
+        (2) emergency 게이트, (3) CHARGING 로봇 도크 추론에 사용한다.
+        in-flight goal 이 소실되는 대상은 RUNNING task 뿐이라 RUNNING 만 반환한다.
+        ASSIGNED 는 정상 dispatch 가 재예약하므로 포함하지 않는다.
+        """
+        with session_scope() as db:
+            tasks = (
+                db.query(Task)
+                .filter(Task.status == "RUNNING")
+                .order_by(Task.assigned_robot_id, Task.sequence_no, Task.task_id)
+                .all()
+            )
+
+            result: list[dict[str, Any]] = []
+            for task in tasks:
+                robot = db.get(Robot, task.assigned_robot_id) if task.assigned_robot_id else None
+                source_zone = db.get(Zone, task.source_zone_id) if task.source_zone_id else None
+                target_zone = db.get(Zone, task.target_zone_id) if task.target_zone_id else None
+                result.append(
+                    {
+                        "task_id": task.task_id,
+                        "task_type": task.task_type,
+                        "status": task.status,
+                        "sequence_no": task.sequence_no,
+                        "order_id": task.order_id,
+                        "display_item_id": task.display_item_id,
+                        "display_batch_id": task.display_batch_id,
+                        "source_zone_name": source_zone.zone_name if source_zone else None,
+                        "target_zone_name": target_zone.zone_name if target_zone else None,
+                        "robot_name": robot.robot_name if robot else None,
+                        "robot_type": robot.robot_type if robot else None,
+                        "pos_x": robot.pos_x if robot else None,
+                        "pos_y": robot.pos_y if robot else None,
+                        "pos_theta": robot.pos_theta if robot else None,
+                        "picky_state": robot.picky_state if robot else None,
+                        "robot_status": robot.robot_status if robot else None,
+                    }
+                )
+            return result
+
+    def has_emergency_robots(self) -> bool:
+        """EMERGENCY_STOP 상태 로봇이 하나라도 있는지 확인한다(재시작 게이트 판단)."""
+        with session_scope() as db:
+            return (
+                db.query(Robot).filter(Robot.robot_status == "EMERGENCY_STOP").first() is not None
+            )
 
     # ==================================================================
     # 정규화 helpers (이전 FleetRepository 와 동일, 저수준 조회만 DB 기반)
@@ -1352,11 +1529,11 @@ class FleetRepository:
             "items": items,
         }
 
-    def get_stocking_work(self, stocking_item: dict[str, Any]) -> dict[str, Any] | None:
-        """stocking_item 을 TaskManager 가 쓰기 좋은 dict 로 정규화한다."""
-        product_id = stocking_item.get("product_id")
+    def get_display_work(self, display_item: dict[str, Any]) -> dict[str, Any] | None:
+        """display_item 을 TaskManager 가 쓰기 좋은 dict 로 정규화한다."""
+        product_id = display_item.get("product_id")
         if product_id is None:
-            self._log().warn(f"[FleetRepository] stocking_item에 product_id 없음: {stocking_item}")
+            self._log().warn(f"[FleetRepository] display_item에 product_id 없음: {display_item}")
             return None
 
         with session_scope() as db:
@@ -1364,16 +1541,16 @@ class FleetRepository:
             zone_map = self._zone_map(db)
         product = product_map.get(int(product_id), {})
 
-        product_slot_name = stocking_item.get("storage_zone_name") or product.get("storage_zone_name")
+        product_slot_name = display_item.get("storage_zone_name") or product.get("storage_zone_name")
         product_zone_name = self._slot_name_to_zone_name(product_slot_name)
 
         if product_slot_name is None or product_zone_name is None:
             self._log().warn(
-                f"[FleetRepository] stocking_item product_id={product_id} zone/slot 매핑 실패"
+                f"[FleetRepository] display_item product_id={product_id} zone/slot 매핑 실패"
             )
             return None
 
-        assigned_unit_id = stocking_item.get("assigned_unit_id")
+        assigned_unit_id = display_item.get("assigned_unit_id")
         picky_name, cobot_name = self._unit_id_to_robot_names(assigned_unit_id)
 
         product_slot = zone_map.get(product_slot_name, {})
@@ -1382,14 +1559,15 @@ class FleetRepository:
         stock_slot = zone_map.get("STOCK_SLOT", {})
 
         return {
-            "stocking_item_id": stocking_item.get("stocking_item_id"),
+            "display_item_id": display_item.get("display_item_id"),
+            "display_batch_id": display_item.get("display_batch_id"),
             "product_id": int(product_id),
-            "product_name": (stocking_item.get("product_name") or product.get("name")),
-            "requested_quantity": stocking_item.get("requested_quantity"),
-            "detected_quantity": stocking_item.get("detected_quantity"),
-            "stock_delta": stocking_item.get("stock_delta"),
-            "stocking_policy": stocking_item.get("stocking_policy"),
-            "priority": stocking_item.get("priority") or 2,
+            "product_name": (display_item.get("product_name") or product.get("name")),
+            "requested_quantity": display_item.get("requested_quantity"),
+            "processed_quantity": display_item.get("processed_quantity"),
+            "stock_delta": display_item.get("stock_delta"),
+            "display_policy": display_item.get("display_policy"),
+            "priority": display_item.get("priority") or 2,
             "assigned_unit_id": assigned_unit_id,
             "picky_name": picky_name,
             "cobot_name": cobot_name,

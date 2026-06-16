@@ -5,13 +5,20 @@ from typing import Any, Callable
 
 from geometry_msgs.msg import PoseStamped
 from rclpy.action import ActionClient
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
 
-from just_pick_it_interfaces.action import DockCommand, ExecuteTask, MoveCommand
+from just_pick_it_interfaces.action import DockCommand, MoveCommand
 from just_pick_it_interfaces.srv import EmergencyControl
+
+try:
+    from just_pick_it_interfaces.action import ExecuteTask
+except ImportError:
+    ExecuteTask = None
 
 
 FeedbackCallback = Callable[[str, int, int], None]
+CobotFeedbackCallback = Callable[[dict[str, Any]], None]
 ResultCallback = Callable[[dict[str, Any]], None]
 
 
@@ -21,22 +28,24 @@ class RobotCommandGateway:
     역할:
     - TaskManager는 ROS2 topic/action 이름과 message 구조를 직접 알지 않는다.
     - PICKY 이동 task는 MoveCommand.action goal로 변환해 State Manager에 보낸다.
+    - COBOT 작업 task는 ExecuteTask.action이 생성되면 goal로 변환해 State Manager에 보낸다.
     - Action feedback/result를 TaskManager callback으로 다시 전달한다.
 
     현재 지원:
     - PICKY MoveCommand.action
     - PICKY DockCommand.action
+    - COBOT ExecuteTask.action client hook (메시지 정의 대기)
     - PICKY/COBOT EmergencyControl service
-
-    추후 확장:
-    - COBOT ExecuteTask.action
     """
 
     def __init__(
         self,
         node: Node,
         *,
-        action_wait_timeout_sec: float = 2.0,
+        # 크로스머신(PC<->보드) 첫 주문 시 action 서버 DDS discovery 가 2초보다
+        # 오래 걸려 MoveCommand 가 실패하던 문제로 여유를 둔다. 첫 명령만 대기하고
+        # 이후엔 이미 discovery 된 상태라 즉시 반환된다.
+        action_wait_timeout_sec: float = 8.0,
         service_wait_timeout_sec: float = 1.0,
         map_frame: str = "map",
     ) -> None:
@@ -45,6 +54,11 @@ class RobotCommandGateway:
         self._action_wait_timeout_sec = action_wait_timeout_sec
         self._service_wait_timeout_sec = service_wait_timeout_sec
         self._map_frame = map_frame
+        # action 클라이언트 전용 ReentrantCallbackGroup. wait_for_server 를 task
+        # dispatch 콜백 안에서 호출하는데, 클라이언트가 노드 기본(mutually-exclusive)
+        # 그룹을 쓰면 그 콜백이 블록된 동안 같은 그룹의 discovery 콜백이 못 돌아
+        # 서버 매칭이 영영 안 된다(콜백그룹 데드락). 별도 reentrant 그룹으로 푼다.
+        self._cb_group = ReentrantCallbackGroup()
         self._move_clients: dict[str, ActionClient] = {}
         self._dock_clients: dict[str, ActionClient] = {}
         self._cobot_clients: dict[str, ActionClient] = {}
@@ -52,6 +66,22 @@ class RobotCommandGateway:
         self._active_move_goals: dict[int, Any] = {}
         self._active_dock_goals: dict[int, Any] = {}
         self._active_cobot_goals: dict[int, Any] = {}
+
+    def prewarm(self, robot_names: list[str]) -> None:
+        """PICKY action 클라이언트를 미리 생성해 discovery 를 startup 에 끝낸다.
+
+        wait_for_server 를 task dispatch 콜백 안에서 동기 호출하면, 첫 주문 때
+        해당 콜백이 블록되는 동안 클라이언트 discovery 가 제때 완료되지 못해
+        timeout(첫 MoveCommand 실패) 나는 문제가 있었다. node spin 전에 클라이언트를
+        만들어 두면, executor 가 자유롭게 도는 기동 구간에 discovery 가 완료되어
+        첫 주문 시 wait_for_server 가 즉시 반환한다.
+        """
+        for name in robot_names:
+            self._get_move_client(name)
+            self._get_dock_client(name)
+        self._node.get_logger().info(
+            f"[RobotCommandGateway] action 클라이언트 prewarm: {list(robot_names)}"
+        )
 
     # ==================================================================
     # PICKY MoveCommand
@@ -95,6 +125,12 @@ class RobotCommandGateway:
             f"[RobotCommandGateway] {robot_name} task_id={task_id} {task_type} 전송, "
             f"waypoints={len(poses)}"
         )
+        self._node.get_logger().info(
+            f"[PATHTRACE][Gateway->StateMachine] task_id={task_id} zone={list(waypoints)} "
+            "poses=[" + ", ".join(
+                f"({p.pose.position.x:.3f},{p.pose.position.y:.3f})" for p in poses
+            ) + "]"
+        )
 
         send_future = client.send_goal_async(
             goal,
@@ -122,6 +158,8 @@ class RobotCommandGateway:
         if goal_handle is None:
             goal_handle = self._active_dock_goals.get(task_id)
         if goal_handle is None:
+            goal_handle = self._active_cobot_goals.get(task_id)
+        if goal_handle is None:
             self._node.get_logger().warn(
                 f"[RobotCommandGateway] task_id={task_id} 취소 실패: active goal 없음"
             )
@@ -141,7 +179,9 @@ class RobotCommandGateway:
 
         namespace = self._robot_name_to_namespace(robot_name)
         action_name = f"/{namespace}/move_command"
-        client = ActionClient(self._node, MoveCommand, action_name)
+        client = ActionClient(
+            self._node, MoveCommand, action_name, callback_group=self._cb_group
+        )
         self._move_clients[robot_name] = client
         return client
 
@@ -178,6 +218,7 @@ class RobotCommandGateway:
                 robot_name,
                 task_id,
                 task_type,
+                goal_handle,
                 done,
                 result_callback,
             )
@@ -202,11 +243,13 @@ class RobotCommandGateway:
         robot_name: str,
         task_id: int,
         task_type: str,
+        goal_handle: Any,
         future: Any,
         result_callback: ResultCallback | None,
     ) -> None:
         """MoveCommand result를 TaskManager가 이해하는 dict로 변환한다."""
-        self._active_move_goals.pop(task_id, None)
+        if self._active_move_goals.get(task_id) is goal_handle:
+            self._active_move_goals.pop(task_id, None)
 
         result_wrapper = future.result()
         result = result_wrapper.result
@@ -242,7 +285,7 @@ class RobotCommandGateway:
         """PICKY 도킹 task를 DockCommand.action goal로 전송한다.
 
         DockCommand는 Nav2 waypoint 이동이 아니라 State Manager 내부의
-        ArUco/라인 기반 정밀 도킹 루틴을 실행하기 위한 action이다.
+        AprilTag/ArUco 정렬 + odom 거리 기반 정밀 도킹 루틴을 실행하기 위한 action이다.
 
         TrafficManager는 STANDBY_ZONE까지의 교통/점유만 관여한다.
         CHARGING_DOCK은 DB zone pose가 아니라 State Manager 내부 도킹 루틴이
@@ -291,7 +334,9 @@ class RobotCommandGateway:
 
         namespace = self._robot_name_to_namespace(robot_name)
         action_name = f"/{namespace}/dock_command"
-        client = ActionClient(self._node, DockCommand, action_name)
+        client = ActionClient(
+            self._node, DockCommand, action_name, callback_group=self._cb_group
+        )
         self._dock_clients[robot_name] = client
         return client
 
@@ -326,6 +371,7 @@ class RobotCommandGateway:
             lambda done: self._on_dock_result(
                 robot_name,
                 task_id,
+                goal_handle,
                 done,
                 result_callback,
             )
@@ -343,11 +389,13 @@ class RobotCommandGateway:
         self,
         robot_name: str,
         task_id: int,
+        goal_handle: Any,
         future: Any,
         result_callback: ResultCallback | None,
     ) -> None:
         """DockCommand result를 TaskManager가 이해하는 dict로 변환한다."""
-        self._active_dock_goals.pop(task_id, None)
+        if self._active_dock_goals.get(task_id) is goal_handle:
+            self._active_dock_goals.pop(task_id, None)
 
         result_wrapper = future.result()
         result = result_wrapper.result
@@ -376,11 +424,16 @@ class RobotCommandGateway:
         *,
         robot_name: str,
         task: dict[str, Any],
+        feedback_callback: CobotFeedbackCallback | None = None,
         result_callback: ResultCallback | None = None,
     ) -> bool:
         """COBOT task를 ExecuteTask.action goal로 전송한다."""
-        task_id = int(task.get('task_id') or 0)
-        task_type = str(task.get('task_type') or '')
+        if ExecuteTask is None:
+            self._node.get_logger().warn(
+                f"[RobotCommandGateway] {robot_name} ExecuteTask.action 미생성: "
+                f"task_id={task.get('task_id')}, task_type={task.get('task_type')}"
+            )
+            return False
 
         client = self._get_cobot_client(robot_name)
         if not client.wait_for_server(timeout_sec=self._action_wait_timeout_sec):
@@ -389,20 +442,24 @@ class RobotCommandGateway:
             )
             return False
 
-        goal = ExecuteTask.Goal()
-        goal.task_id = task_id
-        goal.task_type = task_type
-        goal.product_name = str(task.get('product_name') or '')
-        goal.quantity = int(task.get('quantity') or 0)
-        goal.order_id = int(task.get('order_id') or 0)
-        goal.display_item_id = int(task.get('display_item_id') or 0)
-        goal.target_zone_name = str(task.get('target_zone_name') or '')
+        goal = self._build_cobot_goal(task)
+        task_id = int(goal.task_id)
+        task_type = str(goal.task_type)
 
         self._node.get_logger().info(
             f"[RobotCommandGateway] {robot_name} task_id={task_id} {task_type} 전송"
         )
 
-        send_future = client.send_goal_async(goal)
+        send_future = client.send_goal_async(
+            goal,
+            feedback_callback=lambda feedback_msg: self._on_cobot_feedback(
+                robot_name,
+                task_id,
+                task_type,
+                feedback_msg,
+                feedback_callback,
+            ),
+        )
         send_future.add_done_callback(
             lambda future: self._on_cobot_goal_response(
                 robot_name,
@@ -420,10 +477,33 @@ class RobotCommandGateway:
         if client is not None:
             return client
 
-        action_name = f"/{robot_name}/execute_task"
-        client = ActionClient(self._node, ExecuteTask, action_name)
+        namespace = self._robot_name_to_namespace(robot_name)
+        action_name = f"/{namespace}/execute_task"
+        client = ActionClient(
+            self._node, ExecuteTask, action_name, callback_group=self._cb_group
+        )
         self._cobot_clients[robot_name] = client
         return client
+
+    def _build_cobot_goal(self, task: dict[str, Any]) -> ExecuteTask.Goal:
+        """Fleet task summary를 ExecuteTask goal로 변환한다."""
+        goal = ExecuteTask.Goal()
+
+        quantity = self._int_or_zero(
+            task.get("product_quantity")
+            or task.get("quantity")
+            or task.get("requested_quantity")
+            or task.get("processed_quantity")
+        )
+
+        self._set_goal_field(goal, "task_id", self._int_or_zero(task.get("task_id")))
+        self._set_goal_field(goal, "task_type", str(task.get("task_type") or ""))
+        self._set_goal_field(goal, "order_id", self._int_or_zero(task.get("order_id")))
+        self._set_goal_field(goal, "display_item_id", self._int_or_zero(task.get("display_item_id")))
+        self._set_goal_field(goal, "product_name", str(task.get("product_name") or ""))
+        self._set_goal_field(goal, "quantity", quantity)
+        self._set_goal_field(goal, "target_zone_name", str(task.get("target_zone_name") or ""))
+        return goal
 
     def _on_cobot_goal_response(
         self,
@@ -440,13 +520,15 @@ class RobotCommandGateway:
                 f"[RobotCommandGateway] {robot_name} task_id={task_id} cobot goal rejected"
             )
             if result_callback is not None:
-                result_callback({
-                    "task_id": task_id,
-                    "robot_name": robot_name,
-                    "task_type": task_type,
-                    "success": False,
-                    "message": "cobot goal rejected",
-                })
+                result_callback(
+                    {
+                        "task_id": task_id,
+                        "robot_name": robot_name,
+                        "task_type": task_type,
+                        "success": False,
+                        "message": "cobot goal rejected",
+                    }
+                )
             return
 
         self._active_cobot_goals[task_id] = goal_handle
@@ -456,35 +538,77 @@ class RobotCommandGateway:
                 robot_name,
                 task_id,
                 task_type,
+                goal_handle,
                 done,
                 result_callback,
             )
         )
+
+    def _on_cobot_feedback(
+        self,
+        robot_name: str,
+        task_id: int,
+        task_type: str,
+        feedback_msg: Any,
+        feedback_callback: CobotFeedbackCallback | None,
+    ) -> None:
+        """ExecuteTask feedback을 TaskManager callback으로 전달한다."""
+        feedback = feedback_msg.feedback
+        status = (
+            self._get_message_field(feedback, "status")
+            or self._get_message_field(feedback, "state")
+            or ""
+        )
+        payload = {
+            "task_id": task_id,
+            "robot_name": robot_name,
+            "task_type": task_type,
+            "status": str(status),
+            "state": str(status),
+            "message": str(self._get_message_field(feedback, "message") or ""),
+            "progress": float(self._get_message_field(feedback, "progress") or 0.0),
+            "processed_quantity": self._quantity_from_message(feedback),
+        }
+
+        if feedback_callback is not None:
+            feedback_callback(payload)
 
     def _on_cobot_result(
         self,
         robot_name: str,
         task_id: int,
         task_type: str,
+        goal_handle: Any,
         future: Any,
         result_callback: ResultCallback | None,
     ) -> None:
         """ExecuteTask result를 TaskManager가 이해하는 dict로 변환한다."""
-        self._active_cobot_goals.pop(task_id, None)
+        if self._active_cobot_goals.get(task_id) is goal_handle:
+            self._active_cobot_goals.pop(task_id, None)
 
         result_wrapper = future.result()
         result = result_wrapper.result
+        status = str(self._get_message_field(result, "status") or "")
+        message = (
+            self._get_message_field(result, "result_message")
+            or self._get_message_field(result, "message")
+            or status
+        )
         payload = {
             "task_id": task_id,
             "robot_name": robot_name,
             "task_type": task_type,
-            "success": bool(result.success),
-            "message": result.message,
+            "success": bool(self._get_message_field(result, "success")),
+            "status": status,
+            "message": str(message),
+            "processed_quantity": self._quantity_from_message(result),
+            "stock_delta": self._int_or_zero(self._get_message_field(result, "stock_delta")),
         }
 
         self._node.get_logger().info(
             f"[RobotCommandGateway] {robot_name} task_id={task_id} cobot result: "
-            f"success={payload['success']}, message={payload['message']}"
+            f"success={payload['success']}, status={payload['status']}, "
+            f"message={payload['message']}"
         )
 
         if result_callback is not None:
@@ -655,3 +779,27 @@ class RobotCommandGateway:
     def _robot_name_to_namespace(self, robot_name: str) -> str:
         """DB robot_name을 ROS namespace로 변환한다."""
         return robot_name.lower()
+
+    def _int_or_zero(self, value: Any) -> int:
+        """ROS action에서 optional int를 표현하기 위한 0 변환 helper."""
+        if value is None:
+            return 0
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    def _set_goal_field(self, goal: Any, field_name: str, value: Any) -> None:
+        """최종 action 필드가 확정되기 전까지 존재하는 필드에만 값을 채운다."""
+        if hasattr(goal, field_name):
+            setattr(goal, field_name, value)
+
+    def _get_message_field(self, message: Any, field_name: str) -> Any:
+        """ROS message/action object에서 optional field를 안전하게 읽는다."""
+        if hasattr(message, field_name):
+            return getattr(message, field_name)
+        return None
+
+    def _quantity_from_message(self, message: Any) -> int:
+        """ROS message/action object에서 처리 수량을 읽는다."""
+        return self._int_or_zero(self._get_message_field(message, "processed_quantity"))

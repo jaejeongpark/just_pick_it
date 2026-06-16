@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Just Pick It 데모 데이터를 seed 기준으로 되돌립니다.
-# DB schema 자체까지 다시 만들려면 ./reset_ws.sh 를 사용합니다. DB를 유지하려면 RESET_DB=0을 붙입니다.
+# Just Pick It 데모 DB를 schema + seed 기준으로 빠르게 되돌립니다.
+# venv/rosdep/colcon build는 건드리지 않습니다.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DB_NAME="${DB_NAME:-just_pick_it}"
@@ -17,24 +17,18 @@ if ! command -v psql >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "[demo-reset] clearing demo tables and resetting primary keys"
+echo "[demo-reset] resetting public schema"
 psql "$DATABASE_URL" <<'SQL'
-TRUNCATE TABLE
-  task_event,
-  exception_log,
-  task,
-  stocking_item,
-  order_item,
-  orders,
-  robot,
-  robot_unit,
-  pickup_slot,
-  product,
-  zone
-RESTART IDENTITY CASCADE;
+DROP SCHEMA IF EXISTS public CASCADE;
+CREATE SCHEMA public;
+GRANT ALL ON SCHEMA public TO public;
+SQL
+psql "$DATABASE_URL" -v db_user="$DB_USER" <<'SQL'
+GRANT ALL ON SCHEMA public TO :"db_user";
 SQL
 
-echo "[demo-reset] applying seed data"
+echo "[demo-reset] applying schema and seed data"
+psql "$DATABASE_URL" -f "$ROOT_DIR/db/schema.sql"
 psql "$DATABASE_URL" -f "$ROOT_DIR/db/seed.sql"
 
 echo "[demo-reset] done"

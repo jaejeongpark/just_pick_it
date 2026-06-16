@@ -46,7 +46,7 @@ CREATE TYPE picky_state AS ENUM (
     'WAITING_FOR_COBOT',
     'MOVING_TO_PICKUP',
     'MOVING_TO_STOCK',
-    'MOVING_TO_STORAGE',
+    'MOVING_TO_DISPLAY',
     'RETURNING',
     'DOCKING',
     'ERROR_RECOVERY'
@@ -58,9 +58,8 @@ CREATE TYPE cobot_state AS ENUM (
     'LOADING',
     'INSPECTING',
     'UNLOADING',
-    'STOCKING_SORTING',
-    'STOCKING_LOADING',
-    'STOCKING_PLACING',
+    'SCANNING',
+    'PLACING',
     'STOWING_ARM',
     'SAFETY_STOPPED'
 );
@@ -72,9 +71,9 @@ CREATE TYPE task_type AS ENUM (
     'INSPECTION',
     'UNLOAD',
     'MOVE_TO_STOCK',
-    'STOCKING_PICK',
-    'MOVE_TO_STORAGE',
-    'STOCKING_PLACE',
+    'MOVE_TO_DISPLAY',
+    'DISPLAY_SCAN',
+    'DISPLAY_PLACE',
     'RETURN_HOME',
     'DOCK_IN',
     'CHARGE'
@@ -102,12 +101,12 @@ CREATE TYPE exception_type AS ENUM (
     'SYSTEM_ERROR'
 );
 
-CREATE TYPE stocking_policy AS ENUM (
+CREATE TYPE display_policy AS ENUM (
     'REQUESTED_QUANTITY',
-    'ALL_DETECTED'
+    'ALL_PROCESSED'
 );
 
-CREATE TYPE stocking_item_status AS ENUM (
+CREATE TYPE display_item_status AS ENUM (
     'REQUESTED',
     'ASSIGNED',
     'IN_PROGRESS',
@@ -163,19 +162,20 @@ CREATE TABLE order_item (
     status order_item_status NOT NULL DEFAULT 'WAITING'
 );
 
-CREATE TABLE stocking_item (
-    stocking_item_id SERIAL PRIMARY KEY,
+CREATE TABLE display_item (
+    display_item_id SERIAL PRIMARY KEY,
+    display_batch_id INT,
     product_id INT NOT NULL REFERENCES product(product_id),
     requested_quantity INT CHECK (requested_quantity IS NULL OR requested_quantity > 0),
-    detected_quantity INT CHECK (detected_quantity IS NULL OR detected_quantity >= 0),
+    processed_quantity INT CHECK (processed_quantity IS NULL OR processed_quantity >= 0),
     stock_delta INT CHECK (stock_delta IS NULL OR stock_delta >= 0),
-    stocking_policy stocking_policy NOT NULL,
-    status stocking_item_status NOT NULL DEFAULT 'REQUESTED',
+    display_policy display_policy NOT NULL,
+    status display_item_status NOT NULL DEFAULT 'REQUESTED',
     assigned_unit_id INT REFERENCES robot_unit(unit_id),
     CHECK (
-        (stocking_policy = 'REQUESTED_QUANTITY' AND requested_quantity IS NOT NULL)
+        (display_policy = 'REQUESTED_QUANTITY' AND requested_quantity IS NOT NULL)
         OR
-        (stocking_policy = 'ALL_DETECTED' AND requested_quantity IS NULL)
+        (display_policy = 'ALL_PROCESSED' AND requested_quantity IS NULL)
     )
 );
 
@@ -204,7 +204,8 @@ CREATE TABLE task (
     task_id SERIAL PRIMARY KEY,
     order_id INT REFERENCES orders(order_id) ON DELETE CASCADE,
     order_item_id INT REFERENCES order_item(item_id) ON DELETE CASCADE,
-    stocking_item_id INT REFERENCES stocking_item(stocking_item_id) ON DELETE CASCADE,
+    display_item_id INT REFERENCES display_item(display_item_id) ON DELETE CASCADE,
+    display_batch_id INT,
     sequence_no INT NOT NULL,
     assigned_robot_id INT REFERENCES robot(robot_id),
     task_type task_type NOT NULL,
@@ -214,10 +215,15 @@ CREATE TABLE task (
     target_zone_id INT REFERENCES zone(zone_id),
     result_message TEXT,
     CHECK (
-        NOT (order_item_id IS NOT NULL AND stocking_item_id IS NOT NULL)
+        NOT (order_item_id IS NOT NULL AND display_item_id IS NOT NULL)
     ),
     CHECK (
-        stocking_item_id IS NULL
+        display_item_id IS NULL
+        OR
+        (order_id IS NULL AND order_item_id IS NULL)
+    ),
+    CHECK (
+        display_batch_id IS NULL
         OR
         (order_id IS NULL AND order_item_id IS NULL)
     )
@@ -261,14 +267,17 @@ ON order_item(order_id);
 CREATE INDEX idx_order_item_product_id
 ON order_item(product_id);
 
-CREATE INDEX idx_stocking_item_product_id
-ON stocking_item(product_id);
+CREATE INDEX idx_display_item_product_id
+ON display_item(product_id);
 
-CREATE INDEX idx_stocking_item_status
-ON stocking_item(status);
+CREATE INDEX idx_display_item_batch_id
+ON display_item(display_batch_id);
 
-CREATE INDEX idx_stocking_item_assigned_unit_id
-ON stocking_item(assigned_unit_id);
+CREATE INDEX idx_display_item_status
+ON display_item(status);
+
+CREATE INDEX idx_display_item_assigned_unit_id
+ON display_item(assigned_unit_id);
 
 CREATE INDEX idx_robot_unit_id
 ON robot(unit_id);
@@ -285,8 +294,11 @@ ON task(order_id);
 CREATE INDEX idx_task_order_item_id
 ON task(order_item_id);
 
-CREATE INDEX idx_task_stocking_item_id
-ON task(stocking_item_id);
+CREATE INDEX idx_task_display_item_id
+ON task(display_item_id);
+
+CREATE INDEX idx_task_display_batch_id
+ON task(display_batch_id);
 
 CREATE INDEX idx_task_assigned_robot_id
 ON task(assigned_robot_id);

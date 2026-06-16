@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -39,7 +40,7 @@ class RobotStateMonitor:
       한 번에 DB에 반영한다(coalesce). picky_state도 같은 주기에 함께 반영한다.
     - **robot_status는 절대 기록하지 않는다.** robot_status는 task 전이(workflow_service)
       전용이며, 텔레메트리는 picky_state / battery_level / pos_* 만 갱신한다.
-    - battery_level이 임계값(기본 40%)을 **초과하는 구간에서 robot별 1회만**
+    - battery_level이 임계값(기본 30%)을 **초과하는 구간에서 robot별 1회만**
       `on_battery_update`(TaskManager.handle_battery_update)를 호출한다(충전 완료 트리거).
       임계값 이하로 떨어지면 플래그가 해제되어 다음 초과 진입 때 다시 1회 호출된다.
       구간당 1회만 호출하므로 scheduler lock 경합이 사실상 없다.
@@ -53,7 +54,8 @@ class RobotStateMonitor:
         on_state_change: StateCallback,
         on_battery_update: BatteryCallback | None = None,
         db_flush_period_sec: float = 1.0,
-        battery_notify_threshold: int = 40,
+        battery_notify_threshold: int = 30,
+        battery_stale_timeout_sec: float = 20.0,
     ) -> None:
         self._node = node
         self._repo = fleet_repo
@@ -71,6 +73,14 @@ class RobotStateMonitor:
         # battery_threshold 초과 구간에서 on_battery_update 를 이미 1회 호출한 robot 집합.
         # threshold 이하로 떨어지면 제거되어, 다음 초과 진입 때 다시 1회 호출된다.
         self._battery_notified: set[str] = set()
+        # bringup 이 죽어 battery 텔레메트리가 timeout 이상 끊기면 배터리를 0% 로 떨어뜨려
+        # offline 로봇이 stale battery 로 신규 주문을 배정받는 것을 막는다(기존
+        # battery<=30 배정 게이팅 재사용). monotonic 기준, 시작 시각으로 초기화해
+        # 부팅 grace period 를 둔다(부팅 직후 즉시 offline 처리되지 않게).
+        self._battery_stale_timeout = battery_stale_timeout_sec
+        self._last_battery_time: dict[str, float] = {
+            rid: time.monotonic() for rid in robot_ids
+        }
 
         for robot_id in robot_ids:
             ns = robot_id.lower()
@@ -115,6 +125,7 @@ class RobotStateMonitor:
         level = max(0, min(100, int(round(float(msg.data)))))
         with self._lock:
             self._latest[robot_id]['battery_level'] = level
+            self._last_battery_time[robot_id] = time.monotonic()
 
     def _on_pose(self, robot_id: str, msg: PoseWithCovarianceStamped) -> None:
         pose = msg.pose.pose
@@ -130,8 +141,18 @@ class RobotStateMonitor:
 
     def _flush_to_db(self) -> None:
         """변경분만 robot 별로 DB에 한 번에 반영하고, battery 임계 통과를 알린다."""
+        now = time.monotonic()
         for robot_id in list(self._latest):
             with self._lock:
+                # battery 텔레메트리가 timeout 이상 끊기면(bringup 다운 등) offline 으로
+                # 보고 0% 로 떨어뜨린다 → 기존 battery<=30 게이팅으로 신규 배정 제외.
+                if now - self._last_battery_time[robot_id] > self._battery_stale_timeout:
+                    if self._latest[robot_id].get('battery_level') != 0:
+                        self._node.get_logger().warn(
+                            f'[RobotStateMonitor] {robot_id} battery '
+                            f'{self._battery_stale_timeout:.0f}s+ 미수신 → 0%(offline) 처리'
+                        )
+                    self._latest[robot_id]['battery_level'] = 0
                 latest = dict(self._latest[robot_id])
                 written = self._last_written[robot_id]
                 changed = {key: value for key, value in latest.items() if written.get(key) != value}
@@ -148,8 +169,8 @@ class RobotStateMonitor:
     def _maybe_notify_battery(self, robot_id: str, level: Any) -> None:
         """battery 임계 초과 구간에서 robot 별 1회만 on_battery_update 를 호출한다.
 
-        예: 39%(미호출) -> 41%(1회 호출, 플래그 set) -> 45%/80%(플래그 set, skip)
-            -> 40% 이하(플래그 해제) -> 41%(다시 1회 호출).
+        예: 29%(미호출) -> 31%(1회 호출, 플래그 set) -> 45%/80%(플래그 set, skip)
+            -> 30% 이하(플래그 해제) -> 31%(다시 1회 호출).
         """
         if self._on_battery_update is None or level is None:
             return

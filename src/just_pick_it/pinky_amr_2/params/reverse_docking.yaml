@@ -1,0 +1,181 @@
+/**/reverse_docking:
+  ros__parameters:
+    # ------------------------------------------------------------------ #
+    # Marker
+    # ------------------------------------------------------------------ #
+    # PICKY1과 같은 담당자 출력물 기준. 마커 ID는 패턴에 들어 있고,
+    # 실제 map 좌표/도크 좌표는 state_machine/reverse_docking 설정이 해석한다.
+    aruco_marker_dict: "DICT_APRILTAG_36h11"
+    marker_size_m: 0.05
+
+    # ------------------------------------------------------------------ #
+    # Camera
+    # ------------------------------------------------------------------ #
+    # 평소 주행 중에는 카메라를 끄고, DOCK_IN 중 reverse_docking이 Picamera2를
+    # 직접 열었다가 끝나면 닫는다. 외부 camera/image_raw 노드로 테스트할 때만
+    # camera_source를 ros_topic으로 바꾼다.
+    camera_source: "picamera2"
+    camera_topic: "camera/image_raw"
+    camera_width: 1280
+    camera_height: 720
+    flip_camera_180: true
+    # Picamera2를 켠 직후 첫 프레임이 어둡거나 exposure가 흔들릴 수 있어,
+    # 도킹 탐색을 시작하기 전에 몇 프레임을 버리고 안정화한다.
+    camera_warmup_sec: 1.5
+
+    # ------------------------------------------------------------------ #
+    # Debug image
+    # ------------------------------------------------------------------ #
+    # reverse_docking이 실제로 판단에 사용한 프레임에 marker box/center/tvec을
+    # 그려서 publish한다. 별도 camera publisher를 켜지 않아도 RViz/rqt_image_view로
+    # /picky2/docking/debug_image를 보면 도킹 중 시야를 확인할 수 있다.
+    debug_publish_image: true
+    debug_image_topic: "docking/debug_image"
+    debug_image_period_sec: 0.05
+    debug_save_failure_images: true
+    debug_save_dir: "~/just_pick_it/bags/docking_debug"
+    debug_save_frame_count: 12
+
+    # ------------------------------------------------------------------ #
+    # Blue guide lane debug
+    # ------------------------------------------------------------------ #
+    # 하단 ROI에서 청록/파랑 테이프 contour 2개를 잡고, 각 contour를 직선으로
+    # 피팅한 뒤 두 라인 사이의 중앙선을 만든다. debug image에는 marker 중심에서
+    # 아래 방향으로 뻗는 도킹축과 lane centerline의 차이를 표시한다.
+    # reverse_lane_axis_enabled=true이면 REVERSE_INSERT 중 이 픽셀 오차(axis_err)를
+    # yaw 보정 입력으로 사용한다.
+    lane_debug_enabled: true
+    lane_roi_y_min_ratio: 0.52
+    lane_hsv_lower: [75, 35, 40]
+    lane_hsv_upper: [105, 255, 255]
+    lane_min_area_px: 500.0
+    lane_morph_kernel_px: 5
+    lane_min_pair_separation_px: 160.0
+    lane_min_centerline_length_px: 40.0
+
+    # PICKY2: just_pick_it_perception/result/picky_2/camera_calibration.yaml
+    # 해상도 1280x720 기준 intrinsic.
+    camera_matrix:
+      [
+        1564.8861778174316,
+        0.0,
+        634.6279547011992,
+        0.0,
+        1557.9751956153086,
+        386.3538829840184,
+        0.0,
+        0.0,
+        1.0,
+      ]
+    dist_coeffs:
+      [
+        -0.03862007925270209,
+        1.9953590527035414,
+        -0.004035341465584413,
+        0.007809686398255311,
+        -10.752768150812287,
+      ]
+
+    # ------------------------------------------------------------------ #
+    # Phase timing
+    # ------------------------------------------------------------------ #
+    marker_timeout_sec: 15.0
+    align_timeout_sec: 10.0
+    reverse_timeout_sec: 20.0
+    odom_timeout_sec: 5.0
+    settle_sec: 0.3
+    # 실차 bag에서 capture/detect 주기가 약 1.6~1.7초까지 늘어나는 구간이 있었다.
+    # 그동안 연속 회전을 걸어두면 마커가 프레임 사이에 지나가므로, 탐색/정렬은
+    # 짧게 회전하고 멈춘 뒤 다음 프레임을 판단하는 step-scan 방식으로 수행한다.
+    marker_search_step_sec: 0.30
+    marker_search_settle_sec: 0.20
+    align_rotation_step_sec: 0.18
+    # marker 1을 찾아야 할 때 marker 0을 봤거나, marker가 잘렸지만 dock 2 방향을
+    # 찾아야 하는 상황이면 오른쪽/시계방향으로 훑어야 한다. 실차 기준
+    # +angular.z가 왼쪽 회전으로 관측됐으므로 marker 1 blind scan은 음수 방향이다.
+    marker_search_hint_timeout_sec: 6.0
+    marker_0_default_search_direction: 1.0
+    marker_1_default_search_direction: -1.0
+
+    # ------------------------------------------------------------------ #
+    # Marker alignment
+    # ------------------------------------------------------------------ #
+    acquire_rotate_speed: 0.25
+    # picky2_debug_20260615_135956에서 marker 1은 계속 보였지만 lat_err가
+    # 0.030 -> 0.022m까지만 줄고 2cm 기준을 못 넘어 ALIGN timeout이 났다.
+    # 후진 중 lane/marker 보정을 계속 쓰므로 초기 정렬은 3cm, 2프레임이면
+    # 충분한 것으로 보고 도킹 삽입 단계로 넘긴다.
+    align_lateral_tolerance_m: 0.03
+    align_stable_frames: 2
+    align_kp: 1.2
+    # target marker를 한 번 본 뒤 잃으면 최근 target pose 또는 마지막 회전
+    # 방향을 기준으로 되찾는다. 0.08rad/s는 실차에서 너무 느리게 보여
+    # 처리 주기와 검출 안정성 사이의 중간값으로 0.15rad/s부터 테스트한다.
+    align_reacquire_rotate_speed: 0.15
+    max_angular_vel: 0.35
+
+    # ------------------------------------------------------------------ #
+    # Reverse insertion
+    # ------------------------------------------------------------------ #
+    # 기본 정지 기준은 ArUco/AprilTag solvePnP의 tvec[2] 거리다.
+    # docking_test_20260615_132622에서 marker_z=0.483m로 success 처리됐지만,
+    # marker_lat=0.162m, axis_err=-801px 상태라 물리적으로는 박으면서 회전했다.
+    # 처음에는 충돌 여유를 보려고 marker_z 0.46m부터 시작했지만, 실차에서
+    # 약 7cm 정도 덜 들어간 상태로 멈춰 0.53m로 올린다. tolerance 0.02 기준
+    # 실제 성공 판정은 약 0.51m부터다.
+    # PICKY1 담당자 실측 marker_y는 약 0.635m다. STANDBY_ZONE_2 y=0.40에서
+    # 관측된 marker_z 약 0.22m를 함께 보면 카메라/실측 offset이 약 1~2cm라,
+    # CHARGING_DOCK_2 y=0.08 기준 계산상 목표 marker_z는 약 0.54m지만,
+    # 물리 충돌 여유와 실제 카메라 시야를 보면서 0.53m부터 다시 테스트한다.
+    # reverse_distance_m은 성공 기준이 아니라 marker 거리 추정 실패/오차에 대비한
+    # 안전 상한이다. 기존 odom 기준으로 되돌려 비교하려면 reverse_stop_mode를
+    # odom_distance로 바꾼다.
+    reverse_speed: 0.035
+    reverse_stop_mode: "marker_distance"
+    reverse_target_marker_distance_m: 0.54
+    reverse_marker_distance_tolerance_m: 0.02
+    # docking_test_20260615_131720에서 marker_z=0.409m 이후 marker를 잃은 뒤
+    # 약 0.8초 더 후진하며 접촉 위험이 커졌다. marker를 잃으면 빠르게 멈춰
+    # 실패 처리하고, 실제 삽입은 lane centerline 보정으로 marker가 계속 보이게 한다.
+    reverse_marker_lost_timeout_sec: 0.35
+    # 후진 명령 중 marker_z가 이 시간 동안 거의 늘지 않으면 벽/도크에 걸렸거나
+    # 잘못 들어간 것으로 보고 REVERSE_INSERT를 실패 처리한다. 실패하면 아래 retry
+    # escape 후 marker 정렬부터 한 번 다시 시도한다.
+    reverse_marker_progress_timeout_sec: 2.0
+    reverse_marker_progress_min_delta_m: 0.015
+    reverse_distance_m: 0.36
+    reverse_retry_count: 1
+    retry_escape_distance_m: 0.08
+    retry_escape_speed: 0.035
+    retry_escape_timeout_sec: 4.0
+    # marker distance가 목표에 닿아도, marker lateral/line axis 정렬이 이보다
+    # 나쁘면 success로 보지 않고 실패 처리한다. 잘못 주차했는데 AMCL pose만
+    # 강제로 보정하는 상황을 막기 위한 마지막 안전판이다.
+    reverse_success_max_marker_lat_m: 0.05
+    reverse_success_max_axis_error_px: 180.0
+    yaw_hold_kp: 1.2
+    # 후진 중 파란 도킹 라인 2개가 잡히면, marker 중심 법선축과 lane centerline의
+    # 픽셀 오차(axis_err)를 yaw 보정에 추가한다. 143244 bag에서 양수 axis_err에
+    # 양수 yaw를 주면 왼쪽으로 틀어 marker 1을 잃었으므로, 제어 입력은
+    # -axis_err 방향으로 건다. 바닥 라인 기준을 marker tvec[0]보다 우선 반영한다.
+    # 라인이 잡히면 marker lateral 보정은
+    # 서로 싸우지 않도록 일시적으로 빼고, 라인이 안 잡힐 때만 fallback으로 쓴다.
+    reverse_lane_axis_enabled: true
+    reverse_lane_axis_kp: 0.0025
+    # axis_angle은 debug image/log에 남기되, 현재 bag에서는 부호가 lateral 보정과
+    # 상쇄되는 구간이 있어 기본 제어 입력에서는 제외한다. 필요하면 0.001 이하부터
+    # 다시 켠다.
+    reverse_lane_axis_angle_kp: 0.0
+    reverse_lane_axis_max_correction: 0.22
+    # 실제 debug image가 약 1Hz로 들어오는 bag이 있어 0.25초면 axis_err를
+    # 바로 오래된 값으로 버릴 수 있다. 1.5초면 후진 5cm 정도라 stale risk보다
+    # 보정이 아예 안 들어가는 문제가 더 작다.
+    reverse_lane_axis_max_age_sec: 1.5
+    # 다른 도크 라인(PICKY1 라인 등)을 잘못 잡으면 axis_err가 수백 px 이상으로
+    # 튄다. 그런 값은 success 판정에는 실패 근거로 남기되, 제어 입력으로는 쓰지
+    # 않고 marker lateral fallback만 사용한다.
+    reverse_lane_axis_control_max_error_px: 350.0
+    # 후진 중에도 marker tvec[0]가 중앙에서 밀리면 아주 약하게 yaw를 보정한다.
+    # 0.5면 lateral error 5cm에서 약 0.025rad/s 보정만 들어가므로,
+    # 고정 yaw hold를 크게 흔들지 않고 도킹 중 중앙 유지에 도움을 준다.
+    reverse_marker_lat_kp: 0.5

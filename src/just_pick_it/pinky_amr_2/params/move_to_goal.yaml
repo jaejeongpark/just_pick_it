@@ -1,0 +1,30 @@
+/**/move_to_goal:
+  ros__parameters:
+    # Nav2를 끊고 직접 저속 정밀 접근으로 넘기는 거리.
+    precision_approach_distance: 0.03
+
+    # 중간 waypoint는 정밀 접근 없이 이 거리 안에 들어오면 통과 처리한다.
+    waypoint_reach_distance: 0.15
+
+    # 직접 정밀 접근 단계의 최종 위치/yaw 허용 오차.
+    xy_goal_tolerance: 0.01
+    yaw_goal_tolerance: 0.05
+
+    # Nav2가 planner tolerance 안의 대체 goal에 도착했을 때 원 목표까지 이 거리 안이면
+    # 원 좌표로 직접 밀고 들어가지 않고 도착으로 인정한다.
+    arrival_success_tolerance: 0.03
+
+    # 직접 정밀 접근 단계의 속도/조향 제한. 목표 근처에서 heading 노이즈로 버벅이는 것을 줄인다.
+    precision_max_linear_vel: 0.10
+    precision_max_angular_vel: 0.6
+    precision_heading_deadband_distance: 0.03
+    # 이 각도까지는 정상 전진하고, 넘으면 전진을 끊지 않고 감속한다.
+    # 로봇이 목표 반대쪽을 볼 때는 안전하게 회전만 한다.
+    precision_heading_gate_angle: 0.35
+
+    # TF lookup 기준. map은 공용 전역 frame이고, robot base frame만 PICKY2로 분리한다.
+    map_frame: map
+    base_frame: picky2/base_link
+
+    # 한 waypoint에서 Nav2 단계가 이 시간 안에 끝나지 않으면 실패 처리한다.
+    nav_timeout_sec: 120.0

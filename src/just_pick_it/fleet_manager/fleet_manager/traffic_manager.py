@@ -22,14 +22,15 @@ class PathResult:
     reason: str | None = None
 
 
-# zone 이름 기반 인접 그래프. docs/Traffic_node_graph.jpg 의 노드 배치를 반영한다.
+# zone 이름 기반 인접 그래프. docs/Traffic_node_2.1.jpg 의 노드 배치를 반영한다.
 #   - 상단 복도 T1, T2, T3 과 하단 복도 B1, B2, B3 은 단차선 양방향
-#   - 좌측 수직 복도 TRAFFIC_L1 (상단), L2 (중간), L3 (하단) 도 단차선 양방향
+#   - 좌측 수직 복도(TRAFFIC_L 열)는 노드 간격이 너무 촘촘해 제거했다(2.1).
+#     좌측 구역과 복도 사이는 상품 열(PRODUCT_ZONE_1/4)을 통해 상하로 오간다.
 #   - 각 열 내부 수직 통로는 TRAFFIC_T(i) 와 PRODUCT_ZONE_i, PRODUCT_ZONE_(i+3),
 #     TRAFFIC_B(i) 로 이어진다
 #   - STANDBY_ZONE_1 은 STANDBY_ZONE_2 를 거쳐야만 외부로 진출 (안쪽 도크 안전)
-#   - STOCK_ZONE 은 TRAFFIC_L1 으로만 진출
-#   - STANDBY_ZONE_2 는 TRAFFIC_L2 를 거쳐 PRODUCT_ZONE_1, PRODUCT_ZONE_4 로 진입
+#   - STOCK_ZONE 은 TRAFFIC_T1 으로만 진출
+#   - STANDBY_ZONE_2 는 PRODUCT_ZONE_1, PRODUCT_ZONE_4 로 직접 진입
 #   - PICKUP_ZONE_1 은 TRAFFIC_T3, PICKUP_ZONE_2 는 TRAFFIC_B3 와 직접 인접
 ZONE_GRAPH: dict[str, list[str]] = {
     # 좌측 충전 구역
@@ -38,32 +39,27 @@ ZONE_GRAPH: dict[str, list[str]] = {
 
     # 좌측 대기 구역
     'STANDBY_ZONE_1':  ['CHARGING_DOCK_1', 'STANDBY_ZONE_2'],
-    'STANDBY_ZONE_2':  ['CHARGING_DOCK_2', 'STANDBY_ZONE_1', 'TRAFFIC_L2'],
+    'STANDBY_ZONE_2':  ['CHARGING_DOCK_2', 'STANDBY_ZONE_1',
+                        'PRODUCT_ZONE_1', 'PRODUCT_ZONE_4'],
 
     # 좌측 재고 구역
-    'STOCK_ZONE':      ['TRAFFIC_L1'],
-
-    # 좌측 수직 복도 (단차선 양방향)
-    'TRAFFIC_L1': ['STOCK_ZONE', 'TRAFFIC_T1', 'TRAFFIC_L2'],
-    'TRAFFIC_L2': ['TRAFFIC_L1', 'TRAFFIC_L3', 'STANDBY_ZONE_2',
-                   'PRODUCT_ZONE_1', 'PRODUCT_ZONE_4'],
-    'TRAFFIC_L3': ['TRAFFIC_L2', 'TRAFFIC_B1'],
+    'STOCK_ZONE':      ['TRAFFIC_T1'],
 
     # 상단 복도 (단차선 양방향)
-    'TRAFFIC_T1': ['TRAFFIC_L1', 'TRAFFIC_T2', 'PRODUCT_ZONE_1'],
+    'TRAFFIC_T1': ['STOCK_ZONE', 'TRAFFIC_T2', 'PRODUCT_ZONE_1'],
     'TRAFFIC_T2': ['TRAFFIC_T1', 'TRAFFIC_T3', 'PRODUCT_ZONE_2'],
     'TRAFFIC_T3': ['TRAFFIC_T2', 'PRODUCT_ZONE_3', 'PICKUP_ZONE_1'],
 
     # 하단 복도 (단차선 양방향)
-    'TRAFFIC_B1': ['TRAFFIC_L3', 'TRAFFIC_B2', 'PRODUCT_ZONE_4'],
+    'TRAFFIC_B1': ['TRAFFIC_B2', 'PRODUCT_ZONE_4'],
     'TRAFFIC_B2': ['TRAFFIC_B1', 'TRAFFIC_B3', 'PRODUCT_ZONE_5'],
     'TRAFFIC_B3': ['TRAFFIC_B2', 'PRODUCT_ZONE_6', 'PICKUP_ZONE_2'],
 
-    # 상품 구역 (열 내부 수직 단차선, 좌측 1열은 TRAFFIC_L2 와도 인접)
-    'PRODUCT_ZONE_1': ['TRAFFIC_T1', 'PRODUCT_ZONE_4', 'TRAFFIC_L2'],
+    # 상품 구역 (열 내부 수직 단차선, 좌측 1열은 STANDBY_ZONE_2 와도 인접)
+    'PRODUCT_ZONE_1': ['TRAFFIC_T1', 'PRODUCT_ZONE_4', 'STANDBY_ZONE_2'],
     'PRODUCT_ZONE_2': ['TRAFFIC_T2', 'PRODUCT_ZONE_5'],
     'PRODUCT_ZONE_3': ['TRAFFIC_T3', 'PRODUCT_ZONE_6'],
-    'PRODUCT_ZONE_4': ['TRAFFIC_B1', 'PRODUCT_ZONE_1', 'TRAFFIC_L2'],
+    'PRODUCT_ZONE_4': ['TRAFFIC_B1', 'PRODUCT_ZONE_1', 'STANDBY_ZONE_2'],
     'PRODUCT_ZONE_5': ['TRAFFIC_B2', 'PRODUCT_ZONE_2'],
     'PRODUCT_ZONE_6': ['TRAFFIC_B3', 'PRODUCT_ZONE_3'],
 
@@ -77,7 +73,7 @@ MOVING_STATES = frozenset({
     'MOVING_TO_PRODUCT',
     'MOVING_TO_PICKUP',
     'MOVING_TO_STOCK',
-    'MOVING_TO_STORAGE',
+    'MOVING_TO_DISPLAY',
     'RETURNING',
     'DOCKING',
 })
@@ -86,6 +82,10 @@ MOVING_STATES = frozenset({
 OCCUPYING_STATES = frozenset({
     'WAITING_FOR_COBOT',
 })
+
+# 로봇이 도크를 실제로 빠져나가는(언도크) 이동 상태. 도크 점유는 이 상태로
+# 진입할 때만 해제한다. DOCKING 은 도크로 들어오는 중이라 제외한다.
+LEAVING_DOCK_STATES = MOVING_STATES - frozenset({'DOCKING'})
 
 # 안쪽 도크 우선 순서: (충전 도크 이름, 도킹 시작점 STANDBY_ZONE 이름)
 DOCK_PRIORITY = [
@@ -96,7 +96,7 @@ DOCK_PRIORITY = [
 # RETURN_HOME 의 목적지 후보. BFS 비용 최소 zone 을 선택한다.
 STANDBY_ZONES: list[str] = ['STANDBY_ZONE_1', 'STANDBY_ZONE_2']
 
-# SLAM 완료 전 임시 좌표. docs/Traffic_node_graph.jpg 의 노드 배치를 2m x 1m 맵에 추정 배치.
+# SLAM 완료 전 임시 좌표. docs/Traffic_node_2.1.jpg 의 노드 배치를 2m x 1m 맵에 추정 배치.
 # 원점은 좌하단 (x: 0 이 좌측, 2.0 이 우측. y: 0 이 하단, 1.0 이 상단).
 # 좌측 구역  : x 는 약 0.00 부터 0.45
 # 중앙 구역  : x 는 약 0.55 부터 1.50
@@ -104,42 +104,37 @@ STANDBY_ZONES: list[str] = ['STANDBY_ZONE_1', 'STANDBY_ZONE_2']
 # Fleet API 의 /api/fleet/zones 응답이 있으면 그 값으로 덮어쓴다.
 DEFAULT_ZONE_COORDS: dict[str, tuple[float, float]] = {
     # 좌측 충전 구역 (도킹 위치)
-    'CHARGING_DOCK_1':  (0.10, 0.10),
-    'CHARGING_DOCK_2':  (0.27, 0.10),
+    'CHARGING_DOCK_1':  (0.11, 0.07),
+    'CHARGING_DOCK_2':  (0.28, 0.07),
 
-    # 좌측 대기 구역 (도킹 진입 위치)
-    'STANDBY_ZONE_1':   (0.10, 0.40),
-    'STANDBY_ZONE_2':   (0.27, 0.40),
+    # 좌측 대기 구역 (도킹 진입 위치, 각 도크 채널 바로 위)
+    'STANDBY_ZONE_1':   (0.11, 0.40),
+    'STANDBY_ZONE_2':   (0.28, 0.40),
 
     # 좌측 재고 구역
     'STOCK_ZONE':       (0.18, 0.85),
 
-    # 좌측 수직 복도 (x 약 0.45)
-    'TRAFFIC_L1':       (0.45, 0.85),
-    'TRAFFIC_L2':       (0.45, 0.40),
-    'TRAFFIC_L3':       (0.45, 0.15),
-
-    # 상단 복도 (y 약 0.85)
-    'TRAFFIC_T1':       (0.70, 0.85),
+    # 상단 복도 (y 약 0.85). x 는 같은 열 PRODUCT_ZONE 과 수직 정렬(0.64/1.06/1.48).
+    'TRAFFIC_T1':       (0.64, 0.85),
     'TRAFFIC_T2':       (1.05, 0.85),
-    'TRAFFIC_T3':       (1.40, 0.85),
+    'TRAFFIC_T3':       (1.47, 0.85),
 
-    # 하단 복도 (y 약 0.15)
-    'TRAFFIC_B1':       (0.70, 0.15),
+    # 하단 복도 (y 약 0.15). x 는 같은 열 PRODUCT_ZONE 과 수직 정렬(0.64/1.06/1.48).
+    'TRAFFIC_B1':       (0.64, 0.15),
     'TRAFFIC_B2':       (1.05, 0.15),
-    'TRAFFIC_B3':       (1.40, 0.15),
+    'TRAFFIC_B3':       (1.47, 0.15),
 
     # 상품 구역 (열별로 위/아래 2개)
     'PRODUCT_ZONE_1':   (0.70, 0.60),
     'PRODUCT_ZONE_2':   (1.05, 0.60),
-    'PRODUCT_ZONE_3':   (1.40, 0.60),
+    'PRODUCT_ZONE_3':   (1.47, 0.60),
     'PRODUCT_ZONE_4':   (0.70, 0.35),
     'PRODUCT_ZONE_5':   (1.05, 0.35),
-    'PRODUCT_ZONE_6':   (1.40, 0.35),
+    'PRODUCT_ZONE_6':   (1.47, 0.35),
 
     # 우측 픽업 구역
-    'PICKUP_ZONE_1':    (1.80, 0.80),
-    'PICKUP_ZONE_2':    (1.80, 0.20),
+    'PICKUP_ZONE_1':    (1.80, 0.82),
+    'PICKUP_ZONE_2':    (1.80, 0.18),
 }
 
 
@@ -157,6 +152,7 @@ class TrafficManager:
         node: Node,
         robot_ids: list[str],
         zone_coords: dict[str, tuple[float, float]] | None = None,
+        assume_docked_at_start: bool = False,
     ) -> None:
         self._node = node
         self._lock = threading.Lock()
@@ -169,6 +165,13 @@ class TrafficManager:
         self._robot_reservations: dict[str, int | None] = {rid: None for rid in robot_ids}
         # robot_id -> 예약/점유 중인 충전 도크 이름 (없으면 None)
         self._robot_dock: dict[str, str | None] = {rid: None for rid in robot_ids}
+        # 콜드 스타트: 로봇은 자기 충전 도크에서 부팅한다(시연 기준, seed robot pos=도크).
+        # 점유로 초기화하지 않으면 다른 로봇 복귀 시 그 도크를 비었다고 보고 이미 점유된
+        # 도크로 도킹해 충돌한다. robot_ids 순서 == DOCK_PRIORITY 순서 전제로 매핑하고,
+        # undock(이동 상태 진입) 시 notify_state 가 자동 해제한다.
+        if assume_docked_at_start:
+            for rid, (dock, _standby) in zip(robot_ids, DOCK_PRIORITY):
+                self._robot_dock[rid] = dock
         # zone_name -> (pos_x, pos_y). 외부 주입값으로 DEFAULT 를 덮어쓴다.
         self._zone_coords: dict[str, tuple[float, float]] = dict(DEFAULT_ZONE_COORDS)
         if zone_coords:
@@ -176,7 +179,8 @@ class TrafficManager:
 
         node.get_logger().info(
             f'[TrafficManager] 초기화 완료 — 관리 로봇: {robot_ids}, '
-            f'zone 좌표 {len(self._zone_coords)}개'
+            f'zone 좌표 {len(self._zone_coords)}개, '
+            f'시작 도크 점유: {self._robot_dock}'
         )
 
     # ── 외부 인터페이스 (TaskManager 가 호출) ──────────────────────────
@@ -191,7 +195,8 @@ class TrafficManager:
     # reserve_nearest_from() 이 평가와 예약을 한 번에 처리한다.
     #
     # 한 robot 은 한 시점에 최대 1개의 reserve 만 보유한다.
-    # 도크 점유는 notify_state(CHARGING -> 타상태) 에서 자동 해제된다.
+    # 도크 점유는 로봇이 실제로 도크를 떠나는 이동 상태에 들어갈 때만
+    # notify_state() 에서 자동 해제된다.
 
     def reserve_path(
         self,
@@ -336,29 +341,54 @@ class TrafficManager:
         task_id: int,
         source_zone: str,
     ) -> PathResult:
-        """RETURN_HOME 전용. STANDBY_ZONE 중 BFS 비용이 가장 낮은 곳으로 경로를 예약한다.
+        """RETURN_HOME 전용. 빈 충전 도크 우선순위(안쪽 1번 먼저)에 해당하는
+        STANDBY_ZONE 으로 경로를 예약한다.
 
-        도크는 예약하지 않는다. 도크 예약은 이후 DOCK_IN task 시작 시
-        reserve_dock_path() 로 별도 수행한다.
+        도크 수가 로봇 수와 같아 귀환 시 빈 도크가 항상 하나 이상 있다. 둘 다
+        비어 있으면 CHARGING_DOCK_1 의 STANDBY_ZONE_1 로 귀환해, 이어지는 DOCK_IN
+        이 안쪽 도크부터 채우도록 한다(reserve_dock_path 의 DOCK_PRIORITY 와 일치).
+        도크 점유 판정이 정확하려면 STANDBY(도크 내 대기) 상태에서도 도크 점유가
+        유지돼야 한다(notify_state 의 도크 해제 조건 참고).
+
+        우선 도크의 STANDBY_ZONE 이 일시적으로 막혀 있으면 도달 가능한 다른
+        STANDBY_ZONE 으로 귀환한다(로봇 고립 방지). 도크는 예약하지 않으며,
+        도크 예약은 이후 DOCK_IN task 의 reserve_dock_path() 가 수행한다.
 
         반환되는 PathResult.waypoints 의 마지막 zone 이 목적지 STANDBY_ZONE 이다.
         """
         best_path: list[str] | None = None
         best_zone: str | None = None
-        best_cost = float('inf')
 
         with self._lock:
+            occupied = {
+                dock for rid, dock in self._robot_dock.items()
+                if dock is not None and rid != robot_id
+            }
             blocked_nodes, blocked_edges = self._build_blocked_sets(robot_id)
 
-            for zone in STANDBY_ZONES:
-                path = self._bfs(source_zone, zone, blocked_nodes, blocked_edges)
-                if path is None:
+            # 1순위: 빈 도크를 우선순위대로 보고 그 도크의 STANDBY_ZONE 을 목적지로.
+            for dock_name, standby_zone in DOCK_PRIORITY:
+                if dock_name in occupied:
                     continue
-                cost = float(len(path) - 1)
-                if cost < best_cost:
-                    best_cost = cost
-                    best_zone = zone
+                path = self._bfs(source_zone, standby_zone, blocked_nodes, blocked_edges)
+                if path is not None:
                     best_path = path
+                    best_zone = standby_zone
+                    break
+
+            # 2순위(안전망): 우선 도크의 STANDBY 가 막혀 있으면 도달 가능한
+            #               아무 STANDBY_ZONE 으로라도 귀환한다.
+            if best_path is None:
+                best_cost = float('inf')
+                for zone in STANDBY_ZONES:
+                    path = self._bfs(source_zone, zone, blocked_nodes, blocked_edges)
+                    if path is None:
+                        continue
+                    cost = float(len(path) - 1)
+                    if cost < best_cost:
+                        best_cost = cost
+                        best_zone = zone
+                        best_path = path
 
             if best_path is not None:
                 self._robot_paths[robot_id] = best_path
@@ -377,7 +407,7 @@ class TrafficManager:
         return PathResult(
             ok=True,
             waypoints=tuple(best_path),
-            cost=best_cost,
+            cost=float(len(best_path) - 1),
         )
 
     def reserve_dock_path(
@@ -466,7 +496,7 @@ class TrafficManager:
             직후, attach_task_id 호출 전) 일 때만 임시 예약 path 를 해제.
             이미 task_id 가 연결된 상태라면 warn 후 무시한다.
 
-        도크 점유는 별도이며, picky_state 의 CHARGING 이탈 시점에
+        도크 점유는 별도이며, 로봇이 도크를 떠나는 이동 상태로 전환될 때
         notify_state() 가 자동 해제한다.
         """
         with self._lock:
@@ -506,6 +536,60 @@ class TrafficManager:
         with self._lock:
             return dict(self._robot_states)
 
+    # ── 재시작 복구 지원 (R1 / A'') ────────────────────────────────────
+    #
+    # Fleet Manager 재시작 시 in-memory 점유가 비므로, 로봇의 현재 위치를 기준으로
+    # 점유를 다시 세워야 한다. MOVE 점유는 기존 reserve_path(source=현재 zone, target)를
+    # 그대로 재사용하고, 도크 점유만 아래 rebuild_dock 으로 복원한다.
+
+    def nearest_zone(self, x: float, y: float) -> str | None:
+        """map 좌표 (x, y) 에 가장 가까운 zone_name 을 반환한다.
+
+        재시작 복구에서 로봇 pose 를 그래프 노드로 매핑하는 데 쓴다.
+        좌표가 없거나 zone 좌표 테이블이 비어 있으면 None.
+        (_zone_coords 는 생성자 이후 변하지 않으므로 lock 없이 읽는다.)
+        """
+        if x is None or y is None or not self._zone_coords:
+            return None
+
+        best_zone: str | None = None
+        best_dist_sq = float('inf')
+        for zone_name, (zx, zy) in self._zone_coords.items():
+            dist_sq = (zx - x) ** 2 + (zy - y) ** 2
+            if dist_sq < best_dist_sq:
+                best_dist_sq = dist_sq
+                best_zone = zone_name
+        return best_zone
+
+    def nearest_dock(self, x: float, y: float) -> str | None:
+        """map 좌표에 가장 가까운 충전 도크 이름을 반환한다(재시작 도크 추론용)."""
+        if x is None or y is None:
+            return None
+
+        best_dock: str | None = None
+        best_dist_sq = float('inf')
+        for dock_name, _standby in DOCK_PRIORITY:
+            coord = self._zone_coords.get(dock_name)
+            if coord is None:
+                continue
+            dx, dy = coord
+            dist_sq = (dx - x) ** 2 + (dy - y) ** 2
+            if dist_sq < best_dist_sq:
+                best_dist_sq = dist_sq
+                best_dock = dock_name
+        return best_dock
+
+    def rebuild_dock(self, robot_id: str, dock_name: str) -> None:
+        """재시작 복구 시 CHARGING/DOCKING 로봇의 도크 점유를 다시 표시한다.
+
+        다른 로봇이 같은 도크를 비어있다고 보고 reserve_dock_path 로 예약하는 것을 막는다.
+        """
+        with self._lock:
+            self._robot_dock[robot_id] = dock_name
+        self._node.get_logger().info(
+            f'[TrafficManager] {robot_id} 도크 점유 복원: {dock_name}'
+        )
+
     # ── 외부에서 주입되는 상태 갱신 ────────────────────────────────────
 
     def notify_state(self, robot_id: str, state: str) -> None:
@@ -513,22 +597,30 @@ class TrafficManager:
 
         명시적인 release_path() 가 누락된 경우의 안전망으로,
         이동/점유 상태가 모두 아닐 때 path 와 reservation 을 함께 해제한다.
-        도크 점유는 CHARGING 이탈 시점에 해제한다.
+        도크 점유는 로봇이 실제로 도크를 떠날 때(언도크)만 해제한다.
         """
         released_dock: str | None = None
         with self._lock:
             prev = self._robot_states.get(robot_id)
             self._robot_states[robot_id] = state
 
-            # 이동/점유 상태가 모두 아닐 때만 경로/예약 해제.
+            # 이동/점유에서 '빠져나올 때만' 경로/예약을 해제한다(release_path 누락 안전망).
+            # prev 조건이 없으면, 갓 예약한 직후 로봇이 아직 STANDBY 텔레메트리를 보내는
+            # 사이 그 신선한 예약까지 지워져(예약 task=None) 이후 흐름이 꼬인다.
             # OCCUPYING_STATES(WAITING_FOR_COBOT 등)는 마지막 노드 차단이 필요하므로 path 유지.
-            if state not in MOVING_STATES and state not in OCCUPYING_STATES:
+            idle_now = state not in MOVING_STATES and state not in OCCUPYING_STATES
+            was_active = prev in MOVING_STATES or prev in OCCUPYING_STATES
+            if idle_now and was_active:
                 self._robot_paths[robot_id] = []
                 self._robot_reservations[robot_id] = None
 
-            # CHARGING 에서 벗어나면 도크 점유 해제
-            # (State Manager 가 도크 이탈 후 picky_state 를 변경하면 자동 트리거)
-            if prev == 'CHARGING' and state != 'CHARGING':
+            # 도크 점유는 로봇이 실제로 도크를 빠져나갈 때만 해제한다.
+            # State Manager 는 충전 후 배터리가 임계를 넘으면 picky_state 를
+            # CHARGING -> STANDBY 로 바꾸지만 로봇은 도크 안에 그대로 머문다. 따라서
+            # CHARGING 이탈만으로 해제하면 도크에 로봇이 있는데도 빈 도크로 오인된다.
+            # 실제 move task 로 도크를 떠나는 이동 상태(RETURNING / MOVING_TO_*)로
+            # 진입할 때만 해제한다(DOCKING 은 도크로 들어오는 중이라 제외).
+            if state in LEAVING_DOCK_STATES:
                 released_dock = self._robot_dock.get(robot_id)
                 if released_dock is not None:
                     self._robot_dock[robot_id] = None

@@ -59,12 +59,12 @@ class PickupSlotStateUpdateIn(BaseModel):
     status: str | None = None
 
 
-class StockingItemCreateIn(BaseModel):
+class DisplayItemCreateIn(BaseModel):
     product_id: int
     requested_quantity: int | None = Field(default=None, gt=0)
-    detected_quantity: int | None = Field(default=None, ge=0)
+    processed_quantity: int | None = Field(default=None, ge=0)
     stock_delta: int | None = Field(default=None, ge=0)
-    stocking_policy: str | None = None
+    display_policy: str | None = None
     assigned_unit_id: int | None = None
 
 
@@ -92,6 +92,12 @@ class FleetTaskStateUpdateIn(BaseModel):
     result_message: str | None = None
 
 
+class DebugTaskSuccessIn(BaseModel):
+    message: str | None = None
+    processed_quantity: int | None = Field(default=None, ge=0)
+    stock_delta: int | None = Field(default=None, ge=0)
+
+
 class FleetRobotStateUpdateIn(BaseModel):
     status: str | None = None
     robot_status: str | None = None
@@ -107,7 +113,7 @@ class FleetRobotStateUpdateIn(BaseModel):
 class FleetTaskCreateIn(BaseModel):
     order_id: int | None = None
     order_item_id: int | None = None
-    stocking_item_id: int | None = None
+    display_item_id: int | None = None
     sequence_no: int | None = Field(default=None, ge=1)
     assigned_robot_id: int | str | None = None
     assigned_robot_name: str | None = None

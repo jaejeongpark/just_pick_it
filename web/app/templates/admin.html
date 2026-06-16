@@ -6,7 +6,7 @@
     <title>Just Pick It Admin</title>
     <link
       rel="stylesheet"
-      href="/static/css/style.css?v=20260520-fleet-ui-30"
+      href="/static/css/style.css?v=20260609-debug-success"
     />
   </head>
   <body class="admin-console" data-admin-page="{{ page }}">
@@ -91,9 +91,9 @@
             </div>
           </div>
           <div class="summary-card">
-            <span>진행 중인 주문</span>
+            <span>진행 중인 작업</span>
             <strong id="summary-tasks">0</strong>
-            <a class="summary-link" href="/admin/orders">주문 목록 보기 〉</a>
+            <a class="summary-link" href="/admin/orders">작업 목록 보기 〉</a>
           </div>
           <div class="summary-card alert-card">
             <span>예외/알람</span>
@@ -768,41 +768,10 @@
             </div>
           </section>
 
-          <section class="section-band ai-command-section">
-            <div class="section-heading">
-              <h2>AI Chat</h2>
-              <span id="dashboard-llm-status" class="ai-command-status idle"
-                >대기 중</span
-              >
-            </div>
-            <form id="dashboard-llm-form" class="dashboard-llm-form">
-              <input
-                id="dashboard-llm-input"
-                type="text"
-                autocomplete="off"
-                placeholder="예: 우유 5개 입고해줘"
-              />
-              <button
-                id="dashboard-llm-submit"
-                class="ai-chat-button"
-                type="submit"
-                aria-label="AI command"
-              >
-                <span>AI</span> 명령
-              </button>
-            </form>
-            <div class="ai-command-feedback">
-              <p id="dashboard-llm-result">
-                입고 명령이나 재고/예외 질문을 입력하면 AI 응답이 여기에
-                표시됩니다.
-              </p>
-            </div>
-          </section>
-
           <section class="section-band task-summary-section">
             <div class="section-heading">
-              <h2>진행 중인 주문 (최근)</h2>
-              <a class="section-link" href="/admin/orders">전체 주문 보기 〉</a>
+              <h2>진행 중인 작업 (최근)</h2>
+              <a class="section-link" href="/admin/orders">전체 작업 보기 〉</a>
             </div>
             <div id="task-list" class="table-placeholder">No tasks loaded</div>
           </section>
@@ -979,13 +948,13 @@
         <main class="page-shell admin-page-grid orders-management-page">
           <section id="order-panel" class="section-band orders-primary-section">
             <div class="section-heading">
-              <h2>주문 목록</h2>
+              <h2>주문/진열 목록</h2>
               <button
                 id="order-history-button"
                 class="ghost-button"
                 type="button"
               >
-                완료 주문 보기
+                완료 작업 보기
               </button>
             </div>
             <div id="order-list" class="table-placeholder">
@@ -1075,37 +1044,6 @@
       </div>
     </div>
 
-    <section
-      id="llm-panel"
-      class="llm-panel"
-      aria-label="LLM command panel"
-      hidden
-    >
-      <div class="llm-header">
-        <div>
-          <strong>LLM Command</strong>
-          <span>Stocking command</span>
-        </div>
-        <button id="llm-close-button" class="ghost-button" type="button">
-          Close
-        </button>
-      </div>
-      <div id="llm-messages" class="llm-messages">
-        <div class="llm-message bot">
-          입고 명령이나 재고/예외 질문을 입력하면 Fleet Manager API가 처리합니다.
-        </div>
-      </div>
-      <form id="llm-form" class="llm-form">
-        <input
-          id="llm-input"
-          type="text"
-          autocomplete="off"
-          placeholder="예: 우유 5개 입고해줘"
-        />
-        <button class="small-action-button" type="submit">Send</button>
-      </form>
-    </section>
-
     <div id="modal-backdrop" class="modal-backdrop" hidden>
       <section
         class="modal-panel"
@@ -1125,6 +1063,6 @@
       </section>
     </div>
 
-    <script src="/static/js/admin.js?v=20260520-fleet-ui-26"></script>
+    <script src="/static/js/admin.js?v=20260609-display-batch"></script>
   </body>
 </html>

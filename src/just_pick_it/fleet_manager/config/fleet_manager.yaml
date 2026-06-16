@@ -2,8 +2,8 @@ fleet_manager:
   ros__parameters:
     robot_ids:
       - PICKY1
-      - PICKY2
       - COBOT1
+      - PICKY2
       - COBOT2
     api_enabled: true
     api_host: "0.0.0.0"
@@ -11,3 +11,4 @@ fleet_manager:
     api_push_interval_sec: 1.0
     waiting_work_poll_period_sec: 5.0
     robot_state_flush_period_sec: 1.0
+    reconcile_delay_sec: 2.0

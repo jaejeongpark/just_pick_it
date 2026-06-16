@@ -3,7 +3,7 @@ WS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source ~/venv/jazzy/bin/activate 2>/dev/null
 source /opt/ros/jazzy/setup.bash
 source "$WS_ROOT/install/local_setup.bash"
-export ROS_DOMAIN_ID=13
+export ROS_DOMAIN_ID=25
 
 echo "=== [2] SLAM — 로봇 준비 대기 중 (/scan + /odom + /imu) ==="
 until ros2 topic list 2>/dev/null | grep -q '/scan' && \

@@ -2,6 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
+from rclpy.duration import Duration
 import math
 import time
 
@@ -42,9 +43,11 @@ class Pinky(Node):
         
         self.declare_parameter('wheel_radius', 0.027)
         self.declare_parameter('wheel_separation', 0.0961)
-        
+        self.declare_parameter('odom_stamp_offset_sec', 0.0)
+
         self.wheel_radius = self.get_parameter('wheel_radius').get_parameter_value().double_value
         self.wheel_separation = self.get_parameter('wheel_separation').get_parameter_value().double_value
+        self.odom_stamp_offset_sec = self.get_parameter('odom_stamp_offset_sec').get_parameter_value().double_value
         
         self.get_logger().info(f'Wheel radius: {self.wheel_radius}')
         self.get_logger().info(f'Wheel separation: {self.wheel_separation}')
@@ -154,9 +157,16 @@ class Pinky(Node):
         v_x = delta_distance / dt if dt > 0 else 0.0
         vth = delta_theta / dt if dt > 0 else 0.0
 
-        self._publish_tf(current_time)
-        self._publish_odometry(current_time, v_x, vth)
-        self._publish_joint_states(current_time, rpm_l, rpm_r)
+        # odom/TF stamp 를 odom_stamp_offset_sec 만큼 미래로 발행한다.
+        # 기본 0.0 은 현장 보드와 동일하게 보정 없음을 뜻한다. 모터 피드백을
+        # 읽고 계산하는 사이의 지연으로 odom stamp 가 scan 보다 과거가 되어
+        # amcl 이 "extrapolation into the future" 로 scan 을 drop 할 때만
+        # offset(예: 0.1)을 키워 보정한다. dt/last_time 은 실제 시각
+        # (current_time)으로 유지해 적분 정확도는 보존한다.
+        stamp_time = current_time + Duration(seconds=self.odom_stamp_offset_sec)
+        self._publish_tf(stamp_time)
+        self._publish_odometry(stamp_time, v_x, vth)
+        self._publish_joint_states(stamp_time, rpm_l, rpm_r)
 
         self.last_time = current_time
 
