@@ -5,12 +5,13 @@ import cv2
 import numpy as np
 
 import rclpy
+import tf2_geometry_msgs
+import tf2_ros
+from cv_bridge import CvBridge
+from geometry_msgs.msg import Point, PoseStamped, Quaternion
 from rclpy.node import Node
 from sensor_msgs.msg import Image
-from std_msgs.msg import String, Header
-from geometry_msgs.msg import PoseStamped, Point, Quaternion
-from cv_bridge import CvBridge
-import tf2_ros
+from std_msgs.msg import Header, String
 
 from just_pick_it_interfaces.msg import TrackedObject, TrackedObjectArray
 from just_pick_it_interfaces.srv import SelectTarget
@@ -62,6 +63,7 @@ class TargetManagerNode(Node):
         self.declare_parameter('apriltag_poses_file', '')
         self.declare_parameter('camera_frame', 'camera_link')
         self.declare_parameter('world_frame', 'world')
+        self.declare_parameter('output_frame', 'front_camera_link')
         self.declare_parameter('image_topic', '/camera_head/color/image_raw')
         self.declare_parameter('apriltag_tag_size', 0.15)
 
@@ -185,6 +187,7 @@ class TargetManagerNode(Node):
         target_with_pose.bbox_h = target.bbox_h
         target_with_pose.mask_cx = target.mask_cx
         target_with_pose.mask_cy = target.mask_cy
+        target_with_pose.orientation_angle = target.orientation_angle
         target_with_pose.frame_count = target.frame_count
 
         pose, valid = self._estimate_3d_pose(target.mask_cx, target.mask_cy, target.header)
@@ -196,15 +199,17 @@ class TargetManagerNode(Node):
     # --------------------------------------------------------------- 3D pose
 
     def _estimate_3d_pose(self, u: float, v: float, header) -> tuple[PoseStamped, bool]:
+        world_frame = self.get_parameter('world_frame').value
+        output_frame = self.get_parameter('output_frame').value
+
         pose = PoseStamped()
-        pose.header.frame_id = self.get_parameter('world_frame').value
+        pose.header.frame_id = output_frame
         pose.pose.orientation = Quaternion(w=1.0)
 
         if self._K is None:
             return pose, False
 
         camera_frame = self.get_parameter('camera_frame').value
-        world_frame = self.get_parameter('world_frame').value
         shelf_z = self.get_parameter('shelf_height_z').value
 
         try:
@@ -235,9 +240,24 @@ class TargetManagerNode(Node):
 
         p_world = p_cam + t_param * d_world
 
-        pose.header.stamp = header.stamp
-        pose.pose.position = Point(x=float(p_world[0]), y=float(p_world[1]), z=float(p_world[2]))
-        return pose, True
+        pose_world = PoseStamped()
+        pose_world.header.stamp = header.stamp
+        pose_world.header.frame_id = world_frame
+        pose_world.pose.position = Point(
+            x=float(p_world[0]), y=float(p_world[1]), z=float(p_world[2]))
+        pose_world.pose.orientation = Quaternion(w=1.0)
+
+        if output_frame == world_frame:
+            return pose_world, True
+
+        try:
+            tf_out = self._tf_buffer.lookup_transform(
+                output_frame, world_frame, rclpy.time.Time())
+            pose_out = tf2_geometry_msgs.do_transform_pose_stamped(pose_world, tf_out)
+            return pose_out, True
+        except Exception as e:
+            self.get_logger().debug(f'TF {world_frame}->{output_frame} 변환 실패: {e}')
+            return pose_world, True
 
     @staticmethod
     def _quat_to_rotation_matrix(qx, qy, qz, qw) -> np.ndarray:
