@@ -26,6 +26,9 @@ def generate_launch_description():
     move_to_goal_params = PathJoinSubstitution(
         [FindPackageShare('pinky_amr_2'), 'params', 'move_to_goal.yaml']
     )
+    state_machine_params = PathJoinSubstitution(
+        [FindPackageShare('pinky_amr_2'), 'params', 'state_machine.yaml']
+    )
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -44,6 +47,7 @@ def generate_launch_description():
             namespace=namespace,
             output='screen',
             parameters=[
+                state_machine_params,
                 reverse_docking_params,
                 move_to_goal_params,
                 {

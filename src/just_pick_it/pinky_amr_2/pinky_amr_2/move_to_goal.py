@@ -85,6 +85,8 @@ class MoveToGoal(Node):
         self.declare_parameter("precision_max_angular_vel", 0.6)
         self.declare_parameter("precision_heading_deadband_distance", 0.03)
         self.declare_parameter("precision_heading_gate_angle", 0.35)
+        self.declare_parameter("map_frame", "map")
+        self.declare_parameter("base_frame", "picky2/base_link")
 
         self._prec_dist = self.get_parameter("precision_approach_distance").value
         self._waypoint_reach = self.get_parameter("waypoint_reach_distance").value
@@ -100,6 +102,8 @@ class MoveToGoal(Node):
         self._precision_heading_gate = self.get_parameter(
             "precision_heading_gate_angle"
         ).value
+        self._map_frame = self.get_parameter("map_frame").value
+        self._base_frame = self.get_parameter("base_frame").value
 
         self._lock = threading.Lock()
         self._cur_x = 0.0
@@ -702,7 +706,11 @@ class MoveToGoal(Node):
 
     def _update_pose(self):
         try:
-            trans = self._tf_buffer.lookup_transform("map", "base_link", Time())
+            trans = self._tf_buffer.lookup_transform(
+                self._map_frame,
+                self._base_frame,
+                Time(),
+            )
             t = trans.transform
             with self._lock:
                 self._cur_x = t.translation.x

@@ -1,0 +1,79 @@
+{
+  "window": 1,
+  "anchor_dim": 3,
+  "features_per_step": 5,
+  "policy_input": "memoryless",
+  "policy_target": "to_goal",
+  "anchor_mode": "zero",
+  "progress_mode": "zero",
+  "use_delta_features": false,
+  "input_dim": 13,
+  "max_delta_deg": 5.0,
+  "target_control_hz": 0.0,
+  "progress_dim": 5,
+  "progress_scale_deg": 90.0,
+  "joint_limits": [
+    [
+      -168.0,
+      168.0
+    ],
+    [
+      -135.0,
+      135.0
+    ],
+    [
+      -150.0,
+      150.0
+    ],
+    [
+      -145.0,
+      145.0
+    ],
+    [
+      -155.0,
+      160.0
+    ],
+    [
+      -180.0,
+      180.0
+    ]
+  ],
+  "controlled_joints": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "gripper_max": 100.0,
+  "default_image_w": 640.0,
+  "default_image_h": 480.0,
+  "ibvs_keep_phases": [
+    20,
+    40,
+    90
+  ],
+  "anchor_layout": [
+    "anchor_cx_norm",
+    "anchor_cy_norm",
+    "anchor_area_norm"
+  ],
+  "progress_layout": [
+    "prog_q1",
+    "prog_q2",
+    "prog_q3",
+    "prog_q4",
+    "prog_q5"
+  ],
+  "step_layout": [
+    "q1n",
+    "q2n",
+    "q3n",
+    "q4n",
+    "q5n"
+  ],
+  "policy_output": [
+    "dq1..dq5 (tanh, \u00d7max_delta_deg for degrees). J6 excluded."
+  ],
+  "grip_decision": "GripSuccessPredictor P(success) gate (policy has no gripper head)"
+}

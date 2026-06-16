@@ -15,6 +15,17 @@ AGENTS.md
 STATUS.md
 AMR_PLAN.md
 TASK_PLAN.md
+
+# YOLO 가중치 파일
+*.pt
+
+# 학습용 영상 및 추출 프레임 (대용량 바이너리)
+*.avi
+src/just_pick_it/just_pick_it_perception/result/jetcobot_1/
+
+# YOLO 추론 결과
+runs/
+
 .envrc
 
 # Local study/review notes

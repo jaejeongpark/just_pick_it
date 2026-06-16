@@ -754,6 +754,37 @@ class FleetRepository:
             self._log().warn(f"[FleetRepository] task_id={task_id} 상태 변경 실패: {exc}")
             return None
 
+    def update_task_target_zone(
+        self,
+        task_id: int,
+        *,
+        target_zone_name: str | None,
+    ) -> dict[str, Any] | None:
+        """실행 시점에 확정된 task 목적지 zone을 기록한다."""
+        try:
+            with session_scope() as db:
+                task = (
+                    db.query(Task)
+                    .filter(Task.task_id == task_id)
+                    .with_for_update()
+                    .one_or_none()
+                )
+                if not task:
+                    raise RepoError("task not found")
+
+                if target_zone_name is None:
+                    task.target_zone_id = None
+                else:
+                    zone = db.query(Zone).filter(Zone.zone_name == target_zone_name).one_or_none()
+                    if not zone:
+                        raise RepoError("target zone not found")
+                    task.target_zone_id = zone.zone_id
+
+                return build_task_summary(db, task)
+        except RepoError as exc:
+            self._log().warn(f"[FleetRepository] task_id={task_id} target zone 변경 실패: {exc}")
+            return None
+
     def create_task_event(
         self,
         task_id: int,
@@ -1318,30 +1349,40 @@ class FleetRepository:
             return {"status": "ok", "paused_task_ids": paused_task_ids}
 
     def apply_resume(self) -> dict[str, Any]:
-        """재개 DB 전이: EMERGENCY_STOP 로봇의 PAUSED task 를 RUNNING 으로 되돌린다."""
+        """재개 DB 전이: EMERGENCY_STOP 로봇의 PAUSED task 를 재전송 가능 상태로 돌린다."""
         with session_scope() as db:
             robots = db.query(Robot).filter(Robot.robot_status == "EMERGENCY_STOP").all()
 
             resumed_task_ids: list[int] = []
+            resumed_task_id_set: set[int] = set()
             for robot in robots:
                 task = db.get(Task, robot.current_task_id) if robot.current_task_id else None
-                if task and task.status == "PAUSED":
-                    previous_status = task.status
-                    task.status = "RUNNING"
+                if task and task.status == "PAUSED" and task.task_id not in resumed_task_id_set:
+                    task.status = "ASSIGNED"
                     db.add(
                         TaskEvent(
                             task_id=task.task_id,
                             robot_id=robot.robot_id,
                             from_status="PAUSED",
-                            to_status="RUNNING",
+                            to_status="ASSIGNED",
                             event_name="RESUME",
-                            reason="resume",
+                            reason="resume: redispatch from current pose",
                             created_at=datetime.now(UTC),
                         )
                     )
-                    apply_task_runtime_state(db, task, previous_status=previous_status)
+                    for attached_robot in (
+                        db.query(Robot)
+                        .filter(Robot.current_task_id == task.task_id)
+                        .all()
+                    ):
+                        attached_robot.current_task_id = None
+                        if attached_robot.robot_status == "EMERGENCY_STOP":
+                            attached_robot.robot_status = "IDLE"
+
                     resumed_task_ids.append(task.task_id)
+                    resumed_task_id_set.add(task.task_id)
                 else:
+                    robot.current_task_id = None
                     robot.robot_status = "IDLE"
 
             return {"status": "ok", "resumed_task_ids": resumed_task_ids}

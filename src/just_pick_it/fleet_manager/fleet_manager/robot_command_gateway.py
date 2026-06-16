@@ -218,6 +218,7 @@ class RobotCommandGateway:
                 robot_name,
                 task_id,
                 task_type,
+                goal_handle,
                 done,
                 result_callback,
             )
@@ -242,11 +243,13 @@ class RobotCommandGateway:
         robot_name: str,
         task_id: int,
         task_type: str,
+        goal_handle: Any,
         future: Any,
         result_callback: ResultCallback | None,
     ) -> None:
         """MoveCommand result를 TaskManager가 이해하는 dict로 변환한다."""
-        self._active_move_goals.pop(task_id, None)
+        if self._active_move_goals.get(task_id) is goal_handle:
+            self._active_move_goals.pop(task_id, None)
 
         result_wrapper = future.result()
         result = result_wrapper.result
@@ -368,6 +371,7 @@ class RobotCommandGateway:
             lambda done: self._on_dock_result(
                 robot_name,
                 task_id,
+                goal_handle,
                 done,
                 result_callback,
             )
@@ -385,11 +389,13 @@ class RobotCommandGateway:
         self,
         robot_name: str,
         task_id: int,
+        goal_handle: Any,
         future: Any,
         result_callback: ResultCallback | None,
     ) -> None:
         """DockCommand result를 TaskManager가 이해하는 dict로 변환한다."""
-        self._active_dock_goals.pop(task_id, None)
+        if self._active_dock_goals.get(task_id) is goal_handle:
+            self._active_dock_goals.pop(task_id, None)
 
         result_wrapper = future.result()
         result = result_wrapper.result
@@ -532,6 +538,7 @@ class RobotCommandGateway:
                 robot_name,
                 task_id,
                 task_type,
+                goal_handle,
                 done,
                 result_callback,
             )
@@ -571,11 +578,13 @@ class RobotCommandGateway:
         robot_name: str,
         task_id: int,
         task_type: str,
+        goal_handle: Any,
         future: Any,
         result_callback: ResultCallback | None,
     ) -> None:
         """ExecuteTask result를 TaskManager가 이해하는 dict로 변환한다."""
-        self._active_cobot_goals.pop(task_id, None)
+        if self._active_cobot_goals.get(task_id) is goal_handle:
+            self._active_cobot_goals.pop(task_id, None)
 
         result_wrapper = future.result()
         result = result_wrapper.result
