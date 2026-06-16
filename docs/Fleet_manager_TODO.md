@@ -1,6 +1,6 @@
 # Fleet Manager 작업 현황 (담당 · 결정 · TODO)
 
-갱신: 2026-06-15. 설계·동작은 `docs/Fleet_manager.md`, 인터페이스 계약은 `docs/Fleet_manager_interface.md`.
+갱신: 2026-06-16. 설계·동작은 `docs/Fleet_manager.md`, 인터페이스 계약은 `docs/Fleet_manager_interface.md`.
 
 심각도: **S**(기능 결함) / **R**(견고성) / **C**(문서·정합) / **Q**(테스트).
 
@@ -151,7 +151,25 @@
       지워(`예약 task=None`) goal 이 cancel/abort 되고 주문이 빈 메시지로 실패하던 것 → '이동/점유에서
       빠져나올 때(prev active)만' 해제하도록 수정. test 갱신+레이스 케이스 추가(62 pass).
 
-> 박서우 미완(다음 기동·배터리 충전 후): 주문 E2E 실주행 완주, R1 재시작 복구 실동작, `_at_dock` 부팅 가정 견고화(낮음). **Reverse Docking 은 완성(§3-A 9).** 상세는 §3-D.
+11. **Reverse Docking 정밀도 완성 + picky1 코드 정리 (2026-06-15)** — ✅ 완료 (박서우)
+    - 두-마커 translation localization + odom 정밀 곡선 이동(6단계)으로 좁은 도크 안정 통과
+      (lateral ~3~5mm, yaw <1°). 근본원인=카메라 fx ~1.48배 작음(scale들은 fudge였음). 상세
+      `docs/Reverse_Docking_Design.md` §8.
+    - 6단계 리팩터로 죽은 코드 정리(reverse_docking.py 1419→1115줄, lane 서브시스템·옛 정렬경로
+      제거), state_manager/move_to_goal 미사용 함수 제거. 동작 변경 없음.
+
+12. **멀티로봇 통신 — Fast-DDS Discovery Server (2026-06-16)** — 🔶 진행 (박서우)
+    2대 동시 bringup 시 WiFi 멀티캐스트 디스커버리 폭주로 nav 실패·battery 누락 → Discovery
+    Server(유니캐스트)로 전환. 관제 PC가 로봇과 다른 서브넷이던 것(NAT로 보드→관제 불통)을
+    같은 WiFi(192.168.1.73)로 정합. 전 호스트 `ROS_DOMAIN_ID=25`+`ROS_DISCOVERY_SERVER` 통일
+    (picky2는 .bashrc/.profile/.envrc direnv 3곳에 숨은 도메인 덮어쓰기 27/66 발견·정정).
+    `scripts/discovery_server.sh`, `scripts/dds_env.sh`, headless 스크립트 dds_env source.
+    **검증**: picky1+picky2 양쪽 battery/amcl_pose/scan/odom 크로스호스트 OK. 운영 런북:
+    `docs/Multi_Robot_Discovery_Server.md`.
+    **남은 것**: ① 2대 동시 보드 CPU 포화(load 7/4코어)로 nav goal 상위 cancel — 경량화 조사 중
+    ② discovery server systemd 자동기동+IP 고정 ③ fleet→로봇 커스텀 액션 인터페이스 호환 E2E.
+
+> 박서우 미완(다음 기동·배터리 충전 후): 주문 E2E 실주행 완주, R1 재시작 복구 실동작, `_at_dock` 부팅 가정 견고화(낮음). 멀티로봇 CPU 경량화(§3-A 12). **Reverse Docking 은 완성(§3-A 9, 11).** 상세는 §3-D.
 
 ### 3-B. 이명제 완료 작업
 
