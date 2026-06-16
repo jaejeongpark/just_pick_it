@@ -1,0 +1,61 @@
+image_width: 640
+image_height: 480
+camera_name: jetcobot1_camera
+distortion_model: plumb_bob
+camera_matrix:
+  rows: 3
+  cols: 3
+  data:
+  - 999.3328181261453
+  - 0.0
+  - 329.7624597217261
+  - 0.0
+  - 995.2907206226986
+  - 224.7252087755984
+  - 0.0
+  - 0.0
+  - 1.0
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data:
+  - -0.253890101404519
+  - -3.0269623592532575
+  - -0.0015047213483259548
+  - 0.0005031592722459322
+  - 17.858377769799205
+rectification_matrix:
+  rows: 3
+  cols: 3
+  data:
+  - 1.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+projection_matrix:
+  rows: 3
+  cols: 4
+  data:
+  - 999.3328181261453
+  - 0.0
+  - 329.7624597217261
+  - 0.0
+  - 0.0
+  - 995.2907206226986
+  - 224.7252087755984
+  - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+  - 0.0
+calibration_info:
+  robot_name: jetcobot1
+  rms_reprojection_error_px: 0.3733304634467973
+  source_image_dir: /home/jaejeong/just_pick_it/jetcobot1_captures
+  valid_images: 22
+  total_images: 23

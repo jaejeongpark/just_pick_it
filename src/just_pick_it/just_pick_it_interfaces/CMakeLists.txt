@@ -15,6 +15,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DetectedObject.msg"
   "msg/TrackedObject.msg"
   "msg/TrackedObjectArray.msg"
+  "msg/VisualServoSample.msg"
+  "msg/HumanInteractionSample.msg"
   "srv/EmergencyControl.srv"
   "srv/SelectTarget.srv"
   "action/DockCommand.action"

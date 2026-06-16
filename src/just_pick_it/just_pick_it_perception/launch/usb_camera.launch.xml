@@ -1,0 +1,17 @@
+<?xml version='1.0' ?>
+<launch>
+    <arg name="device_id" default="2"/>
+    <arg name="topic"     default="/camera/image_raw"/>
+    <arg name="width"     default="640"/>
+    <arg name="height"    default="480"/>
+    <arg name="fps"       default="30"/>
+
+    <node pkg="just_pick_it_perception" exec="usb_camera"
+          name="usb_camera" output="screen">
+        <param name="device_id" value="$(var device_id)"/>
+        <param name="topic"     value="$(var topic)"/>
+        <param name="width"     value="$(var width)"/>
+        <param name="height"    value="$(var height)"/>
+        <param name="fps"       value="$(var fps)"/>
+    </node>
+</launch>

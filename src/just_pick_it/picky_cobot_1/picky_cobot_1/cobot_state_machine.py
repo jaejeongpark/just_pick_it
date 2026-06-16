@@ -9,11 +9,15 @@ from rclpy.node import Node
 
 from std_msgs.msg import String
 
+from std_srvs.srv import Trigger
+
 from just_pick_it_interfaces.action import ExecuteTask
 from just_pick_it_interfaces.srv import EmergencyControl
 
 # [확정 필요] Vision Service ROS2 인터페이스 타입 임포트
 # from just_pick_it_interfaces.srv import VisionScanService
+
+from .cobot_controller import CobotController
 
 
 # task_type → 작업 단계에서 순서대로 거치는 cobot_state 목록.
@@ -24,7 +28,7 @@ TASK_PHASE_STATES = {
     'INSPECTION':       ['INSPECTING'],
     'UNLOAD':           ['UNLOADING'],
     'DISPLAY_SCAN':     ['SCANNING'],
-    'DISPLAY_PLACE':    ['PLACING'],
+    'DISPLAY_PLACE':    ['PLACING']
 }
 
 
@@ -52,6 +56,16 @@ class CobotStateManager(Node):
         # 두 머신의 ROS_DOMAIN_ID 가 동일해야 한다.
         self.declare_parameter('vision_service_name', '/vision/scan_empty_slot')  # [확정 필요]
         self.declare_parameter('vision_service_timeout_sec', 30.0)
+        self.declare_parameter('dry_run', False)
+        # 로봇 구동은 jetcobot_joint_subscriber 드라이버 토픽 경유. 드라이버 namespace 와 일치해야 한다.
+        self.declare_parameter('robot_name', 'jetcobot1')
+        # INSPECTION 검출 비교용 detection 토픽(local AI 컴퓨터의 yolo_seg_infer).
+        self.declare_parameter('detection_topic', '/infer/tracked_objects')
+        self.declare_parameter('inspect_min_confidence', 0.5)
+        # IBVS+NN 픽 요청/결과 토픽. local 컴퓨터의 ibvs_nn_pick_agent 와 짝을 이룬다.
+        self.declare_parameter('pick_timeout_sec', 120.0)
+        self.declare_parameter('pick_request_topic', '/ibvs_nn_pick/request')
+        self.declare_parameter('pick_result_topic', '/ibvs_nn_pick/result')
 
         self._robot_id       = self.get_parameter('robot_id').value
         self._vision_timeout = self.get_parameter('vision_service_timeout_sec').value
@@ -89,6 +103,14 @@ class CobotStateManager(Node):
             callback_group=cb_group,
         )
 
+        # picky 적재 슬롯 수동 flush 서비스(UNLOADING 미연동 시 가득 참 해소용).
+        self._flush_srv = self.create_service(
+            Trigger,
+            f'{self._robot_id}/flush_loadout',
+            self._handle_flush_loadout,
+            callback_group=cb_group,
+        )
+
         # Vision Service 클라이언트 (Local AI Server, ROS2 cross-machine)
         # [확정 필요] VisionScanService 인터페이스 타입이 확정되면 주석 해제
         # vision_service_name = self.get_parameter('vision_service_name').value
@@ -97,6 +119,20 @@ class CobotStateManager(Node):
         #     vision_service_name,
         #     callback_group=cb_group,
         # )
+
+        # 코봇 제어기(토픽 기반). serial 은 jetcobot 드라이버가 점유하므로 제어기는
+        # 드라이버 토픽으로 로봇을 구동한다. dry_run=True 면 발행 없이 시뮬레이션한다.
+        # SORTING 픽은 IBVS+NN(IbvsNnPickClient)으로 위임한다.
+        self._controller = CobotController(
+            self,
+            robot_name=self.get_parameter('robot_name').value,
+            dry_run=self.get_parameter('dry_run').value,
+            detection_topic=self.get_parameter('detection_topic').value,
+            inspect_min_confidence=self.get_parameter('inspect_min_confidence').value,
+            pick_timeout_sec=self.get_parameter('pick_timeout_sec').value,
+            pick_request_topic=self.get_parameter('pick_request_topic').value,
+            pick_result_topic=self.get_parameter('pick_result_topic').value,
+        )
 
         # 주기 상태 publish 타이머 (late subscriber 를 위한 cobot_state heartbeat)
         interval = self.get_parameter('state_publish_interval_sec').value
@@ -194,57 +230,89 @@ class CobotStateManager(Node):
         goal_handle.publish_feedback(feedback)
 
         # ── 작업 단계별 실행 ─────────────────────────────────────────
-        phases       = TASK_PHASE_STATES[task_type]
-        total_phases = len(phases)
-        detected_qty = 0
+        phases = TASK_PHASE_STATES[task_type]
+        # SORTING_AND_LOAD 는 그리퍼 1개 제약상 '집기1 -> 적재1' 단위를 quantity 회
+        # 번갈아 반복한다(집은 순서대로 picky 슬롯에 적재). 그 외 task 는 1회.
+        units = max(1, int(request.quantity or 1)) if task_type == 'SORTING_AND_LOAD' else 1
+        total_steps    = len(phases) * units
+        step           = 0
+        processed_qty  = 0
+        last_phase_qty = 0
 
-        for idx, phase in enumerate(phases):
-            if goal_handle.is_cancel_requested:
-                self._set_state('STANDBY')
-                goal_handle.canceled()
-                return ExecuteTask.Result(
-                    success=False,
-                    status='CANCELLED',
-                    message='task cancelled',
-                    processed_quantity=detected_qty,
-                    stock_delta=0,
-                )
+        for unit in range(units):
+            for phase in phases:
+                if goal_handle.is_cancel_requested:
+                    self._set_state('STANDBY')
+                    goal_handle.canceled()
+                    return ExecuteTask.Result(
+                        success=False,
+                        status='CANCELLED',
+                        message='task cancelled',
+                        processed_quantity=processed_qty,
+                        stock_delta=0,
+                    )
 
-            with self._lock:
-                if self._emergency_stop:
+                with self._lock:
+                    if self._emergency_stop:
+                        self._set_state('SAFETY_STOPPED')
+                        goal_handle.abort()
+                        return ExecuteTask.Result(
+                            success=False,
+                            status='FAILED',
+                            message='emergency stop triggered',
+                            processed_quantity=processed_qty,
+                            stock_delta=0,
+                        )
+
+                self._set_state(phase)
+                feedback.state              = phase
+                feedback.message            = f'{phase} in progress ({unit + 1}/{units})'
+                feedback.progress           = float(step) / total_steps
+                feedback.processed_quantity = processed_qty
+                goal_handle.publish_feedback(feedback)
+
+                success, last_phase_qty = self._run_phase(task_type, phase, request)
+
+                if not success:
                     self._set_state('SAFETY_STOPPED')
                     goal_handle.abort()
                     return ExecuteTask.Result(
                         success=False,
                         status='FAILED',
-                        message='emergency stop triggered',
-                        processed_quantity=detected_qty,
+                        message=f'{phase} failed',
+                        processed_quantity=processed_qty,
                         stock_delta=0,
                     )
 
-            self._set_state(phase)
-            feedback.state             = phase
-            feedback.message           = f'{phase} in progress'
-            feedback.progress          = float(idx) / total_phases
-            feedback.processed_quantity = detected_qty
-            goal_handle.publish_feedback(feedback)
+                step += 1
+                # 단계 완료 feedback — 다음 단계 진입 전 task manager에 성공 알림
+                feedback.state              = phase
+                feedback.message            = f'{phase} complete ({unit + 1}/{units})'
+                feedback.progress           = float(step) / total_steps
+                feedback.processed_quantity = processed_qty
+                goal_handle.publish_feedback(feedback)
 
-            success, detected_qty = self._run_phase(task_type, phase, request)
+            # 한 단위(집기+적재) 완료 시 처리 수량 +1.
+            if task_type == 'SORTING_AND_LOAD':
+                processed_qty += last_phase_qty
+                # 더 집을 물건이 남아 있으면 STOWING 하지 않고 center 로 복귀(다음 픽 준비).
+                # STOWING_ARM 은 quantity 가 모두 소진된 마지막에만 수행한다.
+                if unit < units - 1:
+                    self._set_state('SORTING')
+                    if not self._controller.go_to_center():
+                        self._set_state('SAFETY_STOPPED')
+                        goal_handle.abort()
+                        return ExecuteTask.Result(
+                            success=False,
+                            status='FAILED',
+                            message='center 복귀 실패',
+                            processed_quantity=processed_qty,
+                            stock_delta=0,
+                        )
 
-            if not success:
-                self._set_state('SAFETY_STOPPED')
-                goal_handle.abort()
-                return ExecuteTask.Result(
-                    success=False,
-                    status='FAILED',
-                    message=f'{phase} failed',
-                    processed_quantity=detected_qty,
-                    stock_delta=0,
-                )
-
-            # 중간 인식 수량 feedback 갱신
-            feedback.processed_quantity = detected_qty
-            goal_handle.publish_feedback(feedback)
+        # 비 SORTING_AND_LOAD 는 마지막 phase 가 반환한 수량을 결과로 쓴다.
+        if task_type != 'SORTING_AND_LOAD':
+            processed_qty = last_phase_qty
 
         # ── STOWING_ARM feedback 발행 (Fleet 다음 PICKY 경로 선계획 트리거) ──
         self._set_state('STOWING_ARM')
@@ -262,7 +330,7 @@ class CobotStateManager(Node):
                 success=False,
                 status='FAILED',
                 message='arm stowing failed',
-                processed_quantity=detected_qty,
+                processed_quantity=processed_qty,
                 stock_delta=0,
             )
 
@@ -273,7 +341,7 @@ class CobotStateManager(Node):
             success=True,
             status='SUCCESS',
             message='ok',
-            processed_quantity=detected_qty,
+            processed_quantity=processed_qty,
             stock_delta=0,  # [구현 필요] 실제 재고 반영 수량 반환
         )
 
@@ -290,60 +358,35 @@ class CobotStateManager(Node):
         반환값: (success, detected_quantity)
         """
         if phase == 'SORTING':
-            # [구현 필요] SORTING_AND_LOAD — 분류 동작 수행
-            pass
-
+            # IBVS+NN 으로 request.product_name 1개를 집어 올린다(quantity 반복은 _execute_task).
+            return self._controller.run_sorting(request.product_name)
         elif phase == 'LOADING':
-            # [구현 필요] SORTING_AND_LOAD — 적재 동작 수행
-            pass
+            # 집은 상품을 picky 의 다음 빈 슬롯에 적재(집는 순서 = 슬롯 순서).
+            return self._controller.run_loading(
+                request.product_name, request.order_id, request.target_zone_name
+            )
 
         elif phase == 'INSPECTING':
-            # [구현 필요] INSPECTION — 검수 동작 수행
-            pass
+            # 4 SLOT 관측 자세에서 검출을 적재 기록과 비교(불일치면 abort).
+            return self._controller.run_inspecting()
 
         elif phase == 'UNLOADING':
-            # [구현 필요] UNLOAD — 하역 동작 수행
-            pass
-
-        elif phase == 'SCANNING':
-            # Vision Service (Local AI Server) 에 ROS2 서비스로 좌표 요청
-            # [확정 필요] VisionScanService 인터페이스 타입 확정 후 주석 해제
-            #
-            # req = VisionScanService.Request()
-            # req.task_id          = request.task_id           # [확정 필요] 요청 필드
-            # req.target_zone_name = request.target_zone_name  # [확정 필요] 요청 필드
-            #
-            # success, response = self._call_vision_service(req)
-            # if not success:
-            #     return False, 0
-            #
-            # self._scan_result = response  # PLACING task 에서 사용
-            # self.get_logger().info(
-            #     f'[CobotStateManager] SCANNING 완료 — 좌표 수신: {response}'
-            # )
-            pass
+            # 적재된 모든 item 을 PICKUP SLOT 으로 이송 drop.
+            return self._controller.run_unloading()
 
         elif phase == 'PLACING':
-            # DISPLAY_SCAN task 에서 저장한 좌표로 팔 제어
-            # [확정 필요] 팔 제어 인터페이스 확정 후 주석 해제
-            #
-            # if self._scan_result is None:
-            #     self.get_logger().error(
-            #         '[CobotStateManager] SCANNING 결과 없음 — PLACING 불가'
-            #     )
-            #     return False, 0
-            #
-            # [구현 필요] self._scan_result 좌표로 팔 이동 → 집기 → 내려놓기
-            # self._scan_result = None  # 사용 완료 후 초기화
-            pass
+            success, qty = self._controller.run_placing(
+                request.product_name, request.target_zone_name
+            )
+            if success:
+                self._scan_result = None
+            return success, qty
 
-        detected_qty = 0  # [구현 필요] 실제 인식 수량 반환
-        return True, detected_qty
+        return True, 0
 
     def _stow_arm(self) -> bool:
         """팔을 안전 복귀 자세로 이동한다."""
-        # [구현 필요] 코봇 팔 복귀(stow) 동작 수행
-        return True
+        return self._controller.stow_arm()
 
     # ── EmergencyControl 서비스 콜백 ──────────────────────────────────
 
@@ -357,11 +400,31 @@ class CobotStateManager(Node):
         #                 robot.robot_status 는 Fleet Manager 가 EMERGENCY_STOP 으로 갱신
         #   재개 요청 시: self._emergency_stop = False, cobot_state → STANDBY
         with self._lock:
-            # [구현 필요] self._emergency_stop 갱신 및 SAFETY_STOPPED / STANDBY 전환
-            pass
+            # [구현 필요] EmergencyControl.Request 필드명 확정 후 조건 교체
+            # 아래는 request.stop (bool) 필드를 가정한 예시
+            stop = getattr(request, 'stop', True)
+            self._emergency_stop = stop
 
-        # [구현 필요] 코봇 하드웨어 즉시 정지 / 재개 명령 전달
+        if stop:
+            self._controller.emergency_stop()
+            self._set_state('SAFETY_STOPPED')
+        else:
+            self._set_state('STANDBY')
+
         # [구현 필요] response 필드 채워서 반환
+        return response
+
+    # ── 적재 슬롯 flush 서비스 콜백 ───────────────────────────────────────
+
+    def _handle_flush_loadout(
+        self,
+        request: Trigger.Request,
+        response: Trigger.Response,
+    ) -> Trigger.Response:
+        cleared = self._controller.flush_loadout()
+        response.success = True
+        response.message = f'{cleared} slot(s) cleared'
+        self.get_logger().info(f'[CobotStateManager] 적재 flush — {cleared}개 슬롯 비움')
         return response
 
     # ── 주기 상태 publish ──────────────────────────────────────────────

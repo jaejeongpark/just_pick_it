@@ -26,7 +26,7 @@ def main():
     parser.add_argument('--save-dir', type=str, default=None,
                         help='Directory for captured images (default: ~/img_capture)')
     parser.add_argument('--robot-name', type=str, default='UDP Stream',
-                        help='Window title (e.g. picky_1, picky_2)')
+                        help='Window title (e.g. picky_1, picky_2, COBOT_1, COBOT_2)')
     args = parser.parse_args()
 
     capture_dir = Path(args.save_dir).expanduser() if args.save_dir \

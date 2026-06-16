@@ -11,6 +11,7 @@
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
+  <depend>std_msgs</depend>
   <depend>visualization_msgs</depend>
   <depend>tf2_ros</depend>
   <depend>tf2_geometry_msgs</depend>
@@ -21,6 +22,9 @@
   <depend>python3-numpy</depend>
   <depend>python3-transforms3d</depend>
   <depend>just_pick_it_interfaces</depend>
+  
+  <exec_depend>rosbag2_py</exec_depend>
+  <exec_depend>rosbag2_storage</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
