@@ -44,10 +44,13 @@ echo "=== [PICKY1] Nav2 기동 (namespace /picky1, ROS_DOMAIN_ID=$ROS_DOMAIN_ID)
 # namespace 를 주입한다. pinky_navigation 의 XML bringup_launch 는 params 를 raw 로
 # 로드해 /picky1 노드에 nav2_params 가 안 붙고 controller 가 기본 DWB(critics
 # 없음)로 떠서 죽던 문제가 있었다.
-# use_composition:=False : 이 보드(ARM)에서는 composable 노드 로드가 실패해
-# nav2_container 만 뜨고 map_server/amcl 이 안 올라온다. 노드를 개별 프로세스로
-# 띄워 안정적으로 기동한다.
+# use_composition:=True : nav2 노드 11개를 단일 component_container_mt 에
+# ComposableNode 로 올려 DDS participant 를 1개로 합친다. 2대 동시 가동 시
+# participant 별 DDS 전송 스레드 폴링으로 보드 CPU 가 포화돼 nav goal 이
+# 상위 로직에서 cancel 되던 과부하를 줄이기 위함. 컴포넌트 11개 전부 로드+활성
+# 확인됨(과거 "ARM 로드 실패"는 nav2_bringup 표준의 route_server/collision_monitor
+# 문제였고 이 커스텀 launch 와 무관).
 exec ros2 launch pinky_amr_1 picky1_nav.launch.py \
     namespace:=picky1 \
     map:="$MAP_PATH" \
-    use_composition:=False
+    use_composition:=True

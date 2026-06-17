@@ -69,10 +69,14 @@ ros2 topic echo --once /picky1/amcl_pose           # amcl 동작 확인
   새 셸에서 재기동.
 - **서버 죽으면 전체 디스커버리 멈춤**(하드 의존성). 관제 PC 부팅 시 systemd 자동기동 권장(미적용).
 
-## 7. 남은 과제
+## 7. 진행 / 남은 과제
 
-- [ ] discovery server systemd 유저서비스 자동기동 + 관제 PC IP 고정.
-- [ ] **2대 동시 가동 시 보드 CPU 포화(load 7/4코어)로 nav goal 이 상위 로직에서 cancel되는 현상**
-  조사 중(scan/odom 자체는 보드 로컬이라 WiFi 무관 — 원인은 CPU 과부하 의심). 경량화 필요.
-- [ ] fleet→로봇 커스텀 액션(MoveCommand/DockCommand) 의 feat/amr_mj↔feature/amr_sw 인터페이스
-  호환 E2E 확정.
+- [x] **2대 동시 가동 시 보드 CPU 포화로 nav goal 이 상위 로직에서 cancel되는 현상** — **해소(2026-06-17)**.
+  원인은 participant 별 Fast-DDS 전송 스레드 폴링(비composed nav2 ~13 participant)으로 인한 CPU 과부하.
+  **nav2 composition**(`picky1_nav.launch.py use_composition:=True`, `component_container_isolated`)으로
+  nav2 11노드를 단일 프로세스(participant 1개)로 합쳐 해소. `nav2_params.yaml` 무수정. 상세는
+  `docs/Fleet_manager_TODO.md` §3-A 13. (scan/odom 은 보드 로컬이라 WiFi 무관.)
+- [x] **2대 AMR E2E 성공(2026-06-17)** — picky1+picky2 동시 가동, 주문 흐름 끝까지 완주.
+- [ ] discovery server systemd 유저서비스 자동기동 + 관제 PC IP 고정(DHCP 예약).
+- [ ] fleet→로봇 커스텀 액션(MoveCommand/DockCommand) 의 feat/amr_mj↔feature/amr_sw COBOT 연동분
+  E2E 확정(주행 E2E 는 통과).
