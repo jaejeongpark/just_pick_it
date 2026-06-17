@@ -37,13 +37,15 @@
     debug_save_frame_count: 12
 
     # ------------------------------------------------------------------ #
-    # Blue guide lane debug
+    # Axis/lane debug
     # ------------------------------------------------------------------ #
     # 하단 ROI에서 청록/파랑 테이프 contour 2개를 잡고, 각 contour를 직선으로
     # 피팅한 뒤 두 라인 사이의 중앙선을 만든다. debug image에는 marker 중심에서
-    # 아래 방향으로 뻗는 도킹축과 lane centerline의 차이를 표시한다.
+    # 아래 방향으로 뻗는 도킹축과 기준선의 차이를 표시한다.
     # reverse_lane_axis_enabled=true이면 REVERSE_INSERT 중 이 픽셀 오차(axis_err)를
-    # yaw 보정 입력으로 사용한다.
+    # yaw 보정 입력으로 사용한다. 기준선은 reverse_axis_target으로 고른다.
+    #   camera: marker normal axis를 카메라/로봇 정면 centerline에 맞춘다.
+    #   lane:   marker normal axis를 파란 lane centerline에 맞춘다.
     lane_debug_enabled: true
     lane_roi_y_min_ratio: 0.52
     lane_hsv_lower: [75, 35, 40]
@@ -154,13 +156,14 @@
     reverse_success_max_marker_lat_m: 0.05
     reverse_success_max_axis_error_px: 180.0
     yaw_hold_kp: 1.2
-    # 후진 중 파란 도킹 라인 2개가 잡히면, marker 중심 법선축과 lane centerline의
-    # 픽셀 오차(axis_err)를 yaw 보정에 추가한다. 143244 bag에서 양수 axis_err에
-    # 양수 yaw를 주면 왼쪽으로 틀어 marker 1을 잃었으므로, 제어 입력은
-    # -axis_err 방향으로 건다. 바닥 라인 기준을 marker tvec[0]보다 우선 반영한다.
-    # 라인이 잡히면 marker lateral 보정은
-    # 서로 싸우지 않도록 일시적으로 빼고, 라인이 안 잡힐 때만 fallback으로 쓴다.
+    # 후진 중 marker 중심 법선축과 reverse_axis_target 기준선의 픽셀 오차(axis_err)를
+    # yaw 보정에 추가한다. 143244 bag에서 양수 axis_err에 양수 yaw를 주면 왼쪽으로
+    # 틀어 marker 1을 잃었으므로, 제어 입력은 -axis_err 방향으로 건다.
+    # camera 모드에서는 파란 라인 검출이 없어도 카메라 중심선 기준으로 보정한다.
+    # lane 모드에서는 파란 라인 2개가 유효할 때만 보정하고, 라인이 안 잡히면
+    # marker lateral fallback을 사용한다.
     reverse_lane_axis_enabled: true
+    reverse_axis_target: "camera"
     reverse_lane_axis_kp: 0.0025
     # axis_angle은 debug image/log에 남기되, 현재 bag에서는 부호가 lateral 보정과
     # 상쇄되는 구간이 있어 기본 제어 입력에서는 제외한다. 필요하면 0.001 이하부터
