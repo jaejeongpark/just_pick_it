@@ -12,6 +12,13 @@ set -euo pipefail
 #   ./reset_ws.sh
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ "${USE_DDS:-1}" != "0" ] && [ -f "$ROOT_DIR/scripts/dds_env.sh" ]; then
+  # 비대화형 실행에서도 Fleet Manager가 로봇들과 같은 DDS discovery 환경에 붙도록 한다.
+  # Discovery Server 없이 일반 multicast로 테스트하려면:
+  #   USE_DDS=0 ./run_all.sh
+  # shellcheck disable=SC1091
+  source "$ROOT_DIR/scripts/dds_env.sh"
+fi
 WEB_DIR="$ROOT_DIR/web"
 ROS_DISTRO_REQUIRED="jazzy"
 # 팀 공통 ROS_DOMAIN_ID. Fleet Manager가 로봇(/picky1 등)과 통신하려면
