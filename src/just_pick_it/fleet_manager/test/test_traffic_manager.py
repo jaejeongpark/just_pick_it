@@ -195,18 +195,36 @@ class TestReserveReturnHomePath:
         r = traffic.reserve_return_home_path('PICKY1', 1, 'TRAFFIC_T1')
         assert r.ok
         assert r.waypoints[-1] == 'STANDBY_ZONE_1'
+        # 귀환 시점에 목적 도크(1번)를 함께 점유한다.
+        assert traffic._robot_dock['PICKY1'] == DOCK_PRIORITY[0][0]
 
     def test_dock1_occupied_targets_dock2_standby(self, traffic):
         # 1번 도크를 PICKY2 가 점유(충전/도크 내 대기) 중이면 PICKY1 은
-        # 2번 도크의 STANDBY_ZONE_2 로 귀환한다.
+        # 2번 도크의 STANDBY_ZONE_2 로 귀환하며 2번 도크를 점유한다.
         traffic._robot_dock['PICKY2'] = DOCK_PRIORITY[0][0]  # CHARGING_DOCK_1
         r = traffic.reserve_return_home_path('PICKY1', 1, 'TRAFFIC_T1')
         assert r.ok
         assert r.waypoints[-1] == 'STANDBY_ZONE_2'
+        assert traffic._robot_dock['PICKY1'] == DOCK_PRIORITY[1][0]  # CHARGING_DOCK_2
 
-    def test_does_not_reserve_dock(self, traffic):
+    def test_claims_dock_on_return(self, traffic):
+        # 귀환 예약 시점에 목적 도크를 점유한다(도크 점유를 DOCK_IN 까지 미루지 않음).
         traffic.reserve_return_home_path('PICKY1', 1, 'TRAFFIC_T1')
-        assert traffic._robot_dock['PICKY1'] is None
+        assert traffic._robot_dock['PICKY1'] == DOCK_PRIORITY[0][0]
+
+    def test_two_robots_return_claim_different_docks(self, traffic):
+        # 두 로봇이 연달아 귀환하면 서로 다른 도크를 점유한다(같은 도크 중복 금지).
+        # 예전 버그: 귀환 시 도크를 점유하지 않아 둘이 같은 도크를 노렸다.
+        r1 = traffic.reserve_return_home_path('PICKY1', 1, 'TRAFFIC_T1')
+        assert r1.ok
+        # PICKY1 이 목적지까지 진행해 경유 노드를 비운다(동시 path 충돌 배제).
+        traffic.update_path_progress('PICKY1', 1, len(r1.waypoints) - 1)
+        r2 = traffic.reserve_return_home_path('PICKY2', 2, 'TRAFFIC_T1')
+        assert r2.ok
+        d1 = traffic._robot_dock['PICKY1']
+        d2 = traffic._robot_dock['PICKY2']
+        assert d1 is not None and d2 is not None
+        assert d1 != d2
 
     def test_falls_back_when_priority_standby_blocked(self, traffic):
         # 도크는 둘 다 비었지만 1번 도크의 STANDBY_ZONE_1 을 PICKY2 가 점유 중이면,
@@ -261,6 +279,15 @@ class TestReserveDockPath:
         r = traffic.reserve_dock_path('PICKY3', 3, 'STANDBY_ZONE_2')
         assert not r.ok
         assert r.reason == 'no available charging dock'
+
+    def test_docks_into_own_reserved_dock(self, traffic):
+        # 귀환 예약으로 2번 도크를 이미 점유했으면, 1번이 비어 있어도
+        # 자기 2번 도크로 도킹한다(reserve_return_home_path 와 정합).
+        traffic._robot_dock['PICKY1'] = DOCK_PRIORITY[1][0]  # CHARGING_DOCK_2
+        r = traffic.reserve_dock_path('PICKY1', 1, 'STANDBY_ZONE_2')
+        assert r.ok
+        assert r.waypoints[-1] == DOCK_PRIORITY[1][0]
+        assert traffic._robot_dock['PICKY1'] == DOCK_PRIORITY[1][0]
 
     def test_registers_path_and_task_id(self, traffic):
         r = traffic.reserve_dock_path('PICKY1', 5, 'STANDBY_ZONE_1')
@@ -506,11 +533,12 @@ class TestNotifyState:
         traffic.notify_state('PICKY1', 'MOVING_TO_PRODUCT')   # 언도크
         assert traffic._robot_dock['PICKY1'] is None
 
-    def test_returning_releases_dock(self, traffic):
-        # RETURNING 도 도크를 떠나는 이동 상태라 점유 해제 대상이다.
+    def test_returning_keeps_dock(self, traffic):
+        # RETURNING 은 도크로 귀환하는 중이라(reserve_return_home_path 가 목적 도크를
+        # 이미 점유) 점유를 해제하지 않는다. 해제는 새 주문 출발(MOVING_TO_*) 때만.
         traffic._robot_dock['PICKY1'] = 'CHARGING_DOCK_1'
         traffic.notify_state('PICKY1', 'RETURNING')
-        assert traffic._robot_dock['PICKY1'] is None
+        assert traffic._robot_dock['PICKY1'] == 'CHARGING_DOCK_1'
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -542,10 +570,11 @@ class TestConcurrency:
         assert p1.isdisjoint(p2)
 
     def test_concurrent_return_home_serializes(self, traffic):
-        """동시 RETURN_HOME 은 STANDBY_ZONE 공유로 인해 한 쪽만 성공한다. 도크 예약 없음.
+        """동시 RETURN_HOME 은 STANDBY_ZONE 공유로 인해 한 쪽만 성공한다.
 
         새 맵(2.1)에서 TRAFFIC_T1(상단), TRAFFIC_B1(하단) 양쪽의 최근접 귀환 목적지가
         모두 STANDBY_ZONE_2 라, 동시 호출 시 한 쪽의 path 예약이 다른 쪽을 차단한다.
+        성공한 쪽은 귀환 시점에 도크 1개를 점유한다(중복 없음).
         """
         results = []
 
@@ -561,8 +590,10 @@ class TestConcurrency:
 
         ok_count = sum(1 for _, r in results if r.ok)
         assert ok_count == 1
-        # 도크 예약 없음
-        assert all(d is None for d in traffic._robot_dock.values())
+        # 성공한 쪽만 도크 1개 점유, 중복 없음.
+        occupied = [d for d in traffic._robot_dock.values() if d is not None]
+        assert len(occupied) == ok_count
+        assert len(occupied) == len(set(occupied))
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -698,3 +729,74 @@ class TestColdStartDockOccupancy:
         r = tm.reserve_return_home_path('PICKY2', 1, 'TRAFFIC_T1')
         assert r.ok
         assert r.waypoints[-1] == 'STANDBY_ZONE_2'       # dock1 점유 → dock2 로 귀환
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 충돌 회귀: source 차단 / OCCUPYING 전체 경로 차단 / 점유 유지
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestSourceZoneBlocked:
+    """BFS 가 source zone 자체의 차단을 검사한다(예전엔 neighbor 만 봤음).
+
+    다른 로봇이 PICKY1 의 출발 zone 을 점유/경유 중이면 거기서 출발하는
+    경로도 만들지 않아야 한다(출발 즉시 충돌 방지).
+    """
+
+    def test_blocked_source_in_moving_path_returns_failure(self, traffic):
+        _set_moving(traffic, 'PICKY2', ['PRODUCT_ZONE_2', 'PRODUCT_ZONE_5'])
+        r = traffic.reserve_path('PICKY1', 1, 'PRODUCT_ZONE_2', 'PICKUP_ZONE_1')
+        assert not r.ok
+        assert traffic._robot_reservations['PICKY1'] is None
+
+    def test_blocked_source_when_other_waiting_there(self, traffic):
+        _set_waiting(traffic, 'PICKY2', 'PRODUCT_ZONE_2')
+        r = traffic.reserve_path('PICKY1', 1, 'PRODUCT_ZONE_2', 'PICKUP_ZONE_1')
+        assert not r.ok
+
+    def test_free_source_still_plans(self, traffic):
+        # source 가 막혀 있지 않으면 정상 경로.
+        _set_moving(traffic, 'PICKY2', ['PRODUCT_ZONE_5', 'PRODUCT_ZONE_6'])
+        r = traffic.reserve_path('PICKY1', 1, 'TRAFFIC_T1', 'TRAFFIC_T3')
+        assert r.ok
+
+
+class TestOccupyingBlocksFullPath:
+    """OCCUPYING(WAITING_FOR_COBOT) 로봇도 path 전체를 차단한다.
+
+    preplan/점유유지로 _robot_paths 에 '현재 위치 + 미래 경로'가 들어가면,
+    예전엔 path[-1] 만 막아 경유 노드(T3)와 현재 위치가 풀려 충돌했다.
+    """
+
+    def test_waiting_multi_node_path_blocks_transit_and_current(self, traffic):
+        traffic._robot_states['PICKY2'] = 'WAITING_FOR_COBOT'
+        traffic._robot_paths['PICKY2'] = [
+            'PRODUCT_ZONE_3', 'TRAFFIC_T3', 'PICKUP_ZONE_1',
+        ]
+        blocked_nodes, blocked_edges = traffic._build_blocked_sets('PICKY1')
+        assert 'PRODUCT_ZONE_3' in blocked_nodes   # 현재 위치
+        assert 'TRAFFIC_T3' in blocked_nodes        # 경유 노드 (예전엔 안 막힘)
+        assert 'PICKUP_ZONE_1' in blocked_nodes     # 미래 목적지
+        assert ('PRODUCT_ZONE_3', 'TRAFFIC_T3') in blocked_edges
+
+    def test_waiting_single_node_unchanged(self, traffic):
+        # 정상 도착(path 가 도착 zone 1개)은 기존 동작과 동일.
+        _set_waiting(traffic, 'PICKY2', 'PRODUCT_ZONE_3')
+        blocked_nodes, _ = traffic._build_blocked_sets('PICKY1')
+        assert blocked_nodes == {'PRODUCT_ZONE_3'}
+
+
+class TestHoldOccupancy:
+    """hold_occupancy 는 경로 예약은 풀되 도착 zone 점유는 유지한다."""
+
+    def test_keeps_zone_and_clears_reservation(self, traffic):
+        traffic.reserve_path('PICKY2', 5, 'TRAFFIC_T1', 'PRODUCT_ZONE_2')
+        traffic.hold_occupancy('PICKY2', 'PRODUCT_ZONE_2')
+        assert traffic._robot_paths['PICKY2'] == ['PRODUCT_ZONE_2']
+        assert traffic._robot_reservations['PICKY2'] is None
+
+    def test_held_zone_blocks_other_robot(self, traffic):
+        traffic.hold_occupancy('PICKY2', 'PRODUCT_ZONE_2')
+        # 다른 로봇이 그 zone 으로 가는 예약은 실패해야 한다.
+        r = traffic.reserve_path('PICKY1', 1, 'TRAFFIC_T2', 'PRODUCT_ZONE_2')
+        assert not r.ok

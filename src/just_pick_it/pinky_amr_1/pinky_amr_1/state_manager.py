@@ -291,9 +291,6 @@ class StateManager(Node):
                 goal_handle.canceled()
                 return MoveCommand.Result(success=False, message='canceled')
 
-            feedback.current_waypoint_index = i
-            goal_handle.publish_feedback(feedback)
-
             x = wp.pose.position.x
             y = wp.pose.position.y
             # zone 의 theta 는 쓰지 않는다. 중간 경유지는 통과만 하고, 마지막 목적지에서만
@@ -315,6 +312,14 @@ class StateManager(Node):
                 return MoveCommand.Result(
                     success=False, message=f'navigation failed at waypoint {i}'
                 )
+
+            # waypoint i 에 '도착한 뒤에만' 진행 피드백을 발행한다. fleet TaskManager 가
+            # 이 index 에 +1 을 해 TrafficManager 의 현재 경로를 trim 하므로, 이동 시작 전에
+            # 발행하면 아직 떠나지 않은 현재 노드와 지금 주행 중인 엣지까지 차단이 풀려
+            # 다른 로봇이 그 구간으로 진입해 충돌할 수 있다. 도착 후 발행하면 현재 노드는
+            # 다음 도착 시점까지 차단이 유지된다.
+            feedback.current_waypoint_index = i
+            goal_handle.publish_feedback(feedback)
 
         # 전체 이동 완료. 정지 자세 회전(사방향 90° 스냅)은 move_to_goal 의 최종 목적지
         # (final=True) 처리로 옮겼다. 여기서는 추가 회전하지 않는다(중간 경유지도 회전 없음).

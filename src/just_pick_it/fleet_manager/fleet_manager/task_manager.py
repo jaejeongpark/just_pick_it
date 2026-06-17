@@ -2977,9 +2977,22 @@ class TaskManager:
 
         if task_type in PATH_RESERVED_TASK_TYPES and robot_name:
             waypoints = self._move_waypoints_by_task.get(task_id)
-            if task_succeeded and waypoints and task_type in MOVE_TASK_TYPES:
-                self._completed_move_target_by_task[task_id] = waypoints[-1]
-            self._traffic.release_path(robot_name, task_id)
+            arrival_zone = waypoints[-1] if waypoints else None
+            if task_succeeded and arrival_zone and task_type in MOVE_TASK_TYPES:
+                self._completed_move_target_by_task[task_id] = arrival_zone
+            # MOVE 성공으로 WAITING_FOR_COBOT 도착 zone 에 머무는 경우, 경로 예약은
+            # 해제하되 그 zone 점유는 유지한다. release_path 로 path 를 싹 비우면
+            # 도착 로봇이 서 있는 zone 이 TrafficManager 엔 빈 곳으로 보여, 다른
+            # 로봇이 그리로 경로를 만들어 충돌한다(STOCK/PRODUCT/PICKUP 도착 공통).
+            if (
+                task_succeeded
+                and arrival_zone
+                and task_type in MOVE_TASK_TYPES
+                and RECOVERY_ARRIVAL_STATE.get(task_type) == "WAITING_FOR_COBOT"
+            ):
+                self._traffic.hold_occupancy(robot_name, str(arrival_zone))
+            else:
+                self._traffic.release_path(robot_name, task_id)
             self._move_waypoints_by_task.pop(task_id, None)
 
         if task_type in COBOT_TASK_TYPES:
