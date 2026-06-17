@@ -1853,7 +1853,7 @@ class ReverseDocking(Node):
         try:
             msg = self._bridge.cv2_to_imgmsg(overlay, encoding="bgr8")
             msg.header.stamp = self.get_clock().now().to_msg()
-            msg.header.frame_id = "picky2/front_camera_link"
+            msg.header.frame_id = "front_camera_link"
             self._debug_image_pub.publish(msg)
         except Exception as exc:
             self.get_logger().warn(f"Debug image publish failed: {exc}")

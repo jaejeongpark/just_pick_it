@@ -159,7 +159,7 @@ VALUES (
     (
         'PICKUP_SLOT_1',
         'PICKUP_SLOT',
-        1.80,
+        1.77,
         0.60,
         0.35,
         3.14
@@ -167,7 +167,7 @@ VALUES (
     (
         'PICKUP_SLOT_2',
         'PICKUP_SLOT',
-        1.80,
+        1.77,
         0.41,
         0.35,
         3.14
