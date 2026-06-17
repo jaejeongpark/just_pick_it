@@ -1501,7 +1501,7 @@ class TaskManager:
         )
 
     def _process_new_display_item(self, display_item: dict[str, Any]) -> list[int]:
-        """display_item 1건을 진열 task 5개로 변환한다."""
+        """display_item 1건을 진열 task 4개로 변환한다."""
         appended_task_ids = self._append_display_item_to_open_batch(display_item)
         if appended_task_ids:
             return appended_task_ids
@@ -1659,7 +1659,7 @@ class TaskManager:
         base_sequence_no: int = 1,
         current_zone: str | None = None,
     ) -> list[int]:
-        """진열 요청 1건에 대한 task 5개를 생성한다."""
+        """진열 요청 1건에 대한 task 4개를 생성한다."""
         priority = int(display_work.get("priority") or 2)
         display_item_id = int(display_work["display_item_id"])
         display_batch_id = int(display_work.get("display_batch_id") or display_item_id)
@@ -1698,16 +1698,6 @@ class TaskManager:
             ),
             self._build_task_payload(
                 sequence_no=base_sequence_no + 3,
-                task_type="DISPLAY_SCAN",
-                assigned_robot_name=display_work["cobot_name"],
-                display_item_id=display_item_id,
-                display_batch_id=display_batch_id,
-                source_zone_name=display_work["product_slot_name"],
-                target_zone_name=display_work["product_slot_name"],
-                priority=priority,
-            ),
-            self._build_task_payload(
-                sequence_no=base_sequence_no + 4,
                 task_type="DISPLAY_PLACE",
                 assigned_robot_name=display_work["cobot_name"],
                 display_item_id=display_item_id,
