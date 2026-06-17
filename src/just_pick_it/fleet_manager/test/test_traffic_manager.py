@@ -729,3 +729,74 @@ class TestColdStartDockOccupancy:
         r = tm.reserve_return_home_path('PICKY2', 1, 'TRAFFIC_T1')
         assert r.ok
         assert r.waypoints[-1] == 'STANDBY_ZONE_2'       # dock1 점유 → dock2 로 귀환
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 충돌 회귀: source 차단 / OCCUPYING 전체 경로 차단 / 점유 유지
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestSourceZoneBlocked:
+    """BFS 가 source zone 자체의 차단을 검사한다(예전엔 neighbor 만 봤음).
+
+    다른 로봇이 PICKY1 의 출발 zone 을 점유/경유 중이면 거기서 출발하는
+    경로도 만들지 않아야 한다(출발 즉시 충돌 방지).
+    """
+
+    def test_blocked_source_in_moving_path_returns_failure(self, traffic):
+        _set_moving(traffic, 'PICKY2', ['PRODUCT_ZONE_2', 'PRODUCT_ZONE_5'])
+        r = traffic.reserve_path('PICKY1', 1, 'PRODUCT_ZONE_2', 'PICKUP_ZONE_1')
+        assert not r.ok
+        assert traffic._robot_reservations['PICKY1'] is None
+
+    def test_blocked_source_when_other_waiting_there(self, traffic):
+        _set_waiting(traffic, 'PICKY2', 'PRODUCT_ZONE_2')
+        r = traffic.reserve_path('PICKY1', 1, 'PRODUCT_ZONE_2', 'PICKUP_ZONE_1')
+        assert not r.ok
+
+    def test_free_source_still_plans(self, traffic):
+        # source 가 막혀 있지 않으면 정상 경로.
+        _set_moving(traffic, 'PICKY2', ['PRODUCT_ZONE_5', 'PRODUCT_ZONE_6'])
+        r = traffic.reserve_path('PICKY1', 1, 'TRAFFIC_T1', 'TRAFFIC_T3')
+        assert r.ok
+
+
+class TestOccupyingBlocksFullPath:
+    """OCCUPYING(WAITING_FOR_COBOT) 로봇도 path 전체를 차단한다.
+
+    preplan/점유유지로 _robot_paths 에 '현재 위치 + 미래 경로'가 들어가면,
+    예전엔 path[-1] 만 막아 경유 노드(T3)와 현재 위치가 풀려 충돌했다.
+    """
+
+    def test_waiting_multi_node_path_blocks_transit_and_current(self, traffic):
+        traffic._robot_states['PICKY2'] = 'WAITING_FOR_COBOT'
+        traffic._robot_paths['PICKY2'] = [
+            'PRODUCT_ZONE_3', 'TRAFFIC_T3', 'PICKUP_ZONE_1',
+        ]
+        blocked_nodes, blocked_edges = traffic._build_blocked_sets('PICKY1')
+        assert 'PRODUCT_ZONE_3' in blocked_nodes   # 현재 위치
+        assert 'TRAFFIC_T3' in blocked_nodes        # 경유 노드 (예전엔 안 막힘)
+        assert 'PICKUP_ZONE_1' in blocked_nodes     # 미래 목적지
+        assert ('PRODUCT_ZONE_3', 'TRAFFIC_T3') in blocked_edges
+
+    def test_waiting_single_node_unchanged(self, traffic):
+        # 정상 도착(path 가 도착 zone 1개)은 기존 동작과 동일.
+        _set_waiting(traffic, 'PICKY2', 'PRODUCT_ZONE_3')
+        blocked_nodes, _ = traffic._build_blocked_sets('PICKY1')
+        assert blocked_nodes == {'PRODUCT_ZONE_3'}
+
+
+class TestHoldOccupancy:
+    """hold_occupancy 는 경로 예약은 풀되 도착 zone 점유는 유지한다."""
+
+    def test_keeps_zone_and_clears_reservation(self, traffic):
+        traffic.reserve_path('PICKY2', 5, 'TRAFFIC_T1', 'PRODUCT_ZONE_2')
+        traffic.hold_occupancy('PICKY2', 'PRODUCT_ZONE_2')
+        assert traffic._robot_paths['PICKY2'] == ['PRODUCT_ZONE_2']
+        assert traffic._robot_reservations['PICKY2'] is None
+
+    def test_held_zone_blocks_other_robot(self, traffic):
+        traffic.hold_occupancy('PICKY2', 'PRODUCT_ZONE_2')
+        # 다른 로봇이 그 zone 으로 가는 예약은 실패해야 한다.
+        r = traffic.reserve_path('PICKY1', 1, 'TRAFFIC_T2', 'PRODUCT_ZONE_2')
+        assert not r.ok

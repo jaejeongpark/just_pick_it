@@ -552,6 +552,25 @@ class TrafficManager:
             f'[TrafficManager] {robot_id} task={task_id} 경로 해제'
         )
 
+    def hold_occupancy(self, robot_id: str, zone: str) -> None:
+        """MOVE 성공 후 로봇이 도착 zone 에서 WAITING_FOR_COBOT 로 머무는 동안
+        그 zone 점유를 유지한다.
+
+        경로 예약(task)은 해제하되 점유 노드(도착 zone)만 _robot_paths 에 남겨,
+        다른 로봇의 _build_blocked_sets 가 이 zone 을 비었다고 보지 않게 한다.
+        release_path 로 path 를 싹 비우면, 도착 로봇이 그 zone 에 서 있는데도
+        TrafficManager 엔 빈 곳으로 보여 다른 로봇이 그리로 경로를 만들어 충돌한다.
+
+        이후 다음 MOVE 예약이 오면 _robot_paths 가 새 경로로 덮어써지고, 로봇이
+        idle 상태로 빠지면 notify_state 안전망이 이 점유를 정리한다.
+        """
+        with self._lock:
+            self._robot_paths[robot_id] = [zone]
+            self._robot_reservations[robot_id] = None
+        self._node.get_logger().info(
+            f'[TrafficManager] {robot_id} 점유 유지: {zone} (경로 예약 해제, 노드 점유 유지)'
+        )
+
     def get_robot_state(self, robot_id: str) -> str | None:
         with self._lock:
             return self._robot_states.get(robot_id)
@@ -670,6 +689,12 @@ class TrafficManager:
         if source == target:
             return [source]
 
+        # source 자체가 다른 로봇 path 에 막혀 있으면(= 그 zone 을 남이 점유/예약 중)
+        # 거기서 출발하는 경로도 만들지 않는다. BFS 는 neighbor 만 검사하므로 이
+        # 검사가 없으면 점유된 출발 zone 을 그대로 통과시켜 충돌이 난다.
+        if source in blocked_nodes:
+            return None
+
         queue: deque[list[str]] = deque([[source]])
         visited: set[str] = {source}
 
@@ -712,18 +737,21 @@ class TrafficManager:
         차단 노드 집합과 차단 엣지 집합을 생성한다.
 
         path 가 등록되어 있으면 (picky_state 무관) 그 path 의 노드와 엣지를
-        차단한다. reserve_* 성공 자체가 "이 로봇이 곧 그 path 를 점유" 라는
+        모두 차단한다. reserve_* 성공 자체가 "이 로봇이 곧 그 path 를 점유" 라는
         약속이므로, picky_state 가 MOVING 으로 갱신되기 전 race window 도
         자연히 닫힌다.
 
-        예외: state 가 OCCUPYING_STATES (WAITING_FOR_COBOT 등) 면 이미 도착해
-        작업 중이므로 path[-1] (현재 머무는 노드) 만 차단하고 경유 노드는
-        풀어준다.
+        예전엔 state 가 OCCUPYING_STATES (WAITING_FOR_COBOT 등) 면 path[-1] 만
+        차단하고 경유 노드를 풀어줬으나, MOVE 성공 후 점유 유지(hold_occupancy)나
+        STOWING_ARM preplan 으로 _robot_paths 에 '현재 위치 + 미래 경로'가 들어가는
+        경우 path[-1](미래 목적지)만 막으면 현재 위치와 경유 노드가 풀려 다른
+        로봇이 그리로 진입해 충돌했다. 그래서 OCCUPYING 여부와 무관하게 path 전체를
+        막는다. 정상 도착 로봇은 path 가 [도착 zone] 한 개라 동작이 동일하다.
         """
         blocked_nodes: set[str] = set()
         blocked_edges: set[tuple[str, str]] = set()
 
-        for robot_id, state in self._robot_states.items():
+        for robot_id in self._robot_states:
             if robot_id == exclude_robot_id:
                 continue
 
@@ -731,11 +759,8 @@ class TrafficManager:
             if not path:
                 continue
 
-            if state in OCCUPYING_STATES:
-                blocked_nodes.add(path[-1])
-            else:
-                blocked_nodes.update(path)
-                for i in range(len(path) - 1):
-                    blocked_edges.add((path[i], path[i + 1]))
+            blocked_nodes.update(path)
+            for i in range(len(path) - 1):
+                blocked_edges.add((path[i], path[i + 1]))
 
         return blocked_nodes, blocked_edges
