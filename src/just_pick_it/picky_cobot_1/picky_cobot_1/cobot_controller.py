@@ -3,11 +3,27 @@ import threading
 import time
 
 from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.qos import (
+    QoSDurabilityPolicy,
+    QoSHistoryPolicy,
+    QoSProfile,
+    QoSReliabilityPolicy,
+)
 from std_msgs.msg import Empty, Float64MultiArray
 
 from just_pick_it_interfaces.msg import TrackedObjectArray
 
 from .ibvs_nn_pick import IbvsNnPickClient
+
+
+def _latched_qos(depth: int = 1) -> QoSProfile:
+    # transient_local: 늦게 뜬 CSRT tracker(agent on-demand 기동)도 마지막 bbox를 받는다.
+    return QoSProfile(
+        reliability=QoSReliabilityPolicy.RELIABLE,
+        history=QoSHistoryPolicy.KEEP_LAST,
+        durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        depth=depth,
+    )
 
 
 # 드라이버(jetcobot_joint_subscriber) target_pose command_type.
@@ -87,6 +103,23 @@ PREGRASP_ANGLES = {
 # launch 를 실행하고 set_gripper open 관측을 완료로 보고). 그 전까지 _unload_slot 의
 # 드롭 단계는 미연동 상태다.
 
+# DISPLAY_SCAN 스윕 자세(관절각, degree, [J1..J6]). 진열대 위를 좌->중->우로 훑어보며
+# 각 자세에서 빈자리 후보를 누적한다. empty_slot_detector 가 각 capture 를 자세 1개에
+# 대응시키므로, 우승 capture_index 로 이 리스트에서 복귀할 자세를 되찾는다.
+# [하드웨어 보정 필요] 실제 진열대(가로 24 x 세로 10 x 높이 12cm)를 내려다보는 관측
+# 자세로 실측 보정할 것. 아래는 픽 pregrasp 를 출발점으로 둔 placeholder 다.
+DISPLAY_SCAN_ANGLES = [
+    [147.48, -8.96, -24.08, -59.85, 4.39, -73.12],   # left
+    [114.78, -5.09, -9.05, -75.49, 9.05, -107.31],   # center
+    [94.39, 1.31, -26.19, -62.84, 3.51, -127.08],    # right
+]
+
+# 스캔 타이밍.
+SCAN_SETTLE_SEC   = 0.6    # 스캔 자세 도착 후 영상 안정 대기
+SCAN_CAPTURE_SEC  = 0.5    # capture_view 발행 후 detector 처리 대기
+SCAN_PLAN_TIMEOUT = 5.0    # plan 결과(/place/scan_result) 대기
+SCAN_MAX_RESCANS  = 2      # 빈자리 0개 시 재스캔 추가 시도 횟수
+
 
 class CobotController:
     """
@@ -111,6 +144,9 @@ class CobotController:
         pick_timeout_sec: float = 120.0,
         pick_request_topic: str = '/ibvs_nn_pick/request',
         pick_result_topic: str = '/ibvs_nn_pick/result',
+        place_request_topic: str = '/display_place/request',
+        place_result_topic: str = '/display_place/result',
+        place_timeout_sec: float = 120.0,
         detection_topic: str = '/infer/tracked_objects',
         inspect_min_confidence: float = 0.5,
         inspect_settle_sec: float = 2.0,
@@ -130,6 +166,35 @@ class CobotController:
             result_topic=pick_result_topic,
             pick_timeout_sec=pick_timeout_sec,
         )
+
+        # DISPLAY_PLACE 배치는 local AI 컴퓨터의 display_place_agent 에 요청한다.
+        # 픽과 동일한 토픽 RPC(IbvsNnPickClient 재사용, 토픽만 display 용으로). agent 가
+        # place_servo(csrt + IBVS + place release)를 띄우고 set_gripper open 관측을 완료로 본다.
+        self._place = IbvsNnPickClient(
+            node,
+            request_topic=place_request_topic,
+            result_topic=place_result_topic,
+            pick_timeout_sec=place_timeout_sec,
+        )
+
+        # DISPLAY_SCAN 트리거(empty_slot_detector, AI 컴퓨터 상시 가동) 발행.
+        self._place_reset_pub   = node.create_publisher(Empty, '/place/reset', 10)
+        self._place_capture_pub = node.create_publisher(Empty, '/place/capture_view', 10)
+        self._place_plan_pub    = node.create_publisher(Empty, '/place/plan', 10)
+        # PLACE 시 CSRT init 용 bbox(center 기준 px) latched 발행.
+        self._target_bbox_pub = node.create_publisher(
+            Float64MultiArray, '/place/target_bbox', _latched_qos())
+
+        # 스캔 plan 결과 수신.
+        self._scan_lock = threading.Lock()
+        self._scan_event = threading.Event()
+        self._latest_scan_result: list[float] | None = None
+        node.create_subscription(
+            Float64MultiArray, '/place/scan_result', self._scan_result_callback, 10,
+            callback_group=ReentrantCallbackGroup(),
+        )
+        # SCAN 우승 자리: {'pose': [J1..J6], 'bbox': [cx,cy,w,h,angle]}. SCAN -> PLACE 전달.
+        self._scan_winner: dict | None = None
 
         # 슬롯 점유 상태. 인덱스 = 슬롯 번호, 값 = 적재된 상품명(빈 슬롯은 None).
         self._slot_occupant: list[str | None] = [None] * len(LOAD_SLOT_ANGLES)
@@ -230,13 +295,175 @@ class CobotController:
         self._log(f'UNLOADING 완료 — drop {dropped}개')
         return True, dropped
 
+    def run_scanning(self, product_name: str = '', target_zone_name: str = '') -> tuple[bool, int]:
+        """DISPLAY_SCAN: 진열대를 스윕하며 빈자리 후보를 누적하고 최적 1곳을 선정한다.
+
+        empty_slot_detector(AI 컴퓨터 상시 가동)에 reset -> capture_view(자세별) -> plan 을
+        트리거한다. plan 결과(/place/scan_result)가 found 면 우승 capture_index 로 복귀할
+        스캔 자세와 bbox 를 self._scan_winner 에 저장한다. 스윕 전체에서 후보가 없으면
+        재스캔을 SCAN_MAX_RESCANS 회까지 반복하고, 끝내 없으면 실패를 반환한다.
+        반환값: (success, 0)
+        """
+        self._log(f'SCANNING 시작 — product={product_name}, zone={target_zone_name}')
+        self._scan_winner = None
+
+        if self._dry_run:
+            self._scan_winner = {
+                'pose': DISPLAY_SCAN_ANGLES[len(DISPLAY_SCAN_ANGLES) // 2],
+                'bbox': [320.0, 240.0, 60.0, 60.0, 0.0],
+            }
+            self._log('(dry_run) 스캔 우승 자리 더미 저장')
+            return True, 0
+
+        for attempt in range(SCAN_MAX_RESCANS + 1):
+            self._place_reset_pub.publish(Empty())
+            time.sleep(0.2)
+
+            for i, pose in enumerate(DISPLAY_SCAN_ANGLES):
+                if not self.move_to_angles(pose):
+                    self._log_err(f'스캔 자세 {i} 이동 실패')
+                    return False, 0
+                time.sleep(SCAN_SETTLE_SEC)
+                self._place_capture_pub.publish(Empty())
+                time.sleep(SCAN_CAPTURE_SEC)
+
+            with self._scan_lock:
+                self._latest_scan_result = None
+            self._scan_event.clear()
+            self._place_plan_pub.publish(Empty())
+            if not self._scan_event.wait(timeout=SCAN_PLAN_TIMEOUT):
+                self._log_err(
+                    f'스캔 plan 응답 없음(timeout {SCAN_PLAN_TIMEOUT}s) — '
+                    'empty_slot_detector 가 AI 컴퓨터에서 떠 있는지 확인. 재시도.')
+                continue
+
+            with self._scan_lock:
+                res = list(self._latest_scan_result) if self._latest_scan_result else None
+            if not res or res[0] < 0.5:
+                self._log_err(
+                    f'빈자리 후보 없음(시도 {attempt + 1}/{SCAN_MAX_RESCANS + 1}) — 재스캔')
+                continue
+
+            # res = [found, cx, cy, w, h, angle, capture_index, score]
+            cx, cy, w, h, angle = res[1], res[2], res[3], res[4], res[5]
+            cap_idx = int(round(res[6]))
+            if not (0 <= cap_idx < len(DISPLAY_SCAN_ANGLES)):
+                self._log_err(f'capture_index 범위 밖({cap_idx}) — center 자세로 대체')
+                cap_idx = len(DISPLAY_SCAN_ANGLES) // 2
+            self._scan_winner = {
+                'pose': DISPLAY_SCAN_ANGLES[cap_idx],
+                'bbox': [cx, cy, w, h, angle],
+            }
+            self._log(
+                f'SCANNING 완료 — 우승 capture #{cap_idx}, bbox center=({cx:.0f},{cy:.0f}), '
+                f'score={res[7]:.3f}')
+            return True, 0
+
+        self._log_err('SCANNING 실패 — 재스캔 한도 초과(빈자리 없음). 진열 보류.')
+        return False, 0
+
     def run_placing(self, product_name: str = '', target_zone_name: str = '') -> tuple[bool, int]:
-        """진열(DISPLAY_PLACE) 동작. [구현 필요] 실제 진열 궤적/위치 연동."""
+        """DISPLAY_PLACE: picky 에 실린 product 를 모두 진열한다.
+
+        picky 자체 slot DB(_slot_occupant) 기준으로 해당 product 가 실린 모든 슬롯에 대해
+        [슬롯 재파지 -> 빈자리 재스캔 -> IBVS+NN 배치] 를 반복한다. 각 배치가 선반을 바꾸므로
+        unit 마다 다시 스캔한다(별도 DISPLAY_SCAN task 는 사전 가용성 점검 역할).
+        반환값: (success, 진열한 개수)
+        """
         self._log(f'PLACING 시작 — product={product_name}, zone={target_zone_name}')
         if self._dry_run:
-            return True, 1
-        # [구현 필요] 진열 위치로 이동 후 내려놓는 실제 동작.
-        return True, 1
+            n = sum(1 for o in self._slot_occupant if o == product_name)
+            for i, o in enumerate(self._slot_occupant):
+                if o == product_name:
+                    self._slot_occupant[i] = None
+            self._scan_winner = None
+            self._log(f'(dry_run) {n}개 진열 시뮬레이션')
+            return (n > 0), n
+
+        if self._slot_for_product(product_name) is None:
+            self._log_err(f'picky 에 실린 {product_name} 없음 — 진열할 물건 없음')
+            return False, 0
+
+        placed = 0
+        while True:
+            slot = self._slot_for_product(product_name)
+            if slot is None:
+                break  # 해당 product 모두 진열 완료
+
+            self._log(f'진열 unit {placed + 1} — slot {slot} 재파지')
+            if not self._regrasp_from_slot(slot):
+                self._log_err(f'slot {slot} 재파지 실패 — 진열 중단')
+                return False, placed
+
+            # 선반이 바뀌었으므로 unit 마다 재스캔(빈자리 재선정).
+            ok, _ = self.run_scanning(product_name, target_zone_name)
+            if not ok:
+                self._log_err('빈자리 없음(재스캔 실패) — 물건을 쥔 채 진열 중단')
+                return False, placed
+
+            if not self._place_at_scanned(product_name):
+                self._log_err('배치 실패 — 진열 중단')
+                return False, placed
+
+            self._slot_occupant[slot] = None  # 진열 성공 -> 슬롯 비움
+            placed += 1
+            self._log(f'진열 unit {placed} 완료 — slot {slot} 비움')
+
+        self._log(f'PLACING 완료 — 총 {placed}개 진열')
+        return (placed > 0), placed
+
+    def _regrasp_from_slot(self, slot: int) -> bool:
+        """picky 슬롯에서 적재된 물건을 재파지한다.
+
+        approach -> gripper 70% 선개방 -> pick(place 각도로 하강) -> close -> approach(들어올림).
+        슬롯은 picky 에 고정이라 정차 오차와 무관하게 고정 2단계 접근을 쓴다.
+        """
+        approach = LOAD_SLOT_ANGLES[slot]['approach']
+        place    = LOAD_SLOT_ANGLES[slot]['place']
+        if not self.move_to_angles(approach):
+            return False
+        if not self._set_gripper(GRIPPER_LOAD_OPEN):  # pick 전 70% 선개방
+            return False
+        if not self.move_to_angles(place):
+            return False
+        if not self.close_gripper():                  # 집기
+            return False
+        if not self.move_to_angles(approach):         # 들어올림
+            return False
+        return True
+
+    def _place_at_scanned(self, product_name: str) -> bool:
+        """run_scanning 이 선정한 빈자리로 IBVS+NN 배치를 1회 수행한다.
+
+        우승 스캔 자세로 복귀(스캔 시점과 동일 시야) -> bbox latched 발행(CSRT init) ->
+        display_place_agent 요청(agent 가 place_servo 기동, gripper open 관측을 완료로 보고).
+        """
+        if self._scan_winner is None:
+            self._log_err('스캔 우승 자리 없음 — 배치 불가')
+            return False
+        pose = self._scan_winner.get('pose')
+        bbox = self._scan_winner.get('bbox')
+        if pose is not None and not self.move_to_angles(pose):
+            self._log_err('스캔 우승 자세 복귀 실패')
+            return False
+
+        msg = Float64MultiArray()
+        msg.data = [float(v) for v in bbox]
+        self._target_bbox_pub.publish(msg)
+        time.sleep(0.3)
+
+        if not self._place.pick(product_name):
+            self._log_err('display_place_agent 미응답 또는 배치 실패')
+            return False
+        self._scan_winner = None
+        return True
+
+    def _scan_result_callback(self, msg: Float64MultiArray) -> None:
+        if len(msg.data) < 8:
+            return
+        with self._scan_lock:
+            self._latest_scan_result = list(msg.data)
+        self._scan_event.set()
 
     def stow_arm(self) -> bool:
         """팔을 안전 복귀 자세(home)로 이동한다."""
