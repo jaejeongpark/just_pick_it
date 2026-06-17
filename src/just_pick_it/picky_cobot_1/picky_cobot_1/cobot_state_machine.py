@@ -374,6 +374,15 @@ class CobotStateManager(Node):
             # 적재된 모든 item 을 PICKUP SLOT 으로 이송 drop.
             return self._controller.run_unloading()
 
+        elif phase == 'SCANNING':
+            # 진열대를 스윕하며 빈자리 후보 누적 -> 최적 1곳 선정(우승 자세/bbox 는
+            # controller 가 보관해 DISPLAY_PLACE 에서 사용). 빈자리 없으면 실패(재스캔 한도 내).
+            success, qty = self._controller.run_scanning(
+                request.product_name, request.target_zone_name
+            )
+            self._scan_result = success
+            return success, qty
+
         elif phase == 'PLACING':
             success, qty = self._controller.run_placing(
                 request.product_name, request.target_zone_name

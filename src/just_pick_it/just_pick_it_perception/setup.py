@@ -57,6 +57,9 @@ setup(
             'episode_replay_tester = just_pick_it_perception.episode_replay_tester_node:main',
             'nn_controller = just_pick_it_perception.nn_controller_node:main',
             'shelf_place_planner = just_pick_it_perception.shelf_place_planner_node:main',
+            'empty_slot_detector = just_pick_it_perception.empty_slot_detector_node:main',
+            'csrt_place_tracker = just_pick_it_perception.csrt_place_tracker_node:main',
+            'place_finalizer = just_pick_it_perception.place_finalizer_node:main',
         ],
     },
 )
