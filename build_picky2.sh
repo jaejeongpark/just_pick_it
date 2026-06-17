@@ -6,6 +6,7 @@
 # 사용 예:
 #   ./build_picky2.sh
 #   ./build_picky2.sh --clean
+#   ./build_picky2.sh --no-symlink-install --clean
 #   ./build_picky2.sh --event-handlers console_direct+
 set -euo pipefail
 
@@ -28,16 +29,18 @@ REQUIRED_PACKAGES=(
 
 CLEAN=false
 COLCON_ARGS=()
-HAS_SYMLINK_INSTALL=false
+USE_SYMLINK_INSTALL=true
 
 for arg in "$@"; do
   case "$arg" in
     --clean)
       CLEAN=true
       ;;
+    --no-symlink-install)
+      USE_SYMLINK_INSTALL=false
+      ;;
     --symlink-install)
-      HAS_SYMLINK_INSTALL=true
-      COLCON_ARGS+=("$arg")
+      USE_SYMLINK_INSTALL=true
       ;;
     *)
       COLCON_ARGS+=("$arg")
@@ -45,7 +48,7 @@ for arg in "$@"; do
   esac
 done
 
-if [ "$HAS_SYMLINK_INSTALL" = false ]; then
+if [ "$USE_SYMLINK_INSTALL" = true ]; then
   COLCON_ARGS=(--symlink-install "${COLCON_ARGS[@]}")
 fi
 
