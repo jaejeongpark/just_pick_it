@@ -1015,6 +1015,14 @@ class ReverseDocking(Node):
             center = marker_corners.mean(axis=0)
             detection = (tvec.flatten(), rvec.flatten(), center)
             self._remember_target_detection(int(marker_id), float(detection[0][0]))
+            alignment = None
+            if phase == "REVERSE_INSERT" and self._reverse_lane_axis_enabled:
+                alignment = self._update_lane_axis_error(
+                    frame,
+                    corners,
+                    ids,
+                    target_id,
+                )
             self._record_debug_frame(
                 frame,
                 phase,
@@ -1023,6 +1031,7 @@ class ReverseDocking(Node):
                 ids=ids,
                 detection=detection,
                 status="target detected",
+                alignment=alignment,
             )
             return detection
 
@@ -1576,6 +1585,48 @@ class ReverseDocking(Node):
         cross = float(axis[0] * lane[1] - axis[1] * lane[0])
         return math.degrees(math.atan2(cross, dot))
 
+    def _compute_lane_axis_alignment(self, frame, corners, ids, target_id: int):
+        lane = self._detect_lane_center(frame)
+        axis = None
+        axis_error = None
+        axis_angle_error = None
+        closest = None
+
+        target_corners = self._target_marker_corners(corners, ids, target_id)
+        marker_axis = self._marker_normal_axis_px(target_corners)
+        if marker_axis is not None:
+            axis_origin, axis_direction = marker_axis
+            axis = (axis_origin, axis_direction)
+            if lane is not None and lane["lane_center_point"] is not None:
+                axis_error, closest = self._axis_error_px(
+                    lane["lane_center_point"],
+                    axis_origin,
+                    axis_direction,
+                )
+                if lane["lane_centerline"] is not None:
+                    axis_angle_error = self._axis_angle_error_deg(
+                        lane["lane_centerline"]["direction"],
+                        axis_direction,
+                    )
+
+        return {
+            "lane": lane,
+            "axis": axis,
+            "axis_error": axis_error,
+            "axis_angle_error": axis_angle_error,
+            "closest": closest,
+        }
+
+    def _update_lane_axis_error(self, frame, corners, ids, target_id: int):
+        alignment = self._compute_lane_axis_alignment(frame, corners, ids, target_id)
+        axis_error = alignment["axis_error"]
+        self._last_lane_axis_error_px = axis_error
+        self._last_lane_axis_angle_error_deg = (
+            alignment["axis_angle_error"] if axis_error is not None else None
+        )
+        self._last_lane_axis_error_time = time.time() if axis_error is not None else 0.0
+        return alignment
+
     # ------------------------------------------------------------------ #
     # Debug image helpers
     # ------------------------------------------------------------------ #
@@ -1602,6 +1653,7 @@ class ReverseDocking(Node):
         ids,
         detection,
         status: str,
+        alignment=None,
     ) -> None:
         if not self._debug_enabled:
             return
@@ -1615,7 +1667,14 @@ class ReverseDocking(Node):
         height, width = overlay.shape[:2]
         center_x = width // 2
         center_y = height // 2
-        lane = self._detect_lane_center(frame)
+        if alignment is None:
+            alignment = self._compute_lane_axis_alignment(
+                frame,
+                corners,
+                ids,
+                target_id,
+            )
+        lane = alignment["lane"]
 
         cv2.line(overlay, (center_x, 0), (center_x, height), (0, 255, 255), 1)
         cv2.line(overlay, (0, center_y), (width, center_y), (80, 80, 80), 1)
@@ -1704,71 +1763,58 @@ class ReverseDocking(Node):
 
         axis_error = None
         axis_angle_error = None
-        if detection is not None:
-            target_corners = self._target_marker_corners(corners, ids, target_id)
-            axis = self._marker_normal_axis_px(target_corners)
-            if axis is not None:
-                axis_origin, axis_direction = axis
-                axis_end = self._ray_end_in_image(
-                    axis_origin,
-                    axis_direction,
-                    width,
-                    height,
+        if detection is not None and alignment["axis"] is not None:
+            axis_origin, axis_direction = alignment["axis"]
+            axis_error = alignment["axis_error"]
+            axis_angle_error = alignment["axis_angle_error"]
+            axis_end = self._ray_end_in_image(
+                axis_origin,
+                axis_direction,
+                width,
+                height,
+            )
+            cv2.line(
+                overlay,
+                tuple(axis_origin.astype(int)),
+                tuple(axis_end.astype(int)),
+                (0, 255, 0),
+                3,
+            )
+            cv2.putText(
+                overlay,
+                "marker normal axis",
+                tuple((axis_origin + axis_direction * 36.0).astype(int)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (0, 255, 0),
+                2,
+                cv2.LINE_AA,
+            )
+
+            if (
+                lane is not None
+                and lane["lane_center_point"] is not None
+                and alignment["closest"] is not None
+            ):
+                closest = alignment["closest"]
+                lane_point = np.array(
+                    lane["lane_center_point"],
+                    dtype=np.float64,
                 )
                 cv2.line(
                     overlay,
-                    tuple(axis_origin.astype(int)),
-                    tuple(axis_end.astype(int)),
-                    (0, 255, 0),
-                    3,
-                )
-                cv2.putText(
-                    overlay,
-                    "marker normal axis",
-                    tuple((axis_origin + axis_direction * 36.0).astype(int)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.55,
-                    (0, 255, 0),
+                    tuple(lane_point.astype(int)),
+                    tuple(closest.astype(int)),
+                    (255, 255, 255),
                     2,
-                    cv2.LINE_AA,
                 )
-
-                if lane is not None and lane["lane_center_point"] is not None:
-                    axis_error, closest = self._axis_error_px(
-                        lane["lane_center_point"],
-                        axis_origin,
-                        axis_direction,
-                    )
-                    lane_point = np.array(
-                        lane["lane_center_point"],
-                        dtype=np.float64,
-                    )
-                    cv2.line(
-                        overlay,
-                        tuple(lane_point.astype(int)),
-                        tuple(closest.astype(int)),
-                        (255, 255, 255),
-                        2,
-                    )
-                    cv2.circle(
-                        overlay,
-                        tuple(closest.astype(int)),
-                        7,
-                        (255, 255, 255),
-                        -1,
-                    )
-                    if lane["lane_centerline"] is not None:
-                        axis_angle_error = self._axis_angle_error_deg(
-                            lane["lane_centerline"]["direction"],
-                            axis_direction,
-                        )
-
-        if phase == "REVERSE_INSERT":
-            self._last_lane_axis_error_px = axis_error
-            self._last_lane_axis_angle_error_deg = (
-                axis_angle_error if axis_error is not None else None
-            )
-            self._last_lane_axis_error_time = now if axis_error is not None else 0.0
+                cv2.circle(
+                    overlay,
+                    tuple(closest.astype(int)),
+                    7,
+                    (255, 255, 255),
+                    -1,
+                )
 
         lines = [
             f"phase={phase}",

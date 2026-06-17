@@ -1034,18 +1034,10 @@ class FleetRepository:
     def _has_active_auto_display_context(self, db) -> bool:
         """주문 생성 시점에 자동진열을 즉시 queue해도 되는 흐름이 있는지 확인한다.
 
-        이미 IN_PROGRESS인 진열에는 새 주문의 부족 상품을 붙이지 않는다. 아직 수행 전인
-        진열이 있거나 다른 주문 흐름이 진행 중일 때만 주문 생성 시점에 자동 진열을 queue한다.
+        아직 수행 전인 진열 batch가 있으면 거기에 붙일 수 있으므로 즉시 queue한다.
+        없으면 해당 주문의 MOVE_TO_PRODUCT가 실제 RUNNING 된 뒤 자동진열을 생성한다.
         """
-        if has_appendable_display_item(db):
-            return True
-
-        return (
-            db.query(Order)
-            .filter(Order.status.in_(("SORTING", "DELIVERING", "INSPECTING")))
-            .first()
-            is not None
-        )
+        return has_appendable_display_item(db)
 
     def list_requested_display_items(self) -> list[dict[str, Any]]:
         """REQUESTED 상태의 display_item 목록을 조회한다."""

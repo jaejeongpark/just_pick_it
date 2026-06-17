@@ -1501,7 +1501,7 @@ class TaskManager:
         )
 
     def _process_new_display_item(self, display_item: dict[str, Any]) -> list[int]:
-        """display_item 1건을 진열 task 5개로 변환한다."""
+        """display_item 1건을 진열 task 4개로 변환한다."""
         appended_task_ids = self._append_display_item_to_open_batch(display_item)
         if appended_task_ids:
             return appended_task_ids
@@ -1659,7 +1659,7 @@ class TaskManager:
         base_sequence_no: int = 1,
         current_zone: str | None = None,
     ) -> list[int]:
-        """진열 요청 1건에 대한 task 5개를 생성한다."""
+        """진열 요청 1건에 대한 task 4개를 생성한다."""
         priority = int(display_work.get("priority") or 2)
         display_item_id = int(display_work["display_item_id"])
         display_batch_id = int(display_work.get("display_batch_id") or display_item_id)
@@ -1698,16 +1698,6 @@ class TaskManager:
             ),
             self._build_task_payload(
                 sequence_no=base_sequence_no + 3,
-                task_type="DISPLAY_SCAN",
-                assigned_robot_name=display_work["cobot_name"],
-                display_item_id=display_item_id,
-                display_batch_id=display_batch_id,
-                source_zone_name=display_work["product_slot_name"],
-                target_zone_name=display_work["product_slot_name"],
-                priority=priority,
-            ),
-            self._build_task_payload(
-                sequence_no=base_sequence_no + 4,
                 task_type="DISPLAY_PLACE",
                 assigned_robot_name=display_work["cobot_name"],
                 display_item_id=display_item_id,
@@ -2987,9 +2977,22 @@ class TaskManager:
 
         if task_type in PATH_RESERVED_TASK_TYPES and robot_name:
             waypoints = self._move_waypoints_by_task.get(task_id)
-            if task_succeeded and waypoints and task_type in MOVE_TASK_TYPES:
-                self._completed_move_target_by_task[task_id] = waypoints[-1]
-            self._traffic.release_path(robot_name, task_id)
+            arrival_zone = waypoints[-1] if waypoints else None
+            if task_succeeded and arrival_zone and task_type in MOVE_TASK_TYPES:
+                self._completed_move_target_by_task[task_id] = arrival_zone
+            # MOVE 성공으로 WAITING_FOR_COBOT 도착 zone 에 머무는 경우, 경로 예약은
+            # 해제하되 그 zone 점유는 유지한다. release_path 로 path 를 싹 비우면
+            # 도착 로봇이 서 있는 zone 이 TrafficManager 엔 빈 곳으로 보여, 다른
+            # 로봇이 그리로 경로를 만들어 충돌한다(STOCK/PRODUCT/PICKUP 도착 공통).
+            if (
+                task_succeeded
+                and arrival_zone
+                and task_type in MOVE_TASK_TYPES
+                and RECOVERY_ARRIVAL_STATE.get(task_type) == "WAITING_FOR_COBOT"
+            ):
+                self._traffic.hold_occupancy(robot_name, str(arrival_zone))
+            else:
+                self._traffic.release_path(robot_name, task_id)
             self._move_waypoints_by_task.pop(task_id, None)
 
         if task_type in COBOT_TASK_TYPES:

@@ -23,11 +23,12 @@ from .cobot_controller import CobotController
 # task_type → 작업 단계에서 순서대로 거치는 cobot_state 목록.
 # STOWING_ARM 은 모든 task 에서 공통으로 마지막에 발행된다.
 # 상태값은 DB cobot_state ENUM 과 일치해야 한다.
+# DISPLAY_PLACE 는 picky 에 실린 해당 product 개수만큼 [슬롯 재파지 -> 빈자리 스캔 ->
+# IBVS+NN 배치] 를 반복한다(스캔은 PLACING 내부 단계라 별도 task 가 아니다).
 TASK_PHASE_STATES = {
     'SORTING_AND_LOAD': ['SORTING', 'LOADING'],
     'INSPECTION':       ['INSPECTING'],
     'UNLOAD':           ['UNLOADING'],
-    'DISPLAY_SCAN':     ['SCANNING'],
     'DISPLAY_PLACE':    ['PLACING']
 }
 
@@ -73,9 +74,6 @@ class CobotStateManager(Node):
         self._lock = threading.Lock()
         self._cobot_state  = 'STANDBY'
         self._emergency_stop = False
-        # DISPLAY_SCAN 에서 받은 좌표를 DISPLAY_PLACE task 까지 보관한다.
-        # 두 task 가 별도 Action goal 로 전달되므로 노드 내부에서 유지한다.
-        self._scan_result = None
 
         # Action 과 서비스, 타이머를 동시에 처리하기 위해 ReentrantCallbackGroup 사용
         cb_group = ReentrantCallbackGroup()
@@ -106,8 +104,19 @@ class CobotStateManager(Node):
         # picky 적재 슬롯 수동 flush 서비스(UNLOADING 미연동 시 가득 참 해소용).
         self._flush_srv = self.create_service(
             Trigger,
-            f'{self._robot_id}/flush_loadout',
+            f'{self._robot_id.lower()}/flush_loadout',
             self._handle_flush_loadout,
+            callback_group=cb_group,
+        )
+
+        # [디버그] 가상 적재 주입 토픽. SORTING_AND_LOAD 없이 INSPECTION/UNLOAD/DISPLAY_PLACE
+        # 를 단독 테스트할 때, 쉼표로 구분한 상품 목록(예: "water,water,cream_bread")을 발행하면
+        # 적재 DB 를 그 순서대로 채운다(빈 문자열 발행 시 초기화).
+        self._seed_sub = self.create_subscription(
+            String,
+            f'{self._robot_id.lower()}/seed_loadout',
+            self._handle_seed_loadout,
+            10,
             callback_group=cb_group,
         )
 
@@ -375,12 +384,10 @@ class CobotStateManager(Node):
             return self._controller.run_unloading()
 
         elif phase == 'PLACING':
-            success, qty = self._controller.run_placing(
+            # picky 에 실린 product 개수만큼 [슬롯 재파지 -> 빈자리 스캔 -> IBVS+NN 배치] 반복.
+            return self._controller.run_placing(
                 request.product_name, request.target_zone_name
             )
-            if success:
-                self._scan_result = None
-            return success, qty
 
         return True, 0
 
@@ -426,6 +433,13 @@ class CobotStateManager(Node):
         response.message = f'{cleared} slot(s) cleared'
         self.get_logger().info(f'[CobotStateManager] 적재 flush — {cleared}개 슬롯 비움')
         return response
+
+    # ── 가상 적재 주입 콜백(디버그) ──────────────────────────────────────
+    def _handle_seed_loadout(self, msg: String) -> None:
+        products = [p for p in msg.data.split(',') if p.strip()]
+        seeded = self._controller.seed_loadout(products)
+        self.get_logger().info(
+            f'[CobotStateManager] 가상 적재 — {seeded}개: {products}')
 
     # ── 주기 상태 publish ──────────────────────────────────────────────
 

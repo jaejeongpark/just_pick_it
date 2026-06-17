@@ -16,9 +16,9 @@ amcl:
     laser_max_range: 100.0
     laser_min_range: -1.0
     laser_model_type: "likelihood_field"
-    max_beams: 60
+    max_beams: 50
     max_particles: 1500
-    min_particles: 500
+    min_particles: 400
     odom_frame_id: "odom"
     pf_err: 0.05
     pf_z: 0.99
@@ -315,10 +315,10 @@ obstacle_stop:
     # PICKY2 narrow-map safety filter. This is not obstacle avoidance; it only
     # reduces/blocks forward velocity when a very close object is directly ahead.
     front_angle_center_rad: 3.141592653589793
-    front_angle_limit_rad: 0.10
-    slow_distance_m: 0.12
-    stop_distance_m: 0.10
-    hard_stop_distance_m: 0.08
+    front_angle_limit_rad: 0.17
+    slow_distance_m: 0.10
+    stop_distance_m: 0.08
+    hard_stop_distance_m: 0.07
     max_decel_mps2: 0.40
     allow_rotation_when_blocked: true
 

@@ -29,10 +29,10 @@
     # reverse_docking이 실제로 판단에 사용한 프레임에 marker box/center/tvec을
     # 그려서 publish한다. 별도 camera publisher를 켜지 않아도 RViz/rqt_image_view로
     # /picky2/docking/debug_image를 보면 도킹 중 시야를 확인할 수 있다.
-    debug_publish_image: true
+    debug_publish_image: false
     debug_image_topic: "docking/debug_image"
     debug_image_period_sec: 0.05
-    debug_save_failure_images: true
+    debug_save_failure_images: false
     debug_save_dir: "~/just_pick_it/bags/docking_debug"
     debug_save_frame_count: 12
 

@@ -8,7 +8,7 @@ result 를 실시간으로 확인한다. 여러 task 를 큐에 넣고 result �
 
 실행:
   ros2 run picky_cobot_1 task_debug_gui
-  (cobot_state_manager 가 떠 있어야 한다. 액션 이름 기본값은 /COBOT1/execute_task)
+  (cobot_state_manager 가 떠 있어야 한다. 액션 이름 기본값은 /cobot1/execute_task)
 
 스레드 모델:
   - rclpy executor 는 백그라운드 스레드에서 spin.
@@ -25,6 +25,7 @@ from tkinter.scrolledtext import ScrolledText
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
+from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 from just_pick_it_interfaces.action import ExecuteTask
@@ -34,7 +35,6 @@ TASK_TYPES = [
     'SORTING_AND_LOAD',
     'INSPECTION',
     'UNLOAD',
-    'DISPLAY_SCAN',
     'DISPLAY_PLACE',
 ]
 
@@ -49,6 +49,7 @@ class TaskDebugGUI:
 
         self._client: ActionClient | None = None
         self._flush_client = None
+        self._seed_pub = None
         self._goal_handle = None
         self._auto_run = False
         self._next_task_id = 1
@@ -69,7 +70,7 @@ class TaskDebugGUI:
         conn = ttk.LabelFrame(self._root, text='연결')
         conn.grid(row=0, column=0, columnspan=2, sticky='ew', padx=6, pady=4)
         ttk.Label(conn, text='Action:').grid(row=0, column=0, **pad)
-        self._action_var = tk.StringVar(value='/COBOT1/execute_task')
+        self._action_var = tk.StringVar(value='/cobot1/execute_task')
         ttk.Entry(conn, textvariable=self._action_var, width=32).grid(row=0, column=1, **pad)
         ttk.Button(conn, text='재연결', command=self._connect).grid(row=0, column=2, **pad)
         self._server_var = tk.StringVar(value='서버 확인 중...')
@@ -134,11 +135,21 @@ class TaskDebugGUI:
         status = ttk.LabelFrame(self._root, text='현재 상태')
         status.grid(row=2, column=0, columnspan=2, sticky='ew', padx=6, pady=4)
         self._cur_var = tk.StringVar(value='대기 중')
-        ttk.Label(status, textvariable=self._cur_var).grid(row=0, column=0, sticky='w', **pad)
+        ttk.Label(status, textvariable=self._cur_var).grid(
+            row=0, column=0, columnspan=2, sticky='w', **pad)
         self._progress = ttk.Progressbar(status, length=420, maximum=1.0)
-        self._progress.grid(row=1, column=0, sticky='w', **pad)
+        self._progress.grid(row=1, column=0, columnspan=2, sticky='w', **pad)
         ttk.Button(status, text='바구니 flush(적재 초기화)', command=self._flush_loadout).grid(
-            row=0, column=1, sticky='e', **pad)
+            row=0, column=2, sticky='e', **pad)
+
+        # 가상 적재(디버그): SORTING_AND_LOAD 없이 적재 DB 를 주입해 INSPECTION/UNLOAD/
+        # DISPLAY_PLACE 단독 테스트. 쉼표로 구분(적재 순서 = 슬롯 0,1,2,3). 빈 값=초기화.
+        ttk.Label(status, text='가상 적재(쉼표구분):').grid(row=2, column=0, sticky='e', **pad)
+        self._seed_var = tk.StringVar(value='water,water,cream_bread')
+        ttk.Entry(status, textvariable=self._seed_var, width=40).grid(
+            row=2, column=1, sticky='w', **pad)
+        ttk.Button(status, text='적재 주입(seed)', command=self._seed_loadout).grid(
+            row=2, column=2, sticky='e', **pad)
 
         # 로그.
         logf = ttk.LabelFrame(self._root, text='Feedback / Result 로그')
@@ -158,12 +169,18 @@ class TaskDebugGUI:
         if self._client is not None:
             self._client.destroy()
         self._client = ActionClient(self._node, ExecuteTask, action_name)
-        # flush 서비스는 액션 이름에서 파생: /COBOT1/execute_task -> /COBOT1/flush_loadout
+        # flush 서비스는 액션 이름에서 파생: /cobot1/execute_task -> /cobot1/flush_loadout
         flush_name = (action_name.rsplit('/', 1)[0] + '/flush_loadout'
                       if '/' in action_name else 'flush_loadout')
         if self._flush_client is not None:
             self._node.destroy_client(self._flush_client)
         self._flush_client = self._node.create_client(Trigger, flush_name)
+        # seed 토픽도 액션 이름에서 파생: /cobot1/execute_task -> /cobot1/seed_loadout
+        seed_name = (action_name.rsplit('/', 1)[0] + '/seed_loadout'
+                     if '/' in action_name else 'seed_loadout')
+        if self._seed_pub is not None:
+            self._node.destroy_publisher(self._seed_pub)
+        self._seed_pub = self._node.create_publisher(String, seed_name, 10)
         self._server_var.set('서버 확인 중...')
         threading.Thread(target=self._check_server, daemon=True).start()
 
@@ -185,6 +202,18 @@ class TaskDebugGUI:
             self._ui_queue.put(('log', f'[flush] success={resp.success} :: {resp.message}'))
         except Exception as exc:  # noqa: BLE001
             self._ui_queue.put(('log', f'[flush] 오류: {exc}'))
+
+    def _seed_loadout(self) -> None:
+        if self._seed_pub is None:
+            self._append_log('[seed] 퍼블리셔 미생성 — 재연결 후 다시 시도')
+            return
+        text = self._seed_var.get().strip()
+        msg = String()
+        msg.data = text
+        self._seed_pub.publish(msg)
+        self._append_log(
+            f'[seed] 가상 적재 발행: {text or "(빈 값 = 적재 초기화)"} '
+            '(cobot_state_manager 로그에서 결과 확인)')
 
     def _check_server(self) -> None:
         ok = self._client.wait_for_server(timeout_sec=3.0)
