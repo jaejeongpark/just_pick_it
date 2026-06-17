@@ -16,9 +16,9 @@ amcl:
     laser_max_range: 100.0
     laser_min_range: -1.0
     laser_model_type: "likelihood_field"
-    max_beams: 40
-    max_particles: 1000
-    min_particles: 300
+    max_beams: 50
+    max_particles: 1500
+    min_particles: 400
     odom_frame_id: "odom"
     pf_err: 0.05
     pf_z: 0.99
@@ -101,7 +101,7 @@ controller_server:
     general_goal_checker:
       stateful: True
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.015
+      xy_goal_tolerance: 0.01
       yaw_goal_tolerance: 0.10
 
     # ★ 여기부터: Regulated Pure Pursuit 컨트롤러 설정
