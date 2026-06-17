@@ -106,7 +106,7 @@ class CobotStateManager(Node):
         # picky 적재 슬롯 수동 flush 서비스(UNLOADING 미연동 시 가득 참 해소용).
         self._flush_srv = self.create_service(
             Trigger,
-            f'{self._robot_id}/flush_loadout',
+            f'{self._robot_id.lower()}/flush_loadout',
             self._handle_flush_loadout,
             callback_group=cb_group,
         )
