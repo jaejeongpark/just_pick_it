@@ -62,20 +62,20 @@ INSPECTION_POSE = [20.39, -7.29, -28.82, -50.44, 5.36, -110.65]
 # 슬롯 4개 = picky 바구니 용량(공간 협소). 단위: degree, [J1..J6].
 LOAD_SLOT_ANGLES = [
     {  # slot 0 (item 1)
-        'approach': [7.38, -33.83, -49.92, -7.38, 3.60, -125.59],
-        'place':    [6.41, -37.79, -65.47, 14.32, 4.30, -124.45],
+        'approach': [7.99, -41.04, -8.70, -40.42, 3.16, -124.01],
+        'place':    [7.03, -35.06, -62.40, 7.20, 4.04, -124.01],
     },
     {  # slot 1 (item 2)
-        'approach': [11.33, -14.15, -64.59, -14.50, 4.39, -121.46],
-        'place':    [9.93, -15.02, -96.32, 18.01, 6.15, -120.76],
+        'approach': [6.67, -16.08, -43.24, -33.04, 3.77, -124.01],
+        'place':    [6.50, -14.58, -92.02, 13.97, 5.00, -124.01],
     },
     {  # slot 2 (item 3)
-        'approach': [26.71, -36.47, -44.20, -11.77, 3.60, -108.10],
-        'place':    [24.96, -39.11, -60.55, 7.73, 4.39, -111.35],
+        'approach': [31.20, -20.12, -28.47, -43.68, 2.63, -98.26],
+        'place':    [31.37, -14.06, -92.90, 13.71, 2.54, -98.26],
     },
     {  # slot 3 (item 4)
-        'approach': [29.61, -6.76, -71.98, -13.35, 4.57, -101.25],
-        'place':    [29.53, -15.02, -98.70, 21.97, 4.04, -102.56],
+        'approach': [23.37, -35.06, -23.73, -32.08, 4.48, -105.46],
+        'place':    [23.73, -36.38, -61.25, 7.47, 4.57, -105.46],
     },
 ]
 
@@ -296,7 +296,7 @@ class CobotController:
         return True, dropped
 
     def run_scanning(self, product_name: str = '', target_zone_name: str = '') -> tuple[bool, int]:
-        """DISPLAY_SCAN: 진열대를 스윕하며 빈자리 후보를 누적하고 최적 1곳을 선정한다.
+        """DISPLAY_PLACE 내부 스캔 단계: 진열대를 스윕하며 빈자리 후보를 누적하고 최적 1곳을 선정한다.
 
         empty_slot_detector(AI 컴퓨터 상시 가동)에 reset -> capture_view(자세별) -> plan 을
         트리거한다. plan 결과(/place/scan_result)가 found 면 우승 capture_index 로 복귀할
@@ -365,9 +365,10 @@ class CobotController:
     def run_placing(self, product_name: str = '', target_zone_name: str = '') -> tuple[bool, int]:
         """DISPLAY_PLACE: picky 에 실린 product 를 모두 진열한다.
 
-        picky 자체 slot DB(_slot_occupant) 기준으로 해당 product 가 실린 모든 슬롯에 대해
-        [슬롯 재파지 -> 빈자리 재스캔 -> IBVS+NN 배치] 를 반복한다. 각 배치가 선반을 바꾸므로
-        unit 마다 다시 스캔한다(별도 DISPLAY_SCAN task 는 사전 가용성 점검 역할).
+        DISPLAY task 발행 시점엔 이미 SORTING_AND_LOAD 로 해당 product 가 picky 에 실려 있고,
+        로봇은 그 product 진열대 앞에 있다는 전제다. picky 자체 slot DB(_slot_occupant) 에서
+        해당 product 가 실린 모든 슬롯에 대해 [슬롯 재파지(LOAD_SLOT_ANGLES 매핑) -> 빈자리
+        스캔 -> IBVS+NN 배치] 를 반복한다. 각 배치가 선반을 바꾸므로 unit 마다 다시 스캔한다.
         반환값: (success, 진열한 개수)
         """
         self._log(f'PLACING 시작 — product={product_name}, zone={target_zone_name}')
@@ -577,6 +578,32 @@ class CobotController:
     def current_loadout(self) -> dict[int, str]:
         """현재 슬롯별 적재 상품(점유된 슬롯만): {slot: product_name}."""
         return {i: occ for i, occ in enumerate(self._slot_occupant) if occ is not None}
+
+    def seed_loadout(self, products: list[str]) -> int:
+        """[디버그] 실제 픽 없이 적재 DB(_slot_occupant/_placements)를 가상으로 채운다.
+
+        products 를 적재 순서대로 빈 슬롯 0번부터 채운다(용량 초과분은 버림). 기존 적재는
+        먼저 비운다. SORTING_AND_LOAD 를 거치지 않고 INSPECTION/UNLOAD/DISPLAY_PLACE 를
+        단독 테스트할 때 쓴다. 내부 상태만 바꿀 뿐 실제 로봇은 움직이지 않는다.
+        반환값: 채운 슬롯 개수.
+        """
+        self._slot_occupant = [None] * len(LOAD_SLOT_ANGLES)
+        self._placements.clear()
+        seeded = 0
+        for raw in products:
+            product = raw.strip()
+            if not product:
+                continue
+            slot = self._next_free_slot()
+            if slot is None:
+                self._log_err(
+                    f'seed: 슬롯 용량({len(LOAD_SLOT_ANGLES)}) 초과 — 나머지 무시')
+                break
+            self._slot_occupant[slot] = product
+            self._placements.append({'slot': slot, 'product_name': product, 'order_id': 0})
+            seeded += 1
+        self._log(f'[디버그] 가상 적재 — {seeded}개: {self.current_loadout}')
+        return seeded
 
     def flush_loadout(self) -> int:
         """picky 적재 슬롯 점유와 적재 이력을 모두 비운다(수동 리셋용).
