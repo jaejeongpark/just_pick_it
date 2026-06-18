@@ -74,6 +74,8 @@ class CobotStateManager(Node):
         self._lock = threading.Lock()
         self._cobot_state  = 'STANDBY'
         self._emergency_stop = False
+        self._resume_event = threading.Event()
+        self._resume_event.set()
 
         # Action 과 서비스, 타이머를 동시에 처리하기 위해 ReentrantCallbackGroup 사용
         cb_group = ReentrantCallbackGroup()
@@ -96,7 +98,7 @@ class CobotStateManager(Node):
         # 이머전시 정지/재개 서비스 서버
         self._emergency_srv = self.create_service(
             EmergencyControl,
-            'emergency_control',
+            f'{self._robot_id.lower()}/emergency_control',
             self._handle_emergency,
             callback_group=cb_group,
         )
@@ -262,16 +264,18 @@ class CobotStateManager(Node):
                     )
 
                 with self._lock:
-                    if self._emergency_stop:
-                        self._set_state('SAFETY_STOPPED')
-                        goal_handle.abort()
-                        return ExecuteTask.Result(
-                            success=False,
-                            status='FAILED',
-                            message='emergency stop triggered',
-                            processed_quantity=processed_qty,
-                            stock_delta=0,
-                        )
+                    paused = self._emergency_stop
+                if paused:
+                    self._set_state('SAFETY_STOPPED')
+                    feedback.state   = 'SAFETY_STOPPED'
+                    feedback.message = 'emergency stop — waiting for resume'
+                    feedback.processed_quantity = processed_qty
+                    goal_handle.publish_feedback(feedback)
+                    self.get_logger().info(
+                        '[CobotStateManager] 비상정지 대기 — resume 시 작업 재개')
+                    self._resume_event.wait()
+                    self.get_logger().info(
+                        '[CobotStateManager] resume 수신 — 작업 재개')
 
                 self._set_state(phase)
                 feedback.state              = phase
@@ -402,23 +406,29 @@ class CobotStateManager(Node):
         request: EmergencyControl.Request,
         response: EmergencyControl.Response,
     ) -> EmergencyControl.Response:
-        # [구현 필요] EmergencyControl.Request 필드 확인 후 플래그 처리
-        #   정지 요청 시: self._emergency_stop = True, cobot_state → SAFETY_STOPPED
-        #                 robot.robot_status 는 Fleet Manager 가 EMERGENCY_STOP 으로 갱신
-        #   재개 요청 시: self._emergency_stop = False, cobot_state → STANDBY
+        stop = request.emergency_stop
+
         with self._lock:
-            # [구현 필요] EmergencyControl.Request 필드명 확정 후 조건 교체
-            # 아래는 request.stop (bool) 필드를 가정한 예시
-            stop = getattr(request, 'stop', True)
             self._emergency_stop = stop
 
         if stop:
+            self._resume_event.clear()
             self._controller.emergency_stop()
             self._set_state('SAFETY_STOPPED')
+            response.accepted = True
+            response.status = 'SAFETY_STOPPED'
+            response.message = f'emergency stop activated: {request.reason}'
+            self.get_logger().warn(
+                f'[CobotStateManager] 비상정지 — reason={request.reason}')
         else:
+            self._controller.emergency_resume()
             self._set_state('STANDBY')
+            self._resume_event.set()
+            response.accepted = True
+            response.status = 'STANDBY'
+            response.message = 'resumed from emergency stop'
+            self.get_logger().info('[CobotStateManager] 비상정지 해제 — 작업 재개')
 
-        # [구현 필요] response 필드 채워서 반환
         return response
 
     # ── 적재 슬롯 flush 서비스 콜백 ───────────────────────────────────────

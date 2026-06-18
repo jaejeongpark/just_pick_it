@@ -162,6 +162,9 @@ class CobotController:
         self._inspect_min_confidence = float(inspect_min_confidence)
         self._inspect_settle_sec     = float(inspect_settle_sec)
 
+        self._e_stop_event = threading.Event()
+        self._e_stop_event.set()
+
         # SORTING 픽은 local AI 컴퓨터의 ibvs_nn_pick_agent 에 토픽으로 요청한다.
         self._pick = IbvsNnPickClient(
             node,
@@ -753,16 +756,25 @@ class CobotController:
         """
         timeout = self._motion_timeout if timeout is None else timeout
         deadline = time.time() + timeout
-        time.sleep(0.3)  # 이동 시작 여유(send_angles 는 비동기)
+        time.sleep(0.3)
         stable = 0
         while time.time() < deadline:
+            if not self._e_stop_event.is_set():
+                self._log('비상정지 감지 — 이동 일시정지')
+                self._e_stop_event.wait()
+                self._log('비상정지 해제 — 이동 재개')
+                self._publish_joint(target, self._default_speed)
+                deadline = time.time() + timeout
+                stable = 0
+                time.sleep(0.3)
+                continue
             self._req_status_pub.publish(Empty())
             time.sleep(STATUS_POLL_INTERVAL_SEC)
             with self._status_lock:
                 angles = list(self._latest_angles) if self._latest_angles is not None else None
             if angles is not None and self._converged(angles, target):
                 stable += 1
-                if stable >= 2:  # 연속 2회 수렴 = 안정적 도착
+                if stable >= 2:
                     return True
             else:
                 stable = 0
@@ -770,11 +782,17 @@ class CobotController:
         return False
 
     def _wait_until_coords(self, target: list[float], timeout: float | None = None) -> bool:
-        # 위치(x,y,z) 수렴만 본다(자세는 생략). 단위 mm.
         timeout = self._motion_timeout if timeout is None else timeout
         deadline = time.time() + timeout
         time.sleep(0.3)
         while time.time() < deadline:
+            if not self._e_stop_event.is_set():
+                self._log('비상정지 감지 — 이동 일시정지')
+                self._e_stop_event.wait()
+                self._log('비상정지 해제 — 이동 재개')
+                deadline = time.time() + timeout
+                time.sleep(0.3)
+                continue
             self._req_status_pub.publish(Empty())
             time.sleep(STATUS_POLL_INTERVAL_SEC)
             with self._status_lock:
@@ -841,15 +859,25 @@ class CobotController:
     # ── 비상 정지 ────────────────────────────────────────────────────────
 
     def emergency_stop(self) -> None:
+        self._e_stop_event.clear()
         if self._dry_run:
+            self._log('(dry_run) emergency_stop')
             return
         with self._status_lock:
             angles = list(self._latest_angles) if self._latest_angles is not None else None
         if angles is None:
             return
-        # 현재 측정 자세를 목표로 발행해 추가 이동을 멈춘다(임시 hold).
-        # [구현 필요] 드라이버에 정식 stop 명령이 생기면 교체.
-        self._publish_joint(angles, self._default_speed)
+        msg = Float64MultiArray()
+        msg.data = [float(CMD_JOINT)] + [float(a) for a in angles] + [float(self._default_speed)]
+        self._target_pub.publish(msg)
+        self._log('비상정지 — 현재 자세 hold')
+
+    def emergency_resume(self) -> None:
+        if self._dry_run:
+            self._log('(dry_run) emergency_resume')
+        else:
+            self._log('비상정지 해제 — 동작 재개 준비')
+        self._e_stop_event.set()
 
     # ── status / detection 콜백 ──────────────────────────────────────────
 
