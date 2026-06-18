@@ -124,6 +124,7 @@ class ReverseDocking(Node):
         self.declare_parameter("yaw_hold_kp", 1.2)
         self.declare_parameter("reverse_lane_axis_enabled", True)
         self.declare_parameter("reverse_axis_target", "camera")
+        self.declare_parameter("reverse_camera_axis_angle_kp", 0.0020)
         self.declare_parameter("reverse_lane_axis_kp", 0.0025)
         self.declare_parameter("reverse_lane_axis_angle_kp", 0.0)
         self.declare_parameter("reverse_lane_axis_max_correction", 0.22)
@@ -294,6 +295,9 @@ class ReverseDocking(Node):
                 f"{self._reverse_axis_target!r}; using camera"
             )
             self._reverse_axis_target = "camera"
+        self._reverse_camera_axis_angle_kp = float(
+            self.get_parameter("reverse_camera_axis_angle_kp").value
+        )
         self._reverse_lane_axis_kp = float(
             self.get_parameter("reverse_lane_axis_kp").value
         )
@@ -799,9 +803,13 @@ class ReverseDocking(Node):
                         -self._reverse_lane_axis_kp * lane_axis_error
                     )
                     if lane_axis_angle_error is not None:
+                        angle_kp = (
+                            self._reverse_camera_axis_angle_kp
+                            if self._reverse_axis_target == "camera"
+                            else self._reverse_lane_axis_angle_kp
+                        )
                         lane_axis_raw_correction += (
-                            self._reverse_lane_axis_angle_kp
-                            * lane_axis_angle_error
+                            angle_kp * lane_axis_angle_error
                         )
                     lane_axis_correction = self._clamp_abs(
                         lane_axis_raw_correction,
