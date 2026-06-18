@@ -1,13 +1,13 @@
 /**/move_to_goal:
   ros__parameters:
     # Nav2를 끊고 직접 저속 정밀 접근으로 넘기는 거리.
-    precision_approach_distance: 0.03
+    precision_approach_distance: 0.05
 
     # 중간 waypoint는 정밀 접근 없이 이 거리 안에 들어오면 통과 처리한다.
     waypoint_reach_distance: 0.15
 
     # 직접 정밀 접근 단계의 최종 위치/yaw 허용 오차.
-    xy_goal_tolerance: 0.01
+    xy_goal_tolerance: 0.015
     yaw_goal_tolerance: 0.05
 
     # Nav2가 planner tolerance 안의 대체 goal에 도착했을 때 원 목표까지 이 거리 안이면
