@@ -21,7 +21,7 @@ DISPLAY_SCAN 단계에서 진열대 위 빈 공간을 이미지 평면에서 찾
 
 트리거:
   /place/reset         (Empty) : 누적 초기화(스윕 시작 전)
-  /place/capture_view  (Empty) : 현재 프레임에서 best 후보 1개 누적
+  /place/capture_view  (Empty) : 자세 1곳에서 여러 프레임을 샘플링해 안정 후보 1개 누적
   /place/plan          (Empty) : 누적 후보 전체에서 최적 1곳 선정 후 발행
 구독:
   infer/image_raw        (Image)              : 라이브 프레임
@@ -54,8 +54,12 @@ class EmptySlotDetectorNode(Node):
 
         self._latest_image = None
         self._latest_objects = []
-        # 누적 후보. 각 원소 = capture(자세) 하나의 best 후보 dict 또는 None.
+        # 누적 후보. 각 원소 = capture(자세) 하나의 안정 후보 dict 또는 None.
         self._captures = []
+        # capture 1회의 다중 프레임 샘플링 상태(단일스레드 executor 라 비동기로 누적).
+        self._sampling = False
+        self._sample_buf = []
+        self._sample_start = None
 
         self.create_subscription(Image, 'infer/image_raw', self._image_cb, 5)
         self.create_subscription(
@@ -106,6 +110,17 @@ class EmptySlotDetectorNode(Node):
 
         self.declare_parameter('bbox_scale', 1.0)
 
+        # 자세별 후보 안정화: 한 capture(자세)에서 여러 프레임을 샘플링해, 같은 위치에 반복
+        # 검출되는(안정적인) 후보만 채택한다. jitter/1프레임 허위검출 제거.
+        #   capture_sample_count : 한 capture 에서 detection 할 최대 프레임 수
+        #   capture_sample_sec   : 샘플링 최대 시간(이 시간 지나면 모인 프레임으로 확정)
+        #   capture_stable_tol_px: 같은 위치로 묶을 center 허용 오차(px)
+        #   capture_min_stable   : 채택에 필요한 최소 일관 검출 프레임 수(미만이면 후보 없음)
+        self.declare_parameter('capture_sample_count', 5)
+        self.declare_parameter('capture_sample_sec', 1.0)
+        self.declare_parameter('capture_stable_tol_px', 20.0)
+        self.declare_parameter('capture_min_stable', 3)
+
         # 라이브 디버그: >0 이면 트리거 없이 주기적으로 최신 프레임에 detection 을 돌려
         # /place/debug_image(점유/후보/best) 와 /place/debug_edges(Canny) 를 계속 발행한다.
         # 검증/튜닝용. 스캔 누적(_captures)에는 영향 없음. 0 이면 비활성(운영 기본).
@@ -115,27 +130,87 @@ class EmptySlotDetectorNode(Node):
 
     def _image_cb(self, msg: Image):
         self._latest_image = imgmsg_to_bgr(msg)
+        # 샘플링 중이면 프레임마다 detection 을 누적하고, 목표 프레임 수 또는 시간이 차면 확정.
+        if self._sampling:
+            self._sample_buf.append(self._detect_best_in_frame())
+            n = int(self.get_parameter('capture_sample_count').value)
+            win = float(self.get_parameter('capture_sample_sec').value)
+            elapsed = (self.get_clock().now() - self._sample_start).nanoseconds * 1e-9
+            if len(self._sample_buf) >= n or elapsed >= win:
+                self._finalize_capture()
 
     def _objects_cb(self, msg: TrackedObjectArray):
         self._latest_objects = list(msg.objects)
 
     def _reset_cb(self, _msg):
         self._captures.clear()
+        self._sampling = False
+        self._sample_buf = []
         self.get_logger().info('누적 초기화(reset).')
 
     def _capture_cb(self, _msg):
-        idx = len(self._captures)
-        best = self._detect_best_in_frame()
-        self._captures.append(best)
-        if best is None:
-            self.get_logger().info(f'capture #{idx}: 후보 없음.')
-        else:
-            self.get_logger().info(
-                f"capture #{idx}: center=({best['cx']:.0f},{best['cy']:.0f}), "
-                f"clear={best['clearance']:.0f}px, score={best['score']:.3f}")
+        # 한 자세의 다중 프레임 샘플링 시작. image_cb 가 누적 후 안정 후보 1개를 확정한다.
+        if self._sampling:
+            self.get_logger().warn(
+                'capture_view 수신했으나 이전 샘플링 진행 중 - 무시(스캔 간격을 늘릴 것).')
+            return
+        self._sampling = True
+        self._sample_buf = []
+        self._sample_start = self.get_clock().now()
 
     def _plan_cb(self, _msg):
+        # 샘플링이 끝나기 전에 plan 이 와도 모인 프레임으로 마지막 capture 를 확정한다.
+        if self._sampling:
+            self._finalize_capture()
         self._plan_and_publish()
+
+    def _finalize_capture(self):
+        """샘플 프레임들에서 안정적으로 반복 검출된 후보 1개를 골라 _captures 에 추가."""
+        self._sampling = False
+        buf = self._sample_buf
+        self._sample_buf = []
+        idx = len(self._captures)
+        stable = self._select_stable(buf)
+        self._captures.append(stable)
+        detected = sum(1 for c in buf if c is not None)
+        if stable is None:
+            self.get_logger().info(
+                f'capture #{idx}: 안정 후보 없음 (검출 {detected}/{len(buf)} 프레임).')
+        else:
+            self.get_logger().info(
+                f"capture #{idx}: center=({stable['cx']:.0f},{stable['cy']:.0f}), "
+                f"clear={stable['clearance']:.0f}px, score={stable['score']:.3f} "
+                f"(안정 {stable['stable_count']}/{len(buf)} 프레임).")
+
+    def _select_stable(self, buf):
+        """샘플 후보들을 center 근접으로 묶어 가장 일관된 군집의 median bbox 를 반환(없으면 None)."""
+        cands = [c for c in buf if c is not None]
+        if not cands:
+            return None
+        tol = float(self.get_parameter('capture_stable_tol_px').value)
+        min_stable = int(self.get_parameter('capture_min_stable').value)
+        # greedy clustering: 각 후보를 seed 로 tol 안 후보를 묶고 최대 군집 선택.
+        best = []
+        for seed in cands:
+            grp = [c for c in cands
+                   if abs(c['cx'] - seed['cx']) <= tol and abs(c['cy'] - seed['cy']) <= tol]
+            if len(grp) > len(best):
+                best = grp
+        if len(best) < min_stable:
+            return None  # 같은 위치에 충분히 반복 검출되지 않음 -> 불안정으로 폐기
+        cx = float(np.median([c['cx'] for c in best]))
+        cy = float(np.median([c['cy'] for c in best]))
+        bw = float(np.median([c['w'] for c in best]))
+        bh = float(np.median([c['h'] for c in best]))
+        score = float(np.mean([c['score'] for c in best]))
+        clearance = float(np.median([c['clearance'] for c in best]))
+        # 오버레이용 대표 프레임: median center 에 가장 가까운 군집 멤버.
+        rep = min(best, key=lambda c: (c['cx'] - cx) ** 2 + (c['cy'] - cy) ** 2)
+        return {
+            'cx': cx, 'cy': cy, 'w': bw, 'h': bh, 'angle': rep['angle'],
+            'score': score, 'clearance': clearance, 'debug': rep['debug'],
+            'stable_count': len(best),
+        }
 
     # ------------------------------------------------------------ ROI (선반 영역)
 

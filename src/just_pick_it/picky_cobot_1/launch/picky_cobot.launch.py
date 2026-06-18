@@ -63,8 +63,8 @@ def generate_launch_description():
         DeclareLaunchArgument('port', default_value='/dev/ttyJETCOBOT'),
         DeclareLaunchArgument('baudrate', default_value='1000000'),
         DeclareLaunchArgument('default_speed', default_value='20'),
-        # 카메라 UDP 수신 측(local AI 컴퓨터) IP/포트.
-        DeclareLaunchArgument('camera_dest_ip', default_value='192.168.0.76'),
+        # 카메라 UDP 수신 측(local AI 컴퓨터) IP/포트. 운영 환경 다르면 camera_dest_ip:= 로 덮어쓴다.
+        DeclareLaunchArgument('camera_dest_ip', default_value='192.168.0.5'),
         DeclareLaunchArgument('camera_dest_port', default_value='5003'),
         DeclareLaunchArgument('camera_dest_port_2', default_value='5004'),
         # true 면 토픽 발행 없이 시뮬레이션. 실제 로봇 구동은 false.

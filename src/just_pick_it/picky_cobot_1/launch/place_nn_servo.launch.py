@@ -74,8 +74,9 @@ def generate_launch_description():
         DeclareLaunchArgument('target_class_label', default_value='empty_slot'),
         DeclareLaunchArgument('image_width', default_value='640.0'),
         DeclareLaunchArgument('image_height', default_value='480.0'),
-        # 배치 높이에서 멈추도록 면적 종료 임계(선반면+상품 높이 고려, 실측 보정).
-        DeclareLaunchArgument('desired_area_norm', default_value='0.23'),
+        # 배치 높이에서 멈추도록 면적 종료 임계(IBVS area DONE -> nn_controller 핸드오프 게이트).
+        # place 는 빈자리(작은 슬롯)라 픽보다 대폭 낮은 값을 쓴다. 픽 desired_area_norm 과 무관.
+        DeclareLaunchArgument('desired_area_norm', default_value='0.023'),
         # 멀리 search 하지 않도록 진열대 관측 자세로 둠(placeholder, 실측 보정 필요).
         DeclareLaunchArgument(
             'place_pregrasp_angles',

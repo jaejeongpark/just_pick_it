@@ -33,6 +33,17 @@ empty_slot_detector_node:
 
     bbox_scale: 1.0
 
+    # 자세별 후보 안정화(다중 프레임 샘플링). 한 capture(자세)에서 여러 프레임을 모아
+    # 같은 위치에 반복 검출되는 후보만 채택해 jitter/허위검출을 제거한다.
+    #   capture_sample_count : 한 capture 에서 detection 할 최대 프레임 수
+    #   capture_sample_sec   : 샘플링 최대 시간(s). 컨트롤러 SCAN_CAPTURE_SEC 보다 작게 둘 것
+    #   capture_stable_tol_px: 같은 위치로 묶을 center 허용 오차(px)
+    #   capture_min_stable   : 채택에 필요한 최소 일관 검출 프레임 수(미만이면 후보 없음)
+    capture_sample_count: 5
+    capture_sample_sec: 1.0
+    capture_stable_tol_px: 20.0
+    capture_min_stable: 3
+
     # 라이브 디버그 영상 발행 주파수(Hz). 0이면 비활성(운영 기본).
     # >0 으로 두면 스캔 트리거와 무관하게 /place/debug_image, /place/debug_edges 를 주기 발행.
     # 구독자가 있을 때만 실제 publish(lazy). 검증/튜닝용.

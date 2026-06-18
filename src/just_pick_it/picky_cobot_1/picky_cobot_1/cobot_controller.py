@@ -114,11 +114,17 @@ DISPLAY_SCAN_ANGLES = [
     [94.39, 1.31, -26.19, -62.84, 3.51, -127.08],    # right
 ]
 
+# 재파지 직후 진열대로 이동할 때 거치는 안전 경유(상승) 자세. picky 슬롯 lift 만으로는
+# 상승분이 부족해 진열된 상품을 칠 위험이 있어, center pregrasp 로 가기 전에 먼저 거친다.
+REGRASP_TRANSIT_ANGLES = [49.39, -17.40, -0.79, -68.99, 5.27, -122.69]
+
 # 스캔 타이밍.
 SCAN_SETTLE_SEC   = 0.6    # 스캔 자세 도착 후 영상 안정 대기
-SCAN_CAPTURE_SEC  = 0.5    # capture_view 발행 후 detector 처리 대기
+SCAN_CAPTURE_SEC  = 1.5    # capture_view 발행 후 detector 다중프레임 샘플링 완료 대기
 SCAN_PLAN_TIMEOUT = 5.0    # plan 결과(/place/scan_result) 대기
 SCAN_MAX_RESCANS  = 2      # 빈자리 0개 시 재스캔 추가 시도 횟수
+# 우승 자세 복귀 후 CSRT init 전 안정 대기. 팔 진동이 가라앉은 안정 프레임에서 추적 시작.
+PLACE_SETTLE_SEC  = 2.0
 
 PICKUP_SLOT_APPROACH = [118.74, 11.68, -47.84, -30.76, 1.05, -112.06]
 PICKUP_SLOT_PLACE   = [118.74, 11.68, -74.35, -30.76, 1.05, -112.06]
@@ -407,6 +413,14 @@ class CobotController:
                 self._log_err(f'slot {slot} 재파지 실패 — 진열 중단')
                 return False, placed
 
+            # 재파지 직후 진열품 충돌 회피: 안전 경유 자세 -> center pregrasp 를 거쳐 스캔으로.
+            if not self.move_to_angles(REGRASP_TRANSIT_ANGLES):
+                self._log_err('재파지 후 안전 경유 자세 이동 실패 — 진열 중단')
+                return False, placed
+            if not self.move_to_angles(PREGRASP_ANGLES['center']):
+                self._log_err('center pregrasp 이동 실패 — 진열 중단')
+                return False, placed
+
             # 선반이 바뀌었으므로 unit 마다 재스캔(빈자리 재선정).
             ok, _ = self.run_scanning(product_name, target_zone_name)
             if not ok:
@@ -420,6 +434,11 @@ class CobotController:
             self._slot_occupant[slot] = None  # 진열 성공 -> 슬롯 비움
             placed += 1
             self._log(f'진열 unit {placed} 완료 — slot {slot} 비움')
+
+            # 배치(release) 후 항상 center pregrasp 로 상승 복귀(다음 unit/task 전 진열품 충돌 회피).
+            if not self.move_to_angles(PREGRASP_ANGLES['center']):
+                self._log_err('배치 후 center pregrasp 복귀 실패 — 진열 중단')
+                return False, placed
 
         self._log(f'PLACING 완료 — 총 {placed}개 진열')
         return (placed > 0), placed
@@ -467,6 +486,10 @@ class CobotController:
             pose_msg = Float64MultiArray()
             pose_msg.data = [float(v) for v in pose]
             self._pregrasp_pub.publish(pose_msg)
+
+        # 복귀 직후 팔 진동이 가라앉도록 안정 대기 후 bbox(CSRT init 타깃) 발행. 흔들리는
+        # 프레임에서 CSRT 가 init 되면 잘못된 패치를 잡으므로 안정 프레임에서 넘긴다.
+        time.sleep(PLACE_SETTLE_SEC)
 
         msg = Float64MultiArray()
         msg.data = [float(v) for v in bbox]
