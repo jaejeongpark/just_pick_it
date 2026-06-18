@@ -31,6 +31,7 @@ setup(
             'ibvs_nn_pick_agent = picky_cobot_1.ibvs_nn_pick_agent:main',
             'display_place_agent = picky_cobot_1.display_place_agent:main',
             'task_debug_gui = picky_cobot_1.task_debug_gui:main',
+            'csrt_overlay_viz = picky_cobot_1.csrt_overlay_viz:main',
         ],
     },
 )

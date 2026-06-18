@@ -169,7 +169,8 @@ class CobotController:
 
         # DISPLAY_PLACE 배치는 local AI 컴퓨터의 display_place_agent 에 요청한다.
         # 픽과 동일한 토픽 RPC(IbvsNnPickClient 재사용, 토픽만 display 용으로). agent 가
-        # place_servo(csrt + IBVS + place release)를 띄우고 set_gripper open 관측을 완료로 본다.
+        # place_nn_servo(csrt + IBVS + 픽 nn_controller)를 띄우고, nn 의 grip close(=정렬 완료)
+        # 관측 후 자기가 open(70) 발행으로 release 한 걸 완료로 본다.
         self._place = IbvsNnPickClient(
             node,
             request_topic=place_request_topic,
@@ -184,6 +185,10 @@ class CobotController:
         # PLACE 시 CSRT init 용 bbox(center 기준 px) latched 발행.
         self._target_bbox_pub = node.create_publisher(
             Float64MultiArray, '/place/target_bbox', _latched_qos())
+        # 우승 스캔 자세(6 관절 deg) latched 발행. display_place_agent 가 받아 place_nn_servo
+        # 의 IBVS pregrasp 으로 주입한다(우승 자세=CSRT init 자세=IBVS pregrasp 일치 보장).
+        self._pregrasp_pub = node.create_publisher(
+            Float64MultiArray, '/place/pregrasp_angles', _latched_qos())
 
         # 스캔 plan 결과 수신.
         self._scan_lock = threading.Lock()
@@ -437,7 +442,8 @@ class CobotController:
         """run_scanning 이 선정한 빈자리로 IBVS+NN 배치를 1회 수행한다.
 
         우승 스캔 자세로 복귀(스캔 시점과 동일 시야) -> bbox latched 발행(CSRT init) ->
-        display_place_agent 요청(agent 가 place_servo 기동, gripper open 관측을 완료로 보고).
+        display_place_agent 요청(agent 가 place_nn_servo 기동, nn grip close 관측 후 open(70)
+        release 발행을 완료로 보고).
         """
         if self._scan_winner is None:
             self._log_err('스캔 우승 자리 없음 — 배치 불가')
@@ -447,6 +453,14 @@ class CobotController:
         if pose is not None and not self.move_to_angles(pose):
             self._log_err('스캔 우승 자세 복귀 실패')
             return False
+
+        # 우승 자세를 IBVS pregrasp 으로 먼저 알린다(agent 가 place_nn_servo 기동 전에 latched
+        # 수신하도록 bbox 보다 먼저 발행). 우승 자세=현재 복귀 자세=CSRT init 자세로 일치시켜
+        # IBVS 가 servo 시작 시 카메라를 다른 곳으로 옮기지 않게 한다.
+        if pose is not None:
+            pose_msg = Float64MultiArray()
+            pose_msg.data = [float(v) for v in pose]
+            self._pregrasp_pub.publish(pose_msg)
 
         msg = Float64MultiArray()
         msg.data = [float(v) for v in bbox]

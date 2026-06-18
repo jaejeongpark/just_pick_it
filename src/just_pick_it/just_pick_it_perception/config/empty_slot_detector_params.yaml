@@ -2,22 +2,22 @@ empty_slot_detector_node:
   ros__parameters:
     # 점유로 처리할 YOLO 클래스(쉼표 구분). 비우면 모든 검출을 obstacle 취급.
     obstacle_classes: ""
-    min_confidence: 0.3
+    min_confidence: 0.5
 
     # 선반 표면 ROI fallback 사각형(이미지 비율). edge ROI 실패 시 사용.
-    roi_top_frac: 0.30
+    roi_top_frac: 0.02
     roi_bottom_frac: 0.98
-    roi_left_frac: 0.05
-    roi_right_frac: 0.95
+    roi_left_frac: 0.02
+    roi_right_frac: 0.98
 
     # Canny + Hough 로 선반 near-horizontal 모서리 검출해 ROI 상/하단을 한정.
     use_edge_roi: true
-    canny_low: 50
-    canny_high: 150
-    hough_threshold: 50
-    hough_min_line_len: 40
-    hough_max_line_gap: 10
-    edge_max_image_slope: 0.30
+    canny_low: 25
+    canny_high: 90
+    hough_threshold: 80
+    hough_min_line_len: 160
+    hough_max_line_gap: 30
+    edge_max_image_slope: 0.10
     use_white_mask: true
 
     # 후보 footprint / clearance / 가장자리 margin (이미지 픽셀).
@@ -32,3 +32,8 @@ empty_slot_detector_node:
     w_front: 0.5
 
     bbox_scale: 1.0
+
+    # 라이브 디버그 영상 발행 주파수(Hz). 0이면 비활성(운영 기본).
+    # >0 으로 두면 스캔 트리거와 무관하게 /place/debug_image, /place/debug_edges 를 주기 발행.
+    # 구독자가 있을 때만 실제 publish(lazy). 검증/튜닝용.
+    debug_live_hz: 5.0

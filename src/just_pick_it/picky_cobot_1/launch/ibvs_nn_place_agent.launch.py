@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Local AI 컴퓨터(192.168.1.70)용 DISPLAY launch — detection + 빈자리 detector + 배치 agent.
+Local AI 컴퓨터(192.168.1.70)용 DISPLAY_PLACE launch — detection + 빈자리 detector + 배치 agent.
 
-픽(ibvs_nn_pick_agent.launch.py)과 동일한 구조다.
+픽(ibvs_nn_pick_agent.launch.py)과 대칭 구조다(이름도 대칭: pick agent <-> place agent).
   1. yolo_seg_infer (detection, 상시)
      - cobot 호스트가 UDP 로 보낸 카메라 프레임을 YOLO-seg 추론 -> /infer/tracked_objects.
      - 빈자리 detector / place IBVS 가 이 토픽(또는 image_raw)을 쓰므로 먼저 떠 있어야 한다.
@@ -13,8 +13,15 @@ Local AI 컴퓨터(192.168.1.70)용 DISPLAY launch — detection + 빈자리 det
        거의 없어 yolo 처럼 상시 가동한다.
   3. display_place_agent (DISPLAY_PLACE, on-demand)
      - cobot 호스트가 보내는 배치 요청(/display_place/request)을 받아 이 머신에서
-       place_servo.launch.py(csrt + IBVS + place release)를 on-demand 실행하고, place release
-       의 gripper open 관측을 완료로 보고한 뒤 종료한다(픽 agent 와 동일한 수명 관리).
+       place_nn_servo.launch.py(csrt + IBVS + 픽 nn_controller, weight 공유)를 on-demand 실행.
+     - release(놓기)는 perception 을 수정하지 않으려고 agent 가 담당한다: nn_controller 의
+       grip close 발행을 'NN 정렬 완료 = 놓을 타이밍'으로 보고, agent 가 set_gripper open(70)
+       을 발행해 release 한 뒤 완료로 보고한다(픽 agent 와 동일한 수명 관리).
+
+place release weight 공유(픽 nn_controller 대칭):
+  - place_nn_servo 의 nn_controller 는 픽과 동일한 model_dir(result/nn_controller)을 쓴다.
+    별도 place 전용 모델/학습 없이 픽 weight 를 그대로 재사용한다(bootstrap).
+  - grip 예측기는 객체 파지 장면으로 학습돼 빈자리 release 타이밍 정확도는 검증 대상이다.
 
 포트/도메인 주의(픽과 동일):
   - 카메라 송신 camera_dest_port:=5003 과 udp_port 일치, 두 머신 ROS_DOMAIN_ID 동일.
@@ -23,6 +30,11 @@ with_detection:
   - true(기본): 이 launch 가 yolo 도 띄운다(DISPLAY 단독 운영).
   - false: yolo 를 띄우지 않는다. 픽 launch(ibvs_nn_pick_agent.launch.py)가 이미 yolo 를
     띄운 채로 함께 돌릴 때 사용(같은 UDP 포트를 두 번 bind 하는 충돌 방지).
+
+csrt_debugger:
+  - false(기본): CSRT 추적 시각화 노드를 띄우지 않는다(운영 기본).
+  - true: csrt_overlay_viz 를 띄워 /place/csrt_overlay(Image)로 추적 결과를 발행한다.
+    rqt_image_view 로 확인. 디버그 전용. csrt_stale_sec 로 추적 끊김 판정 시간 조정.
 """
 import os
 
@@ -47,6 +59,8 @@ def generate_launch_description():
     target_classes = LaunchConfiguration('target_classes')
     detection_confidence = LaunchConfiguration('detection_confidence')
     with_detection = LaunchConfiguration('with_detection')
+    csrt_debugger = LaunchConfiguration('csrt_debugger')
+    csrt_stale_sec = LaunchConfiguration('csrt_stale_sec')
     detector_params_file = LaunchConfiguration('detector_params_file')
     place_timeout_sec = LaunchConfiguration('place_timeout_sec')
     place_request_topic = LaunchConfiguration('place_request_topic')
@@ -70,6 +84,8 @@ def generate_launch_description():
             default_value='bread,choco_pie,cream_bread,fanta,water,watermelon'),
         DeclareLaunchArgument('detection_confidence', default_value='0.5'),
         DeclareLaunchArgument('with_detection', default_value='true'),
+        DeclareLaunchArgument('csrt_debugger', default_value='false'),
+        DeclareLaunchArgument('csrt_stale_sec', default_value='0.5'),
         DeclareLaunchArgument('detector_params_file', default_value=default_detector_params),
         DeclareLaunchArgument('place_timeout_sec', default_value='120.0'),
         DeclareLaunchArgument('place_request_topic', default_value='/display_place/request'),
@@ -99,7 +115,7 @@ def generate_launch_description():
         launch_arguments={'params_file': detector_params_file}.items(),
     )
 
-    # 3. 배치 agent(DISPLAY_PLACE, on-demand 로 place_servo.launch.py 실행).
+    # 3. 배치 agent(DISPLAY_PLACE, on-demand 로 place_nn_servo.launch.py 실행).
     place_agent = Node(
         package='picky_cobot_1',
         executable='display_place_agent',
@@ -113,4 +129,17 @@ def generate_launch_description():
         ],
     )
 
-    return LaunchDescription(args + [detection, detector, place_agent])
+    # 4. CSRT 추적 시각화 overlay(디버그 전용) — csrt_debugger=true 일 때만.
+    #    /place/csrt_overlay 를 rqt_image_view 로 확인. 구독자 있을 때만 발행(lazy).
+    csrt_debug = Node(
+        package='picky_cobot_1',
+        executable='csrt_overlay_viz',
+        name='csrt_overlay_viz',
+        output='screen',
+        parameters=[
+            {'track_stale_sec': ParameterValue(csrt_stale_sec, value_type=float)},
+        ],
+        condition=IfCondition(csrt_debugger),
+    )
+
+    return LaunchDescription(args + [detection, detector, place_agent, csrt_debug])
