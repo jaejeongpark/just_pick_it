@@ -105,6 +105,7 @@ class ReverseDocking(Node):
         self.declare_parameter("marker_search_settle_sec", 0.20)
         self.declare_parameter("align_rotation_step_sec", 0.18)
         self.declare_parameter("marker_search_hint_timeout_sec", 6.0)
+        self.declare_parameter("target_marker_reacquire_timeout_sec", 6.0)
         self.declare_parameter("marker_0_default_search_direction", 1.0)
         self.declare_parameter("marker_1_default_search_direction", -1.0)
 
@@ -124,7 +125,11 @@ class ReverseDocking(Node):
         self.declare_parameter("yaw_hold_kp", 1.2)
         self.declare_parameter("reverse_lane_axis_enabled", True)
         self.declare_parameter("reverse_axis_target", "camera")
+        self.declare_parameter("reverse_camera_yaw_hold_kp", 0.3)
+        self.declare_parameter("reverse_camera_axis_kp", 0.0015)
         self.declare_parameter("reverse_camera_axis_angle_kp", 0.0020)
+        self.declare_parameter("reverse_camera_axis_max_correction", 0.12)
+        self.declare_parameter("reverse_camera_max_angular_vel", 0.18)
         self.declare_parameter("reverse_lane_axis_kp", 0.0025)
         self.declare_parameter("reverse_lane_axis_angle_kp", 0.0)
         self.declare_parameter("reverse_lane_axis_max_correction", 0.22)
@@ -234,6 +239,14 @@ class ReverseDocking(Node):
             0.0,
             float(self.get_parameter("marker_search_hint_timeout_sec").value),
         )
+        self._target_marker_reacquire_timeout = max(
+            0.0,
+            float(
+                self.get_parameter(
+                    "target_marker_reacquire_timeout_sec"
+                ).value
+            ),
+        )
         self._marker_search_directions = {
             0: float(
                 self.get_parameter("marker_0_default_search_direction").value
@@ -295,8 +308,21 @@ class ReverseDocking(Node):
                 f"{self._reverse_axis_target!r}; using camera"
             )
             self._reverse_axis_target = "camera"
+        self._reverse_camera_yaw_hold_kp = float(
+            self.get_parameter("reverse_camera_yaw_hold_kp").value
+        )
+        self._reverse_camera_axis_kp = float(
+            self.get_parameter("reverse_camera_axis_kp").value
+        )
         self._reverse_camera_axis_angle_kp = float(
             self.get_parameter("reverse_camera_axis_angle_kp").value
+        )
+        self._reverse_camera_axis_max_correction = float(
+            self.get_parameter("reverse_camera_axis_max_correction").value
+        )
+        self._reverse_camera_max_ang = max(
+            0.0,
+            float(self.get_parameter("reverse_camera_max_angular_vel").value),
         )
         self._reverse_lane_axis_kp = float(
             self.get_parameter("reverse_lane_axis_kp").value
@@ -503,9 +529,13 @@ class ReverseDocking(Node):
 
             result = self._detect_from_latest_frame(marker_id, "OBSERVE_MARKER")
             if result is None:
+                target_w = self._recent_target_alignment_cmd(marker_id)
                 hint_w = self._marker_search_hint(marker_id)
                 twist = Twist()
-                if hint_w is not None:
+                if target_w is not None:
+                    twist.angular.z = target_w
+                    reason = "recent_target"
+                elif hint_w is not None:
                     twist.angular.z = hint_w
                     reason = f"wrong_marker={self._last_seen_marker_id}"
                 else:
@@ -799,8 +829,18 @@ class ReverseDocking(Node):
                         )
 
                 if lane_axis_used:
+                    axis_kp = (
+                        self._reverse_camera_axis_kp
+                        if self._reverse_axis_target == "camera"
+                        else self._reverse_lane_axis_kp
+                    )
+                    axis_max_correction = (
+                        self._reverse_camera_axis_max_correction
+                        if self._reverse_axis_target == "camera"
+                        else self._reverse_lane_axis_max_correction
+                    )
                     lane_axis_raw_correction = (
-                        -self._reverse_lane_axis_kp * lane_axis_error
+                        -axis_kp * lane_axis_error
                     )
                     if lane_axis_angle_error is not None:
                         angle_kp = (
@@ -813,11 +853,18 @@ class ReverseDocking(Node):
                         )
                     lane_axis_correction = self._clamp_abs(
                         lane_axis_raw_correction,
-                        self._reverse_lane_axis_max_correction,
+                        axis_max_correction,
                     )
 
             if not lane_axis_used:
                 marker_lat_correction = -self._reverse_marker_lat_kp * marker_lat
+
+            reverse_yaw_hold_kp = self._yaw_hold_kp
+            reverse_max_ang = self._max_ang
+            if self._reverse_axis_target == "camera":
+                reverse_yaw_hold_kp = self._reverse_camera_yaw_hold_kp
+                reverse_max_ang = self._reverse_camera_max_ang
+            yaw_hold_correction = reverse_yaw_hold_kp * yaw_err
 
             if moved >= self._reverse_distance:
                 self._stop()
@@ -842,10 +889,11 @@ class ReverseDocking(Node):
 
             twist = Twist()
             twist.linear.x = -self._reverse_speed
-            twist.angular.z = self._clamp(
-                self._yaw_hold_kp * yaw_err
+            twist.angular.z = self._clamp_abs(
+                yaw_hold_correction
                 + marker_lat_correction
-                + lane_axis_correction
+                + lane_axis_correction,
+                reverse_max_ang,
             )
             self._cmd_pub.publish(twist)
 
@@ -883,6 +931,7 @@ class ReverseDocking(Node):
                     f"moved={moved:.3f}/{self._reverse_distance:.3f}m, "
                     f"yaw_err={math.degrees(yaw_err):.1f}deg, "
                     f"cmd=({twist.linear.x:.3f},{twist.angular.z:.3f})"
+                    f", yaw_hold_cmd={yaw_hold_correction:.3f}"
                     f"{marker_text}"
                     f"{lane_text}"
                     f"{marker_lat_text}"
@@ -1082,14 +1131,17 @@ class ReverseDocking(Node):
         """Center using the last target pose before falling back to scan."""
         if self._last_target_marker_id != int(target_id):
             return None
-        if time.time() - self._last_target_seen_time > 1.0:
+        if (
+            time.time() - self._last_target_seen_time
+            > self._target_marker_reacquire_timeout
+        ):
             return None
         if self._last_target_lat_err is None:
             return None
 
         lat_err = float(self._last_target_lat_err)
         if abs(lat_err) <= self._align_tol:
-            return 0.0
+            return None
 
         cmd = -self._align_kp * lat_err
         if abs(cmd) < self._align_reacquire_rotate_speed:
