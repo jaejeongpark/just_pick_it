@@ -62,20 +62,20 @@ INSPECTION_POSE = [20.39, -7.29, -28.82, -50.44, 5.36, -110.65]
 # 슬롯 4개 = picky 바구니 용량(공간 협소). 단위: degree, [J1..J6].
 LOAD_SLOT_ANGLES = [
     {  # slot 0 (item 1)
-        'approach': [7.99, -41.04, -8.70, -40.42, 3.16, -124.01],
-        'place':    [7.03, -35.06, -62.40, 7.20, 4.04, -124.01],
+        'approach': [9.39, -30.94, -48.00, -7.67, 2.98, -131.03],
+        'place':    [9.39, -30.94, -56.00, -5.67, 2.98, -131.03],
     },
     {  # slot 1 (item 2)
-        'approach': [6.67, -16.08, -43.24, -33.04, 3.77, -124.01],
-        'place':    [6.50, -14.58, -92.02, 13.97, 5.00, -124.01],
+        'approach': [11.44, -10.01, -75.82, 3.00, 2.81, -134.47],
+        'place':    [11.44, -10.01, -84.82, 3.00, 2.81, -134.47],
     },
     {  # slot 2 (item 3)
-        'approach': [31.20, -20.12, -28.47, -43.68, 2.63, -98.26],
-        'place':    [31.37, -14.06, -92.90, 13.71, 2.54, -98.26],
+        'approach': [28.83, -39.76, -25.17, -17.21, -1.65, -108.98],
+        'place':    [28.83, -39.76, -36.17, -17.21, -1.65, -108.98],
     },
     {  # slot 3 (item 4)
-        'approach': [23.37, -35.06, -23.73, -32.08, 4.48, -105.46],
-        'place':    [23.73, -36.38, -61.25, 7.47, 4.57, -105.46],
+        'approach': [28.91, -15.38, -62.47, -11.51, 1.14, -109.68],
+        'place':    [24.87, -20.19, -67.78, -4.65, 4.57, -110.91],
     },
 ]
 
@@ -119,6 +119,9 @@ SCAN_SETTLE_SEC   = 0.6    # 스캔 자세 도착 후 영상 안정 대기
 SCAN_CAPTURE_SEC  = 0.5    # capture_view 발행 후 detector 처리 대기
 SCAN_PLAN_TIMEOUT = 5.0    # plan 결과(/place/scan_result) 대기
 SCAN_MAX_RESCANS  = 2      # 빈자리 0개 시 재스캔 추가 시도 횟수
+
+PICKUP_SLOT_APPROACH = [118.74, 11.68, -47.84, -30.76, 1.05, -112.06]
+PICKUP_SLOT_PLACE   = [118.74, 11.68, -74.35, -30.76, 1.05, -112.06]
 
 
 class CobotController:
@@ -691,8 +694,16 @@ class CobotController:
             return False
         if not self.move_to_angles(approach):
             return False
-        # 2) pickup-space 로 IBVS 접근 후 release(고정 자세 금지 — picky 정차 오차 보정).
-        return self._drop_at_pickup_via_ibvs(product_name)
+        # 2) PICKUP_SLOT approach -> place 2단계 접근 후 그리퍼 열어 드롭, INSPECTION_POSE 복귀.
+        if not self.move_to_angles(PICKUP_SLOT_APPROACH):
+            return False
+        if not self.move_to_angles(PICKUP_SLOT_PLACE):
+            return False
+        if not self.open_gripper():
+            return False
+        if not self.move_to_angles(INSPECTION_POSE):
+            return False
+        return True
 
     def _drop_at_pickup_via_ibvs(self, product_name: str) -> bool:
         """pickup-space 로 IBVS 접근 후 drop NN + gripper predictor 로 release 한다.
