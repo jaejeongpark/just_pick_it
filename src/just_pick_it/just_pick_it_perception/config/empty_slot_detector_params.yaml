@@ -27,7 +27,7 @@ empty_slot_detector_node:
     edge_margin_px: 6.0
 
     # 스코어 가중치.
-    w_clear: 1.0
+    w_clear: 3.0
     w_center: 0.6
     w_front: 0.5
 
