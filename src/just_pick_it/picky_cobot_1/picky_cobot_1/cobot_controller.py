@@ -125,6 +125,9 @@ SCAN_PLAN_TIMEOUT = 5.0    # plan 결과(/place/scan_result) 대기
 SCAN_MAX_RESCANS  = 2      # 빈자리 0개 시 재스캔 추가 시도 횟수
 # 우승 자세 복귀 후 CSRT init 전 안정 대기. 팔 진동이 가라앉은 안정 프레임에서 추적 시작.
 PLACE_SETTLE_SEC  = 2.0
+# NN release(gripper 70% open) 완료 후 상승 전 대기. 그리퍼가 완전히 열려 물건이
+# 안정적으로 안착할 때까지 기다린 뒤 팔을 올린다.
+PLACE_RELEASE_SETTLE_SEC = 3.0
 
 PICKUP_SLOT_APPROACH = [118.74, 11.68, -47.84, -30.76, 1.05, -112.06]
 PICKUP_SLOT_PLACE   = [118.74, 11.68, -74.35, -30.76, 1.05, -112.06]
@@ -499,6 +502,10 @@ class CobotController:
         if not self._place.pick(product_name):
             self._log_err('display_place_agent 미응답 또는 배치 실패')
             return False
+        # NN 이 gripper 70% open(release) 으로 내려놓은 직후 바로 올리면 물건이 딸려
+        # 올라오거나 흔들릴 수 있어, 안정 안착을 위해 상승 전 대기한다.
+        self._log(f'release 완료 — 안착 대기 {PLACE_RELEASE_SETTLE_SEC}s')
+        time.sleep(PLACE_RELEASE_SETTLE_SEC)
         self._scan_winner = None
         return True
 
