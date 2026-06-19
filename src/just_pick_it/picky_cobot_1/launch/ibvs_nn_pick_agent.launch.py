@@ -41,6 +41,7 @@ def generate_launch_description():
     pick_timeout_sec = LaunchConfiguration('pick_timeout_sec')
     pick_request_topic = LaunchConfiguration('pick_request_topic')
     pick_result_topic = LaunchConfiguration('pick_result_topic')
+    desired_area_norm = LaunchConfiguration('desired_area_norm')
 
     home = os.path.expanduser('~')
     default_model_path = os.path.join(
@@ -63,6 +64,9 @@ def generate_launch_description():
         DeclareLaunchArgument('pick_timeout_sec', default_value='120.0'),
         DeclareLaunchArgument('pick_request_topic', default_value='/ibvs_nn_pick/request'),
         DeclareLaunchArgument('pick_result_topic', default_value='/ibvs_nn_pick/result'),
+        # IBVS DONE 판정 area_norm 임계값. 클수록 물체에 더 가까이 접근한 뒤 grip.
+        # 음수(기본값)면 nn_inference.launch.py 기본값(0.23)을 사용한다.
+        DeclareLaunchArgument('desired_area_norm', default_value='-1.0'),
     ]
 
     perception_share = get_package_share_directory('just_pick_it_perception')
@@ -92,6 +96,7 @@ def generate_launch_description():
             {'pick_timeout_sec': ParameterValue(pick_timeout_sec, value_type=float)},
             {'request_topic': pick_request_topic},
             {'result_topic': pick_result_topic},
+            {'desired_area_norm': ParameterValue(desired_area_norm, value_type=float)},
         ],
     )
 
