@@ -1225,11 +1225,10 @@ class AreaJacobianIBVSNode(Node):
         return max_err <= self.arrival_threshold_deg
 
     def latch_grasp_orientation_anchor(self):
-        # 첫 align(center 정렬)이 수렴한 직후에 단 한 번만 latch한다. 이미지 중심에
-        # 처음 정렬된 시점의 OBB 각도가 가장 신뢰할 수 있기 때문이다. search 도달
-        # 직후(원거리/사각 시야)나 이후 근접 자세의 OBB 각도로는 덮어쓰지 않는다.
-        # 새 search 위치로 이동(SEARCH_MOVE)하거나 새 episode 시작 시에만 None으로
-        # 리셋되어 다음 첫 align 수렴에서 재latch된다.
+        # search 시점(유리한 시야)에서 단 한 번만 latch한다. detection을 잃었다가
+        # 근접 자세에서 재검출되어 start_pick_sequence가 다시 호출될 때는, 이미 latch된
+        # 값을 유지한다(근접 시야 OBB 각도는 신뢰할 수 없으므로 덮어쓰지 않는다).
+        # 새 search 위치로 이동(SEARCH_MOVE)할 때만 None으로 리셋되어 재latch된다.
         if self.grasp_orientation_anchor is not None:
             return
         self.grasp_orientation_anchor = float(self.latest_orientation_angle)
@@ -1238,8 +1237,7 @@ class AreaJacobianIBVSNode(Node):
         )
         self.get_logger().info(
             f"Latched grasp_orientation_anchor={self.grasp_orientation_anchor:.1f} deg "
-            f"at first align convergence "
-            f"(from search '{self.search_position_names[self.current_search_idx]}')"
+            f"at '{self.search_position_names[self.current_search_idx]}'"
         )
 
     def start_pick_sequence(self):
@@ -1247,8 +1245,7 @@ class AreaJacobianIBVSNode(Node):
         self.get_logger().info(
             f"Detection valid at '{name}' (after arrival). Starting pick sequence."
         )
-        # OBB orientation latch는 search 도달 직후가 아니라 첫 align(center 정렬)
-        # 수렴 시점(run_control_step)으로 미룬다.
+        self.latch_grasp_orientation_anchor()
         if self.use_status_for_q0:
             self.request_status()
             self.set_phase(Phase.WAIT_Q0_STATUS)
@@ -1771,12 +1768,6 @@ class AreaJacobianIBVSNode(Node):
             )
             self.set_phase(Phase.ERROR)
             return
-
-        # 첫 align(center 정렬)이 수렴한 시점의 OBB 각도를 grasp orientation으로
-        # latch한다. latch 함수가 1회만 적용하므로 이후 step에서는 무해하다.
-        # done/grip 전환보다 먼저 두어 anchor가 None인 채 grip에 도달하지 않게 한다.
-        if center_norm <= self.approach_center_threshold:
-            self.latch_grasp_orientation_anchor()
 
         if self.check_done_condition(
             area_value=self.latest_area_norm,
