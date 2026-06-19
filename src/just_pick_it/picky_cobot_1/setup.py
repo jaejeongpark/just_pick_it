@@ -30,6 +30,7 @@ setup(
             'cobot_state_manager = picky_cobot_1.cobot_state_machine:main',
             'ibvs_nn_pick_agent = picky_cobot_1.ibvs_nn_pick_agent:main',
             'display_place_agent = picky_cobot_1.display_place_agent:main',
+            'place_interaction_recorder = picky_cobot_1.place_interaction_recorder:main',
             'task_debug_gui = picky_cobot_1.task_debug_gui:main',
             'csrt_overlay_viz = picky_cobot_1.csrt_overlay_viz:main',
         ],
