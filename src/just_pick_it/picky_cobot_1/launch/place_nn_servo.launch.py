@@ -54,7 +54,7 @@ def generate_launch_description():
     home = os.path.expanduser('~')
     default_model_dir = os.path.join(
         home,
-        'just_pick_it/src/just_pick_it/just_pick_it_perception/result/nn_controller',
+        'just_pick_it/src/just_pick_it/just_pick_it_perception/result/nn_controller/place',
     )
 
     robot_name = LaunchConfiguration('robot_name')
@@ -76,13 +76,15 @@ def generate_launch_description():
         DeclareLaunchArgument('image_height', default_value='480.0'),
         # 배치 높이에서 멈추도록 면적 종료 임계(IBVS area DONE -> nn_controller 핸드오프 게이트).
         # place 는 빈자리(작은 슬롯)라 픽보다 대폭 낮은 값을 쓴다. 픽 desired_area_norm 과 무관.
-        DeclareLaunchArgument('desired_area_norm', default_value='0.023'),
+        DeclareLaunchArgument('desired_area_norm', default_value='0.017'),
         # 멀리 search 하지 않도록 진열대 관측 자세로 둠(placeholder, 실측 보정 필요).
         DeclareLaunchArgument(
             'place_pregrasp_angles',
             default_value='[114.78,-5.09,-9.05,-75.49,9.05,-107.31]'),
         DeclareLaunchArgument('search_timeout_sec', default_value='1.0'),
-        # 픽과 공유하는 NN weight 디렉터리(policy + grip_success_predictor + config).
+        # place 전용 NN weight 디렉터리(policy + grip_success_predictor + config).
+        # 초기값은 result/nn_controller/place 로, 픽 weight 를 복사한 bootstrap 이다.
+        # place 전용 데이터로 재학습하면 이 디렉터리 내용만 교체하면 된다.
         DeclareLaunchArgument('model_dir', default_value=default_model_dir),
         DeclareLaunchArgument('device', default_value='cpu'),
         DeclareLaunchArgument('min_confidence', default_value='0.5'),

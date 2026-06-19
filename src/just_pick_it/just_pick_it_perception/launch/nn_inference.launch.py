@@ -143,7 +143,7 @@ def generate_launch_description():
     home = os.path.expanduser("~")
     default_model_dir = os.path.join(
         home,
-        "just_pick_it/src/just_pick_it/just_pick_it_perception/result/nn_controller",
+        "just_pick_it/src/just_pick_it/just_pick_it_perception/result/nn_controller/pick",
     )
     args = [
         DeclareLaunchArgument("robot_name", default_value="jetcobot1"),

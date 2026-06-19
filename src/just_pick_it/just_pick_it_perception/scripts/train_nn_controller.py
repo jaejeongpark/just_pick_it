@@ -28,7 +28,11 @@ NN Controller 학습 스크립트 (PLAN.md Task 7 / Task 7-B, 1단계).
   source install/setup.bash
   python3 src/just_pick_it/just_pick_it_perception/scripts/train_nn_controller.py \
       --data-dir ~/rosbags \
-      --out-dir src/just_pick_it/just_pick_it_perception/result/nn_controller
+      --out-dir src/just_pick_it/just_pick_it_perception/result/nn_controller/pick
+
+  place 학습은 place 수집 데이터와 place 출력 경로를 지정한다:
+      --data-dir ~/rosbags_place \
+      --out-dir src/just_pick_it/just_pick_it_perception/result/nn_controller/place
 """
 
 import argparse
@@ -668,8 +672,9 @@ def main():
 
     parser = argparse.ArgumentParser(description="NN controller 학습 (Task 7 / 7-B)")
     parser.add_argument("--data-dir", default="~/rosbags")
+    # 기본은 픽 학습 산출물 경로. place 학습 시 --out-dir 을 result/nn_controller/place 로 지정.
     parser.add_argument("--out-dir",
-                        default="src/just_pick_it/just_pick_it_perception/result/nn_controller")
+                        default="src/just_pick_it/just_pick_it_perception/result/nn_controller/pick")
     parser.add_argument("--policy-input", choices=["memoryless", "window"],
                         default="memoryless",
                         help="memoryless(기본): anchor+progress+현재 관절각(13차원). "
