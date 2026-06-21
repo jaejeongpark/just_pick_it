@@ -1,268 +1,254 @@
-# just_pick_it
+# JUST PICK IT
 
-ROS2 기반 자율 시스템 워크스페이스. **Pinky Pro** 모바일 로봇과 **myCobot 280** 협동 로봇 암을 함께 활용하는 자율화 프로젝트를 위한 통합 개발 환경입니다.
+ROS 2 기반 멀티 로봇 물류 자동화 시스템입니다. Customer UI에서 들어온 주문을 Fleet Manager가 작업 단위로 분해하고, AMR(PICKY) 2대와 COBOT 2대를 연동해 상품 이동, 적재, 픽업, 진열 흐름을 자동화합니다.
 
-> 협업 git 사용 방법은 **[인수인계서.md](인수인계서.md)** 를 참고하세요.
+이 저장소는 단일 로봇 데모가 아니라 Web, DB, Fleet orchestration, AMR navigation, COBOT manipulation, Vision, ROS 2 action/service/topic 통신을 하나의 시나리오로 연결한 팀 프로젝트 워크스페이스입니다.
 
-## 워크스페이스 구조
+<p align="center">
+  <img src="docs/img/admin_page01.png" width="48%" alt="Admin dashboard" />
+  <img src="docs/img/customer_page.png" width="48%" alt="Customer order UI" />
+</p>
+<p align="center">
+  <img src="docs/img/minimap_overlay.png" width="72%" alt="Fleet minimap and zone overlay" />
+</p>
 
-```
-just_pick_it/
-├── src/
-│   ├── pinky_pro/          # Pinky Pro 로봇 패키지
-│   ├── sllidar_ros2/       # SLAMTEC LiDAR ROS2 드라이버 (외부 BSD 라이선스)
-│   ├── mycobot_ros2/       # myCobot 280 패키지
-│   └── just_pick_it/       # 프로젝트 통합 패키지 (인식·매니퓰레이션·AMR·시뮬레이션)
-├── scripts/
-│   ├── mapping/            # 지도 생성 자동화 스크립트
-│   └── navigation/         # 자율 주행 자동화 스크립트
-├── web/                    # FastAPI Web Gateway 및 관제 UI (별도 README 참고)
-├── db/                     # PostgreSQL schema 및 seed 데이터 (별도 README 참고)
-├── docs/                   # 요구사항·시스템 아키텍처·시나리오 등 설계 문서 PDF
-├── reset_ws.sh             # 워크스페이스 전체 재세팅
-├── reset_demo_data.sh      # DB schema + seed 빠른 초기화
-├── run_all.sh              # Fleet Manager + Web Gateway 통합 실행
-├── build/                  # colcon 빌드 출력 (gitignore)
-├── install/                # colcon 설치 공간 (gitignore)
-└── log/                    # 실행 로그 (gitignore)
-```
+## At A Glance
 
----
+| Category | Details |
+|---|---|
+| System Scope | Customer/Admin Web, Fleet Manager, DB, AMR, COBOT, Vision |
+| Robots | PICKY AMR 2대, COBOT 2대 |
+| Runtime Integration | HTTP, WebSocket, ROS 2 action/service/topic, UDP camera stream |
+| Main Scenario | 주문 접수 -> AMR 이동 -> COBOT 적재/진열 -> 상태/재고 갱신 |
+| Validation | 실로봇 주행/도킹 테스트, fake robot 기반 통합 테스트, rosbag 분석 |
+| Collaboration | Confluence 문서화, Jira 이슈 관리, Slack 커뮤니케이션 |
 
-## 패키지 구성
+## Project Overview
 
-### src/pinky_pro
+JUST PICK IT은 소형 물류 매장 또는 자동화 매대를 가정한 통합 로봇 시스템입니다.
 
-Pinky Pro 모바일 로봇 전용 ROS2 패키지 모음입니다. 외부 제공 패키지이며, 본 프로젝트에서는 AMR 하드웨어 bringup, 로봇 모델, Gazebo/Nav2 참고 구현으로 사용합니다.
+- 고객은 Web UI에서 상품을 주문합니다.
+- Fleet Manager는 주문, 재고, 로봇 상태를 바탕으로 작업을 생성합니다.
+- Traffic Manager는 zone graph 기반 경로와 점유 상태를 관리합니다.
+- AMR은 Nav2 기반으로 stock, product, pickup, charging zone을 이동합니다.
+- COBOT은 AMR과 연동해 상품 적재, 검사, 진열 작업을 수행합니다.
+- Admin UI는 로봇 상태, 작업 진행률, 예외/알람, 재고 상태를 실시간으로 보여줍니다.
 
-- 원본/출처: Pinky Pro ROS2 packages (`pinklab-art/pinky_pro` 기반)
-- 라이선스: Apache License 2.0 (`src/pinky_pro/LICENSE` 유지)
-- 본 프로젝트의 직접 구현 범위가 아니라 Pinky Pro 하드웨어/시뮬레이션 adapter 의존성입니다.
-- 직접 구현 범위는 `src/just_pick_it/pinky_amr_2`의 AMR2 safety, custom navigation, task runner, planner/tracker 쪽으로 구분합니다.
+## Workspace Layout
 
-| 패키지 | 설명 |
-|--------|------|
-| `pinky_bringup` | 실제 로봇 구동 (Dynamixel, 배터리 퍼블리셔) |
-| `pinky_description` | URDF/xacro 로봇 모델 |
-| `pinky_gz_sim` | Gazebo 시뮬레이션 환경 및 world |
-| `pinky_navigation` | Nav2 기반 SLAM·자율 주행 launch |
-| `pinky_interfaces` | 커스텀 ROS2 srv 인터페이스 |
-| `pinky_emotion` | LCD 감정 표현 |
-| `pinky_lamp_control` | 램프 제어 Gazebo 플러그인 |
-| `pinky_led` | LED 제어 |
-| `pinky_imu_bno055` | IMU 드라이버 |
-| `pinky_sensor_adc` | ADC 센서 드라이버 |
+실제 시연 공간은 stock zone, standby/charging zone, product zone, pickup zone으로 나뉩니다. AMR은 zone graph를 따라 이동하고, COBOT은 stock/product/pickup 흐름에서 적재와 진열 작업을 수행합니다.
 
+<p align="center">
+  <img src="docs/img/map_design.png" width="82%" alt="Map design and operation zones" />
+</p>
 
-### src/sllidar_ros2
+## System Architecture
 
-SLAMTEC LiDAR를 ROS2 `sensor_msgs/msg/LaserScan` 토픽으로 publish하는 외부 드라이버 패키지입니다.
-AMR2 실로봇 구동에서는 `pinky_bringup` launch가 이 패키지를 include하여 LiDAR `scan` 토픽을 생성하고, `pinky_amr_2`의 장애물 정지 및 custom navigation 입력으로 사용합니다.
+아래 구조는 Web, Cloud/Local AI server, Control server, AMR/COBOT hardware가 HTTP, ROS 2, UDP, DB 통신으로 연결되는 전체 시스템 구성을 보여줍니다.
 
-- 원본: SLAMTEC `sllidar_ros2` / RPLIDAR ROS2 package
-- 라이선스: BSD 계열 라이선스 (`src/sllidar_ros2/LICENSE` 유지)
-- 본 프로젝트의 직접 구현 범위가 아니라 외부 LiDAR driver 의존성입니다.
-- 소스 재배포 조건에 따라 기존 copyright, license 조건문, disclaimer를 유지합니다.
+<p align="center">
+  <img src="docs/img/system_architecture.png" width="86%" alt="System architecture" />
+</p>
 
-
-### src/mycobot_ros2
-
-myCobot 280 협동 로봇 암 전용 패키지 모음. [automaticaddison/mycobot_ros2](https://github.com/automaticaddison/mycobot_ros2) 포크 기반.
-
-| 패키지 | 설명 |
-|--------|------|
-| `mycobot_bringup` | 로봇 드라이버 구동 launch 파일 |
-| `mycobot_description` | URDF/xacro 로봇 모델 |
-| `mycobot_gazebo` | Gazebo 시뮬레이션 world 및 launch |
-| `mycobot_interfaces` | MoveIt 계획 장면 생성용 커스텀 srv 인터페이스 |
-| `mycobot_moveit_config` | MoveIt2 설정 및 SRDF |
-| `mycobot_moveit_demos` | MoveIt2 기본 데모 (`hello_moveit.py` 포함) |
-| `mycobot_mtc_demos` | MoveIt Task Constructor 데모 |
-| `mycobot_mtc_pick_place_demo` | MTC 기반 pick & place + 포인트 클라우드 인식 |
-| `mycobot_system_tests` | 통합·시스템 테스트 |
-
-### src/just_pick_it
-
-본 프로젝트(Just Pick It)에서 새로 작성하는 패키지 모음. 패키지별 담당자는 [인수인계서.md](인수인계서.md)를 참고하세요.
-
-| 패키지 | 설명 |
-|--------|------|
-| `just_pick_it_interfaces` | 프로젝트 공용 msg/srv/action 정의 |
-| `just_pick_it_bringup` | 전체 시스템 통합 launch |
-| `just_pick_it_perception` | 비전·인식 모듈 |
-| `just_pick_it_simulation` | Gazebo 시뮬레이션 launch·world·params |
-| `jetcobot_inspection` | JetCobot 기반 검사 매니퓰레이션 |
-| `jetcobot_sorting` | JetCobot 기반 분류 매니퓰레이션 |
-| `pinky_amr_1` | AMR 인스턴스 1 (Pinky Pro) |
-| `pinky_amr_2` | AMR 인스턴스 2 (Pinky Pro) |
-
----
-
-## 환경 요구사항
-
-- ROS2 Jazzy
-- Gazebo Harmonic
-- MoveIt2 (`ros-jazzy-moveit`)
-- Terminator (스크립트 자동화)
-- Python 3.12
-- PostgreSQL
-
----
-
-## 설치 및 빌드
-
-### 최초 클론
-
-```bash
-git clone https://github.com/jaejeongpark/just_pick_it.git
-cd just_pick_it
-```
-
-### 권장 자동 세팅
-
-처음 세팅하거나 환경이 꼬였을 때는 루트 재세팅 스크립트를 사용합니다.
-
-```bash
-./reset_ws.sh
-```
-
-`reset_ws.sh`는 다음을 한 번에 수행합니다.
+### Main Runtime Flow
 
 ```text
-1. Ubuntu 24.04 / ROS 2 Jazzy / Python 3.12 기준 확인
-2. web/.venv 세팅
-3. PostgreSQL role/database/schema/seed 세팅
-4. rosdep 의존성 설치
-5. build/install/log 삭제
-6. colcon build --symlink-install 전체 빌드
+Customer UI
+-> Web Gateway
+-> Fleet API
+-> Task Manager
+-> Traffic Manager
+-> Robot Command Gateway
+-> AMR MoveCommand / DockCommand
+-> COBOT ExecuteTask
+-> DB state update
+-> Admin UI realtime update
 ```
 
-팀원 환경을 맞출 때는 부분 초기화 옵션 없이 `./reset_ws.sh`를 그대로 실행합니다.
+## Core Features
 
-### 수동 의존성 설치 / 빌드
+| Area | Feature |
+|---|---|
+| Customer UI | 상품 주문, 요청 상태 확인 |
+| Admin UI | 로봇 상태, 작업 슬롯, 예외/알람, 재고 현황, minimap 관제 |
+| Fleet Manager | 주문/진열 요청을 task sequence로 변환하고 로봇 명령 송신 |
+| Task Manager | 주문, 입고, 진열, 복귀, 도킹 작업 상태 전이 관리 |
+| Traffic Manager | zone graph 기반 경로 생성, waypoint 예약/해제, 다중 AMR 경로 충돌 완화 |
+| AMR Navigation | ROS 2 Nav2, AMCL, waypoint 이동, obstacle stop, reverse docking |
+| COBOT Workflow | 상품 적재, 검사, 진열 작업을 ROS 2 action server로 수행 |
+| Integration Test | 실로봇, fake AMR, fake COBOT 조합으로 통합 시나리오 검증 |
 
-자동 스크립트 대신 수동으로 진행할 경우:
+## Technical Highlights
 
-```bash
-rosdep install --from-paths src --ignore-src -r -y
-colcon build --symlink-install
-source /opt/ros/jazzy/setup.bash
-source install/setup.bash
-```
+### Fleet Orchestration
 
-특정 패키지만 빌드할 경우:
+Fleet Manager는 Web/API 요청과 실제 로봇 action 사이의 중간 계층입니다. Web은 DB를 직접 수정하지 않고 Fleet API를 통해 주문과 작업을 요청하며, Fleet Manager 내부에서 Task Manager, Traffic Manager, RobotCommandGateway, RobotStateMonitor가 각 책임을 나눠 처리합니다.
 
-```bash
-# Pinky Pro만
-colcon build --symlink-install --packages-up-to pinky_gz_sim
+이 구조는 다음 문제를 분리합니다.
 
-# myCobot만
-colcon build --symlink-install --packages-up-to mycobot_moveit_config
-```
+- UI 요청과 로봇 실행 시점 분리
+- DB 상태와 ROS 2 action 결과 동기화
+- 주문, 진열, 복귀, 도킹 task 흐름 추적
+- fake robot server를 이용한 하드웨어 없는 통합 테스트
 
----
+### Multi-Robot Traffic Management
 
-## 루트 실행 스크립트
+AMR 2대가 같은 좁은 맵에서 움직이기 때문에 단순 최단 경로만으로는 충돌 가능성이 있습니다. Traffic Manager는 zone graph를 기준으로 waypoint 경로를 만들고, 다른 로봇이 점유 중인 zone을 고려해 경로를 예약/해제합니다.
 
-| 스크립트 | 언제 사용 | 하는 일 |
+주요 검증 포인트는 다음과 같습니다.
+
+- waypoint 순서 보존
+- pickup/product/traffic zone 교차 구간 점유 관리
+- 로봇이 지나간 waypoint 해제 타이밍
+- 작업 재시작 또는 도킹 후 다음 작업 source zone 갱신
+
+### AMR Navigation And Docking
+
+PICKY AMR은 ROS 2 Nav2 기반으로 주행합니다. 실환경에서는 맵 크기와 통로 폭이 매우 작아 일반적인 기본 Nav2 값만으로는 안정적인 주행이 어렵기 때문에, AMCL, costmap, goal tolerance, controller, obstacle stop 파라미터를 실주행 로그 기반으로 조정했습니다.
+
+PICKY2는 ArUco marker 기반 reverse docking을 구현합니다.
+
+- charging dock별 marker id와 map pose 관리
+- 도킹 단계에서 카메라 활성화
+- marker pose 기반 정렬
+- 후진 중 marker distance 기반 정지
+- 실패 시 escape 후 재시도
+- debug image와 rosbag으로 실주행 실패 원인 분석
+
+### ROS 2 Discovery And Debugging
+
+멀티 로봇을 같은 ROS_DOMAIN_ID에서 실행하면 DDS discovery, Wi-Fi multicast, lifecycle bond timeout 문제가 발생할 수 있습니다. 이 프로젝트는 실행 환경에 맞춰 FastDDS Discovery Server, ROS_DOMAIN_ID 분리, bridge 구성 같은 대응 전략을 검토하고, 디버깅용 rosbag 기록 스크립트를 따로 제공합니다.
+
+디버깅 도구는 다음 정보를 우선 기록합니다.
+
+- `/picky*/odom`
+- `/picky*/scan`
+- `/picky*/tf`, `/picky*/tf_static`
+- Nav2 action/lifecycle 상태
+- AMR state machine 로그
+- 도킹 debug image
+
+## Engineering Challenges
+
+이 프로젝트는 Web 서비스와 실제 로봇 제어를 동시에 다루기 때문에, 단순 기능 구현보다 **상태 동기화, 로봇 간 충돌 가능성, 실환경 센서/네트워크 불안정성**을 해결하는 데 많은 비중이 있었습니다.
+
+| Challenge | What Happened | Resolution |
 |---|---|---|
-| `./reset_ws.sh` | 최초 세팅, 환경 재설정, 의존성/빌드 상태를 깨끗하게 맞출 때 | `web/.venv`, PostgreSQL DB, rosdep, colcon 전체 symlink build를 순서대로 수행 |
-| `./run_all.sh` | 평소 로컬 통합 실행 | Fleet Manager/Fleet API `:8100`을 띄우고 Web Gateway `:8000`을 실행 |
-| `./reset_demo_data.sh` | 빌드 없이 DB만 빠르게 최신 schema + seed 기준으로 되돌릴 때 | public schema를 재생성하고 `db/schema.sql` + `db/seed.sql`을 적용 |
+| Multi-robot task orchestration | 주문, 진열, 복귀, 도킹이 서로 다른 로봇 action 결과와 DB 상태에 걸쳐 진행되어 task 흐름이 꼬일 수 있었습니다. | Fleet API, Task Manager, Fleet Repository, Robot Command Gateway로 책임을 나누고, task 상태 전이와 action result callback을 기준으로 다음 단계를 진행하도록 구성했습니다. |
+| Traffic conflict in narrow map | PICKY 2대가 product/pickup/traffic zone을 동시에 지나가면 같은 waypoint를 공유하거나 반대 방향으로 진입할 수 있었습니다. | Traffic Manager가 zone graph 기반으로 경로를 예약하고, waypoint feedback을 받아 지나간 구간을 해제하도록 설계했습니다. source zone 갱신과 pickup/product zone 병목도 별도 검증 대상으로 관리했습니다. |
+| Nav2 tuning in small workspace | 약 2m x 1m 수준의 좁은 맵과 25~37cm 통로에서는 기본 Nav2 파라미터가 너무 보수적이거나, 반대로 목표 도착 판정이 어긋나는 문제가 있었습니다. | AMCL beam/particle, goal tolerance, costmap, controller, obstacle stop 값을 rosbag과 RViz 관측 기반으로 조정했습니다. |
+| Reverse docking reliability | 단순 odom 후진 거리만으로는 charging dock 정렬이 안정적이지 않았고, 마커 탐색/정렬 실패 시 벽에 닿거나 marker를 잃는 문제가 있었습니다. | ArUco marker pose 기반 정렬, marker distance 기반 정지, retry escape, target marker 재탐색, debug image 저장을 추가해 실패 원인을 추적 가능하게 만들었습니다. |
+| ROS 2 discovery over Wi-Fi | 여러 로봇과 PC가 같은 ROS_DOMAIN_ID에서 실행될 때 action server/lifecycle node가 늦게 보이거나 일부 토픽 주기가 떨어지는 현상이 있었습니다. | FastDDS Discovery Server, ROS_DOMAIN_ID 분리, bridge 구조를 비교 검토하고, 실행 런북과 `dds_env.sh`, rosbag debug recorder로 재현/분석 절차를 정리했습니다. |
+| Emergency stop and resume | Emergency Stop 후 action이 취소되거나 실패한 task를 그대로 RUNNING으로 되돌리면 resume 시 경로와 로봇 상태가 불일치할 수 있었습니다. | resume 시 task를 재배정 가능한 상태로 되돌리고, 현재 pose 기반으로 source zone을 다시 계산해 경로를 재예약하도록 보정했습니다. |
+| Display task workflow | 주문으로 재고가 부족해졌을 때 자동진열이 새 주문보다 먼저 배정되거나, 기존 진열 batch에 잘못 붙는 문제가 있었습니다. | 자동진열 생성 시점을 주문 첫 task 실행 시점과 열린 진열 batch 상태에 맞춰 조정하고, COBOT의 `DISPLAY_PLACE`가 스캔부터 진열까지 처리하는 4-task 흐름으로 단순화했습니다. |
 
-권장 순서:
+## Collaboration And Project Management
+
+팀 프로젝트 산출물과 협업 흐름은 코드와 함께 관리했습니다.
+
+| Tool | Usage |
+|---|---|
+| Confluence | 요구사항, 시스템 아키텍처, task scenario, interface specification 문서 작성 |
+| Jira | 작업 단위, 이슈, 진행 상태, 담당 흐름 관리 |
+| Slack | 실험 결과, 장애 로그, 현장 테스트 상황, 빠른 의사소통 공유 |
+| Git / GitHub | 기능 브랜치, 커밋 이력, 팀원 작업 통합 관리 |
+
+Confluence 문서는 PDF로 export해 `docs/`에 보관했고, 실행 절차와 디버깅 과정에서 반복적으로 필요한 내용은 markdown runbook으로 별도 정리했습니다.
+
+## Tech Stack
+
+| Layer | Stack |
+|---|---|
+| Robot Middleware | ROS 2 Jazzy |
+| AMR Navigation | Nav2, AMCL, Costmap, Regulated Pure Pursuit |
+| Robot Perception | LiDAR, OpenCV ArUco, camera debug image |
+| Robot Control Interface | ROS 2 action, service, topic |
+| Backend | Python, FastAPI |
+| Database | PostgreSQL |
+| Frontend | HTML, CSS, JavaScript |
+| Realtime Update | WebSocket |
+| Debugging | rosbag2, MCAP, RViz, tmux, shell runbooks |
+| Collaboration | Jira, Confluence, Slack, GitHub |
+| Simulation / External Packages | Gazebo, Pinky Pro packages |
+
+## Repository Layout
+
+```text
+just_pick_it/
+├── db/                         # PostgreSQL schema, seed, DB notes
+├── docs/                       # 설계 문서, 실행 런북, 시스템 설명 자료
+├── scripts/
+│   ├── build_tools/            # PICKY별 colcon build helper
+│   ├── demo/                   # fake robot, full-flow demo helpers
+│   ├── navigation/             # PICKY bringup/nav/state/debug scripts
+│   ├── runtime/                # Fleet Manager + Web Gateway 실행
+│   └── setup/                  # workspace reset, demo DB reset
+├── src/
+│   ├── just_pick_it/
+│   │   ├── fleet_manager/      # Fleet API, TaskManager, TrafficManager, robot gateway
+│   │   ├── just_pick_it_db/    # DB service layer
+│   │   ├── just_pick_it_interfaces/
+│   │   ├── picky_cobot_1/      # COBOT runtime package
+│   │   ├── pinky_amr_1/        # PICKY1 runtime package
+│   │   └── pinky_amr_2/        # PICKY2 navigation, docking, state machine
+│   ├── pinky_pro/              # Pinky Pro vendor/reference packages
+│   └── sllidar_ros2/           # SLAMTEC LiDAR driver
+└── web/                        # Customer/Admin UI and Web Gateway
+```
+
+## Running The System
+
+루트 README는 전체 구조를 보여주는 용도입니다. 실제 실행 순서는 장비 조합에 따라 달라지므로 아래 런북을 기준으로 실행합니다.
+
+- [전체 시스템 실행 런북](docs/System_Execution_Runbook.md)
+- [Web Gateway README](web/README.md)
+- [DB README](db/README.md)
+- [Fake Robot Demo README](scripts/demo/README.md)
+
+기본적인 관제 PC 실행 흐름은 다음과 같습니다.
 
 ```bash
-# 최초 1회 또는 환경 재세팅
-./reset_ws.sh
-
-# 평소 통합 실행
-./run_all.sh
-
-# DB만 빠르게 초기화
-./reset_demo_data.sh
+cd ~/just_pick_it
+bash scripts/setup/reset_demo_data.sh
+bash scripts/runtime/run_all.sh
 ```
 
-`./run_all.sh`는 `./reset_ws.sh`가 끝난 워크스페이스를 기준으로 동작합니다.
-Web Gateway만 단독 실행할 때는 `web/scripts/run.sh`를 사용하지만, 실제 데이터 조회는 Fleet API가 떠 있어야 정상 동작합니다.
+실제 로봇 통합 테스트는 Discovery Server, PICKY1/PICKY2 보드, COBOT 호스트, AI PC 실행 순서를 맞춰야 합니다. 자세한 순서는 [System_Execution_Runbook.md](docs/System_Execution_Runbook.md)를 확인하세요.
 
----
+## Documentation Map
 
-## scripts 자동화
+요구사항, 시스템 아키텍처, 시나리오, 인터페이스 문서는 Confluence에서 관리한 내용을 PDF로 export해 `docs/`에 보관했습니다. 작업 단위와 이슈 흐름은 Jira를 기준으로 관리했고, 실험 로그와 빠른 상황 공유는 Slack을 활용했습니다.
 
-Terminator 레이아웃 기반 자동화 스크립트. 각 스크립트는 topic 감지를 통해 pane 간 순차 실행을 자동화합니다.
+| Document | Purpose |
+|---|---|
+| [Project Topic](docs/0_Project_Topic.pdf) | 프로젝트 주제와 목표 |
+| [User Requirements](docs/1_User_Requirements.pdf) | 사용자 요구사항 |
+| [System Requirements](docs/2_System_Requirements.pdf) | 시스템 요구사항 |
+| [System Architecture](docs/3_System_Architecture.pdf) | 전체 시스템 아키텍처 |
+| [Task Scenario](docs/4_Task_Scenario.pdf) | 주문/진열 작업 시나리오 |
+| [Data Structure](docs/6_Data_Structure.pdf) | 데이터 구조 |
+| [Interface Specification](docs/7_interface_specification.pdf) | 주요 인터페이스 명세 |
+| [System Execution Runbook](docs/System_Execution_Runbook.md) | 실로봇, fake robot 조합별 실행 순서 |
+| [Fleet Manager](docs/Fleet_manager.md) | Fleet Manager 구조와 주요 흐름 |
+| [Fleet Manager Interface](docs/Fleet_manager_interface.md) | Fleet 연동 인터페이스 |
+| [Order Scenario Test Guide](docs/Order_Scenario_Test_Guide.md) | 주문 시나리오 테스트 흐름 |
+| [Reverse Docking Design](docs/Reverse_Docking_Design.md) | reverse docking 설계 |
+| [Multi Robot Discovery Server](docs/Multi_Robot_Discovery_Server.md) | 멀티 로봇 DDS discovery 관련 정리 |
+| [LLM Order Command Guide](docs/LLM_Order_Command_Guide.md) | LLM 주문 명령 가이드 |
 
-### 맵핑 (`scripts/mapping/`)
+## Current Status
 
-| 스크립트 | 설명 |
-|---------|------|
-| `sim_map_building.sh` | Gazebo 시뮬레이션 SLAM 맵핑 |
-| `real_map_building.sh` | 실제 Pinky Pro 로봇 SLAM 맵핑 |
+- Customer/Admin UI, DB, Fleet Manager, fake robot 기반 통합 흐름을 제공합니다.
+- PICKY1/PICKY2 실로봇 주행과 도킹 테스트를 진행했습니다.
+- PICKY2는 ArUco marker 기반 reverse docking과 obstacle stop을 포함합니다.
+- 다중 로봇 동시 운용 시 네트워크, DDS discovery, waypoint 점유/해제 타이밍을 계속 검증 중입니다.
+- 실환경에서는 각 장비 IP, ROS_DOMAIN_ID, DDS discovery 설정, serial/camera device 설정을 현장 값에 맞춰야 합니다.
 
-**시뮬레이션 맵핑 레이아웃:**
-```
-┌──────────────┬──────────────┐
-│  1. Gazebo   │  3. RViz     │
-├──────────────┼──────────────┤
-│  2. SLAM     │  4. Teleop   │
-├──────────────┴──────────────┤
-│       5. Map Saver          │
-└─────────────────────────────┘
-```
-자동 순서: Gazebo 실행 → `/clock` 감지 시 SLAM 실행 → `/map` 감지 시 RViz 실행
-수동 조작: Teleop으로 주행 후 Map Saver에서 이름 입력하여 저장
+## External Package And License Notes
 
-**실제 로봇 맵핑 레이아웃:**
-```
-┌──────────────┬──────────────┐
-│  1. Bringup  │  3. RViz     │
-├──────────────┼──────────────┤
-│  2. SLAM     │  4. Teleop   │
-├──────────────┴──────────────┤
-│       5. Map Saver          │
-└─────────────────────────────┘
-```
-자동 순서: Bringup 실행 → `/scan` + `/odom` + `/imu` 모두 감지 시 SLAM 실행 → `/map` 감지 시 RViz 실행
+이 워크스페이스는 팀 구현 패키지와 외부 로봇 패키지를 함께 사용합니다.
 
-### 내비게이션 (`scripts/navigation/`)
+- `src/pinky_pro`: Pinky Pro ROS 2 packages
+- `src/sllidar_ros2`: SLAMTEC LiDAR ROS 2 driver
 
-| 스크립트 | 설명 |
-|---------|------|
-| `sim_navigation.sh` | Gazebo 시뮬레이션 Nav2 자율 주행 |
-| `real_navigation.sh` | 실제 Pinky Pro 로봇 Nav2 자율 주행 |
-
-**시뮬레이션 내비게이션 레이아웃:**
-```
-┌──────────────┬──────────────┐
-│  1. Gazebo   │  3. RViz     │
-├──────────────┴──────────────┤
-│     2. Nav2 (맵 선택 후 실행)│
-└─────────────────────────────┘
-```
-자동 순서: Gazebo 실행 → `/clock` 감지 시 맵 선택 후 Nav2 실행 → `/amcl_pose` 감지 시 RViz 실행
-
-**실제 로봇 내비게이션 레이아웃:**
-```
-┌──────────────┬──────────────┐
-│  1. Bringup  │  3. RViz     │
-├──────────────┴──────────────┤
-│     2. Nav2 (맵 선택 후 실행)│
-└─────────────────────────────┘
-```
-자동 순서: Bringup 실행 → `/scan` + `/odom` + `/imu` 감지 시 맵 선택 후 Nav2 실행 → `/amcl_pose` 감지 시 RViz 실행
-
-### 사용법
-
-```bash
-# 시뮬레이션 맵핑
-bash scripts/mapping/sim_map_building.sh
-
-# 실제 로봇 맵핑
-bash scripts/mapping/real_map_building.sh
-
-# 시뮬레이션 내비게이션
-bash scripts/navigation/sim_navigation.sh
-
-# 실제 로봇 내비게이션
-bash scripts/navigation/real_navigation.sh
-```
+외부 패키지의 라이선스와 원본 고지는 각 패키지 내부의 `LICENSE`와 README를 따릅니다.
