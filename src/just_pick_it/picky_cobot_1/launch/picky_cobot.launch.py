@@ -8,7 +8,7 @@ Cobot 호스트(192.168.1.99)용 통합 launch — 이 하나로 cobot 호스트
   2. jetcobot_camera_udp_sender : 카메라 프레임을 local AI 컴퓨터(192.168.1.70)로 UDP 송출.
      (위 두 노드는 jetcobot_control_with_camera.launch.py 를 include 해서 띄운다.)
   3. cobot_state_manager        : ExecuteTask 액션 서버. SORTING/LOADING/INSPECTION/
-     UNLOAD/DISPLAY_SCAN/DISPLAY_PLACE 등 모든 cobot task 를 처리한다. serial 은 위
+     UNLOAD/DISPLAY_PLACE 등 모든 cobot task 를 처리한다. serial 은 위
      드라이버가 점유하므로 dry_run=true 로 직접 제어를 생략하고, SORTING 픽은 IBVS+NN
      에 토픽으로 요청한다.
 
@@ -63,8 +63,8 @@ def generate_launch_description():
         DeclareLaunchArgument('port', default_value='/dev/ttyJETCOBOT'),
         DeclareLaunchArgument('baudrate', default_value='1000000'),
         DeclareLaunchArgument('default_speed', default_value='20'),
-        # 카메라 UDP 수신 측(local AI 컴퓨터) IP/포트.
-        DeclareLaunchArgument('camera_dest_ip', default_value='192.168.1.70'),
+        # 카메라 UDP 수신 측(local AI 컴퓨터) IP/포트. 운영 환경 다르면 camera_dest_ip:= 로 덮어쓴다.
+        DeclareLaunchArgument('camera_dest_ip', default_value='192.168.0.5'),
         DeclareLaunchArgument('camera_dest_port', default_value='5003'),
         DeclareLaunchArgument('camera_dest_port_2', default_value='5004'),
         # true 면 토픽 발행 없이 시뮬레이션. 실제 로봇 구동은 false.

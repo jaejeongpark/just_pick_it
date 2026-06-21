@@ -1,0 +1,50 @@
+empty_slot_detector_node:
+  ros__parameters:
+    # 점유로 처리할 YOLO 클래스(쉼표 구분). 비우면 모든 검출을 obstacle 취급.
+    obstacle_classes: ""
+    min_confidence: 0.5
+
+    # 선반 표면 ROI fallback 사각형(이미지 비율). edge ROI 실패 시 사용.
+    roi_top_frac: 0.02
+    roi_bottom_frac: 0.98
+    roi_left_frac: 0.02
+    roi_right_frac: 0.98
+
+    # Canny + Hough 로 선반 near-horizontal 모서리 검출해 ROI 상/하단을 한정.
+    use_edge_roi: true
+    canny_low: 25
+    canny_high: 90
+    hough_threshold: 80
+    hough_min_line_len: 160
+    hough_max_line_gap: 30
+    edge_max_image_slope: 0.10
+    use_white_mask: true
+
+    # 후보 footprint / clearance / 가장자리 margin (이미지 픽셀).
+    # 진열대 24x10cm 와 스캔 거리에 맞춰 실측 보정. 보수적으로(여유 크게) 잡는다.
+    place_radius_px: 30.0
+    clearance_px: 8.0
+    edge_margin_px: 6.0
+
+    # 스코어 가중치.
+    w_clear: 3.0
+    w_center: 0.6
+    w_front: 0.5
+
+    bbox_scale: 1.0
+
+    # 자세별 후보 안정화(다중 프레임 샘플링). 한 capture(자세)에서 여러 프레임을 모아
+    # 같은 위치에 반복 검출되는 후보만 채택해 jitter/허위검출을 제거한다.
+    #   capture_sample_count : 한 capture 에서 detection 할 최대 프레임 수
+    #   capture_sample_sec   : 샘플링 최대 시간(s). 컨트롤러 SCAN_CAPTURE_SEC 보다 작게 둘 것
+    #   capture_stable_tol_px: 같은 위치로 묶을 center 허용 오차(px)
+    #   capture_min_stable   : 채택에 필요한 최소 일관 검출 프레임 수(미만이면 후보 없음)
+    capture_sample_count: 5
+    capture_sample_sec: 1.0
+    capture_stable_tol_px: 20.0
+    capture_min_stable: 3
+
+    # 라이브 디버그 영상 발행 주파수(Hz). 0이면 비활성(운영 기본).
+    # >0 으로 두면 스캔 트리거와 무관하게 /place/debug_image, /place/debug_edges 를 주기 발행.
+    # 구독자가 있을 때만 실제 publish(lazy). 검증/튜닝용.
+    debug_live_hz: 5.0

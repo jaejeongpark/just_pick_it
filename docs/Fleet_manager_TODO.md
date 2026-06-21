@@ -166,10 +166,26 @@
     `scripts/discovery_server.sh`, `scripts/dds_env.sh`, headless 스크립트 dds_env source.
     **검증**: picky1+picky2 양쪽 battery/amcl_pose/scan/odom 크로스호스트 OK. 운영 런북:
     `docs/Multi_Robot_Discovery_Server.md`.
-    **남은 것**: ① 2대 동시 보드 CPU 포화(load 7/4코어)로 nav goal 상위 cancel — 경량화 조사 중
-    ② discovery server systemd 자동기동+IP 고정 ③ fleet→로봇 커스텀 액션 인터페이스 호환 E2E.
+    **남은 것**: ① ✅ 2대 동시 보드 CPU 포화 → **nav2 composition 으로 해소**(§3-A 13)
+    ② discovery server systemd 자동기동+IP 고정 ③ fleet→로봇 커스텀 액션 호환은 **2대 E2E 로 확인**(§3-A 13).
 
-> 박서우 미완(다음 기동·배터리 충전 후): 주문 E2E 실주행 완주, R1 재시작 복구 실동작, `_at_dock` 부팅 가정 견고화(낮음). 멀티로봇 CPU 경량화(§3-A 12). **Reverse Docking 은 완성(§3-A 9, 11).** 상세는 §3-D.
+13. **nav2 composition 경량화 + 2대 AMR E2E 성공 (2026-06-17)** — ✅ 완료 (박서우)
+    2대 동시 가동 시 보드 CPU 포화로 nav goal 이 상위 로직에서 cancel 되던 과부하를 nav2 **composition**
+    으로 해소. `picky1_nav.launch.py` 에 `use_composition:=True` 경로 추가 — nav2 노드 11개를 단일
+    `component_container_isolated` 프로세스로 통합(**DDS participant 약 13→1**, participant 별 Fast-DDS
+    전송 스레드 폴링 제거). `nav2_params.yaml` 은 무수정(amcl/costmap 주기 그대로 — 과거 costmap 주기↓가
+    amcl 추정 깨던 회귀를 피하려 composition 만 단독 적용).
+    - **핵심 버그 격리**: composed 컨테이너 Node 에 param 파일(`--params-file`)·`/tf` remap 을 안 주면
+      controller 내부 costmap 서브노드가 params 를 못 받아 기본값(`global_frame=map`)으로 떠
+      `base_link->map` TF timeout 으로 controller 활성 실패 abort. nav2_bringup 표준대로 컨테이너에
+      `parameters=[configured_params]`+`/tf` remap 부여로 해결. (과거 "ARM 에서 composition 실패"의
+      진짜 원인 — ARM 무관, **컨테이너 param 누락**이었음. 컴포넌트 11개 전부 정상 등록 확인됨.)
+    - 결과: nav2 11프로세스 → 1프로세스, load 콜드스타트 5 → 정상 ~3(4코어). amcl 1회 오정위(zone4
+      precision 램밍)는 **일회성 transient**(모드·파라미터 무변경 재실행서 재현 안 됨 — 초기화 운빨).
+    - **2대 AMR E2E 성공**: picky1+picky2 동시, Discovery Server + composition 으로 nav 안정,
+      주문 흐름 끝까지 완주.
+
+> 박서우 미완(다음 기동): R1 재시작 복구 실동작, `_at_dock` 부팅 가정 견고화(낮음), PICKY2 Nav2 namespace화. **Reverse Docking 완성(§3-A 9, 11) · nav2 composition + 2대 E2E 완료(§3-A 13).** 상세는 §3-D.
 
 ### 3-B. 이명제 완료 작업
 
@@ -179,6 +195,7 @@
 | R2 | flow 종료 시 in-memory 임시 메모리 정리 |
 | D5 | 진열 흐름 코드 반영(enum/API/TaskManager/Web/테스트) |
 | — | Fleet 측 COBOT `send_cobot_task` 연결 준비 + STOWING_ARM 감지 -> `preplan_after_cobot_stowing` 호출 |
+| — | (2026-06-17) 진열태스크 생성순서 수정: 주문 생성 시 자동진열 즉시 queue 조건 단순화(`_has_active_auto_display_context` → `has_appendable_display_item` 만) |
 
 ### 3-C. 공동 완료 (문서)
 
@@ -199,7 +216,7 @@ C3 수정 문서:
 우선순위 순. 박서우는 "다음 기동(배터리 충전 후)" 항목이 최우선이다.
 
 **박서우 — 다음 기동(배터리 충전 후) 최우선**
-- [ ] 주문 E2E 실주행 완주: `MOVE_TO_PRODUCT` -> ... -> `DOCK_IN`/`CHARGING` 까지 picky1 단독으로 끝까지(§3-A 6단계 결과 실증). COBOT 차례는 수동 완료(`Order_Scenario_Test_Guide.md` §3.2).
+- [x] 주문 E2E 실주행 완주 (2026-06-17): picky1+picky2 **2대 동시 E2E 성공**(§3-A 13). COBOT 차례는 수동(`Order_Scenario_Test_Guide.md` §3.2).
 - [ ] R1 재시작 복구 실동작 확인: RUNNING 중 Fleet 재시작 -> 현재 위치 점유 복원 + 텔레메트리 완료 재동기 + 타임아웃.
 
 **박서우 — 그 외**
@@ -215,7 +232,7 @@ C3 수정 문서:
 - [ ] Q: `task_manager` 추가 흐름 테스트, `fleet_api_server` 엔드포인트 테스트.
 
 **공동 / 회색지대**
-- [ ] 전체 E2E(주문/진열/emergency) 2대 실로봇 검증. (박서우 picky1 E2E + 이명제 COBOT 연동 후)
+- [~] 전체 E2E(주문/진열/emergency) 2대 실로봇 검증 — **AMR 2대 주행 E2E 성공(2026-06-17, §3-A 13)**. COBOT 연동분 잔여(이명제).
 - [ ] B3: emergency-stop이 HTTP 스레드에서 rclpy를 직접 호출(`trigger_emergency_stop` -> gateway). 통합계획 2.3/3.4대로 executor로 위임 검토.
 - [ ] 관리자 엔드포인트 인증/인가.
 - [ ] WebSocket push를 전체 스냅샷 -> 변경분(delta) 전환 검토.

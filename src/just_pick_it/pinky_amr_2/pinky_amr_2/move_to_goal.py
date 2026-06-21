@@ -86,7 +86,7 @@ class MoveToGoal(Node):
         self.declare_parameter("precision_heading_deadband_distance", 0.03)
         self.declare_parameter("precision_heading_gate_angle", 0.35)
         self.declare_parameter("map_frame", "map")
-        self.declare_parameter("base_frame", "picky2/base_link")
+        self.declare_parameter("base_frame", "base_link")
 
         self._prec_dist = self.get_parameter("precision_approach_distance").value
         self._waypoint_reach = self.get_parameter("waypoint_reach_distance").value

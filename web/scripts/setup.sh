@@ -85,4 +85,4 @@ fi
 
 log "done"
 log "run Web Gateway only: web/scripts/run.sh"
-log "run full stack from repo root: ./run_all.sh"
+log "run full stack from repo root: bash scripts/runtime/run_all.sh"

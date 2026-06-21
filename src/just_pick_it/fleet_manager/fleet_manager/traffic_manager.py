@@ -83,15 +83,20 @@ OCCUPYING_STATES = frozenset({
     'WAITING_FOR_COBOT',
 })
 
-# 로봇이 도크를 실제로 빠져나가는(언도크) 이동 상태. 도크 점유는 이 상태로
-# 진입할 때만 해제한다. DOCKING 은 도크로 들어오는 중이라 제외한다.
-LEAVING_DOCK_STATES = MOVING_STATES - frozenset({'DOCKING'})
+# 로봇이 '새 주문'으로 도크를 빠져나가는(언도크) 이동 상태. 도크 점유는 이
+# 상태로 진입할 때만 해제한다. RETURNING 은 도크로 귀환하는 중이며
+# reserve_return_home_path 가 목적 도크를 이미 점유하므로 제외하고, DOCKING 은
+# 도크로 들어오는 중이라 제외한다.
+LEAVING_DOCK_STATES = MOVING_STATES - frozenset({'DOCKING', 'RETURNING'})
 
 # 안쪽 도크 우선 순서: (충전 도크 이름, 도킹 시작점 STANDBY_ZONE 이름)
 DOCK_PRIORITY = [
     ('CHARGING_DOCK_1', 'STANDBY_ZONE_1'),  # 안쪽
     ('CHARGING_DOCK_2', 'STANDBY_ZONE_2'),  # 바깥쪽
 ]
+
+# STANDBY_ZONE -> 그 zone 에서 진입하는 충전 도크 (귀환 시 도크 점유 매핑용).
+DOCK_BY_STANDBY: dict[str, str] = {standby: dock for dock, standby in DOCK_PRIORITY}
 
 # RETURN_HOME 의 목적지 후보. BFS 비용 최소 zone 을 선택한다.
 STANDBY_ZONES: list[str] = ['STANDBY_ZONE_1', 'STANDBY_ZONE_2']
@@ -347,17 +352,21 @@ class TrafficManager:
         도크 수가 로봇 수와 같아 귀환 시 빈 도크가 항상 하나 이상 있다. 둘 다
         비어 있으면 CHARGING_DOCK_1 의 STANDBY_ZONE_1 로 귀환해, 이어지는 DOCK_IN
         이 안쪽 도크부터 채우도록 한다(reserve_dock_path 의 DOCK_PRIORITY 와 일치).
-        도크 점유 판정이 정확하려면 STANDBY(도크 내 대기) 상태에서도 도크 점유가
-        유지돼야 한다(notify_state 의 도크 해제 조건 참고).
+
+        목적 도크를 이 시점에 함께 점유한다(원자적). 그래야 두 로봇이 거의 동시에
+        귀환할 때 둘째 로봇이 첫째가 노린 도크를 비었다고 보고 같은 도크로 향하는
+        race 가 막힌다(예전엔 도크 점유를 DOCK_IN 까지 미뤄 그 사이 무주공산이었다).
+        점유는 '새 주문 출발(MOVING_TO_*)' 때 notify_state 가 해제한다(RETURNING 제외).
 
         우선 도크의 STANDBY_ZONE 이 일시적으로 막혀 있으면 도달 가능한 다른
-        STANDBY_ZONE 으로 귀환한다(로봇 고립 방지). 도크는 예약하지 않으며,
-        도크 예약은 이후 DOCK_IN task 의 reserve_dock_path() 가 수행한다.
+        STANDBY_ZONE 으로 귀환한다(로봇 고립 방지). 이 안전망 경우엔 해당 STANDBY 의
+        도크가 비어 있을 때만 점유한다(막혀 있으면 점유하지 않고 DOCK_IN 이 처리).
 
         반환되는 PathResult.waypoints 의 마지막 zone 이 목적지 STANDBY_ZONE 이다.
         """
         best_path: list[str] | None = None
         best_zone: str | None = None
+        best_dock: str | None = None
 
         with self._lock:
             occupied = {
@@ -374,6 +383,7 @@ class TrafficManager:
                 if path is not None:
                     best_path = path
                     best_zone = standby_zone
+                    best_dock = dock_name
                     break
 
             # 2순위(안전망): 우선 도크의 STANDBY 가 막혀 있으면 도달 가능한
@@ -389,10 +399,15 @@ class TrafficManager:
                         best_cost = cost
                         best_zone = zone
                         best_path = path
+                # 도달한 STANDBY 의 도크가 비어 있을 때만 점유한다.
+                cand = DOCK_BY_STANDBY.get(best_zone) if best_zone else None
+                best_dock = cand if (cand is not None and cand not in occupied) else None
 
             if best_path is not None:
                 self._robot_paths[robot_id] = best_path
                 self._robot_reservations[robot_id] = task_id
+                if best_dock is not None:
+                    self._robot_dock[robot_id] = best_dock
 
         if best_path is None:
             self._node.get_logger().warn(
@@ -402,7 +417,7 @@ class TrafficManager:
 
         self._node.get_logger().info(
             f'[TrafficManager] {robot_id} task={task_id} 귀환 예약: '
-            f'{best_zone}, 경로: {" -> ".join(best_path)}'
+            f'{best_zone}(도크 점유={best_dock}), 경로: {" -> ".join(best_path)}'
         )
         return PathResult(
             ok=True,
@@ -416,7 +431,8 @@ class TrafficManager:
         task_id: int,
         source_zone: str,
     ) -> PathResult:
-        """DOCK_IN 전용. 빈 충전 도크를 안쪽 우선으로 선택해 경로 + 도크를 예약한다.
+        """DOCK_IN 전용. 귀환 때 이미 점유한 자기 도크로 도킹한다. 점유한 도크가
+        없거나(콜드/복구 등) 막혀 있으면 빈 충전 도크를 안쪽 우선으로 선택한다.
 
         도크 선정과 경로/도크 예약을 단일 lock 안에서 원자적으로 수행하여
         두 로봇이 같은 도크를 동시에 비어있다고 판단하는 race 를 차단한다.
@@ -427,12 +443,20 @@ class TrafficManager:
         chosen_dock: str | None = None
 
         with self._lock:
-            occupied = {dock for dock in self._robot_dock.values() if dock is not None}
+            own = self._robot_dock.get(robot_id)
+            occupied = {
+                dock for rid, dock in self._robot_dock.items()
+                if dock is not None and rid != robot_id
+            }
             blocked_nodes, blocked_edges = self._build_blocked_sets(robot_id)
 
-            for dock_name, _standby in DOCK_PRIORITY:
-                if dock_name in occupied:
-                    continue
+            # 귀환 예약으로 점유한 자기 도크를 먼저, 없으면 빈 도크 우선순위.
+            candidates: list[str] = []
+            if own is not None and own not in occupied:
+                candidates.append(own)
+            candidates += [d for d, _ in DOCK_PRIORITY if d not in occupied and d != own]
+
+            for dock_name in candidates:
                 path = self._bfs(source_zone, dock_name, blocked_nodes, blocked_edges)
                 if path is None:
                     continue
@@ -526,6 +550,25 @@ class TrafficManager:
 
         self._node.get_logger().info(
             f'[TrafficManager] {robot_id} task={task_id} 경로 해제'
+        )
+
+    def hold_occupancy(self, robot_id: str, zone: str) -> None:
+        """MOVE 성공 후 로봇이 도착 zone 에서 WAITING_FOR_COBOT 로 머무는 동안
+        그 zone 점유를 유지한다.
+
+        경로 예약(task)은 해제하되 점유 노드(도착 zone)만 _robot_paths 에 남겨,
+        다른 로봇의 _build_blocked_sets 가 이 zone 을 비었다고 보지 않게 한다.
+        release_path 로 path 를 싹 비우면, 도착 로봇이 그 zone 에 서 있는데도
+        TrafficManager 엔 빈 곳으로 보여 다른 로봇이 그리로 경로를 만들어 충돌한다.
+
+        이후 다음 MOVE 예약이 오면 _robot_paths 가 새 경로로 덮어써지고, 로봇이
+        idle 상태로 빠지면 notify_state 안전망이 이 점유를 정리한다.
+        """
+        with self._lock:
+            self._robot_paths[robot_id] = [zone]
+            self._robot_reservations[robot_id] = None
+        self._node.get_logger().info(
+            f'[TrafficManager] {robot_id} 점유 유지: {zone} (경로 예약 해제, 노드 점유 유지)'
         )
 
     def get_robot_state(self, robot_id: str) -> str | None:
@@ -646,6 +689,12 @@ class TrafficManager:
         if source == target:
             return [source]
 
+        # source 자체가 다른 로봇 path 에 막혀 있으면(= 그 zone 을 남이 점유/예약 중)
+        # 거기서 출발하는 경로도 만들지 않는다. BFS 는 neighbor 만 검사하므로 이
+        # 검사가 없으면 점유된 출발 zone 을 그대로 통과시켜 충돌이 난다.
+        if source in blocked_nodes:
+            return None
+
         queue: deque[list[str]] = deque([[source]])
         visited: set[str] = {source}
 
@@ -688,18 +737,21 @@ class TrafficManager:
         차단 노드 집합과 차단 엣지 집합을 생성한다.
 
         path 가 등록되어 있으면 (picky_state 무관) 그 path 의 노드와 엣지를
-        차단한다. reserve_* 성공 자체가 "이 로봇이 곧 그 path 를 점유" 라는
+        모두 차단한다. reserve_* 성공 자체가 "이 로봇이 곧 그 path 를 점유" 라는
         약속이므로, picky_state 가 MOVING 으로 갱신되기 전 race window 도
         자연히 닫힌다.
 
-        예외: state 가 OCCUPYING_STATES (WAITING_FOR_COBOT 등) 면 이미 도착해
-        작업 중이므로 path[-1] (현재 머무는 노드) 만 차단하고 경유 노드는
-        풀어준다.
+        예전엔 state 가 OCCUPYING_STATES (WAITING_FOR_COBOT 등) 면 path[-1] 만
+        차단하고 경유 노드를 풀어줬으나, MOVE 성공 후 점유 유지(hold_occupancy)나
+        STOWING_ARM preplan 으로 _robot_paths 에 '현재 위치 + 미래 경로'가 들어가는
+        경우 path[-1](미래 목적지)만 막으면 현재 위치와 경유 노드가 풀려 다른
+        로봇이 그리로 진입해 충돌했다. 그래서 OCCUPYING 여부와 무관하게 path 전체를
+        막는다. 정상 도착 로봇은 path 가 [도착 zone] 한 개라 동작이 동일하다.
         """
         blocked_nodes: set[str] = set()
         blocked_edges: set[tuple[str, str]] = set()
 
-        for robot_id, state in self._robot_states.items():
+        for robot_id in self._robot_states:
             if robot_id == exclude_robot_id:
                 continue
 
@@ -707,11 +759,8 @@ class TrafficManager:
             if not path:
                 continue
 
-            if state in OCCUPYING_STATES:
-                blocked_nodes.add(path[-1])
-            else:
-                blocked_nodes.update(path)
-                for i in range(len(path) - 1):
-                    blocked_edges.add((path[i], path[i + 1]))
+            blocked_nodes.update(path)
+            for i in range(len(path) - 1):
+                blocked_edges.add((path[i], path[i + 1]))
 
         return blocked_nodes, blocked_edges

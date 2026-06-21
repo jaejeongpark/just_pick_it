@@ -7,10 +7,10 @@ Docking is split from normal Nav2 driving:
     reverse slowly into the charging dock.
 
 This MVP uses the marker for alignment and stop distance. During reverse
-insertion, the blue guide lane can add a small yaw correction by comparing the
-lane centerline against the marker-normal axis. The current physical marker is
-on the horizontal wall above the standby zones, so the marker is a local
-alignment reference, not the final stopping target.
+insertion, the marker-normal axis can add a small yaw correction by comparing it
+with either the blue guide lane centerline or the camera centerline. The current
+physical marker is on the horizontal wall above the standby zones, so the marker
+is a local alignment reference, not the final stopping target.
 """
 
 import math
@@ -84,7 +84,8 @@ class ReverseDocking(Node):
 
         # Blue guide lane debug/control. It overlays the marker-normal docking
         # axis and the detected lane pair; reverse insertion may use the
-        # marker-axis vs lane-centerline error as a yaw correction.
+        # marker-axis error against the lane or camera centerline as a yaw
+        # correction.
         self.declare_parameter("lane_debug_enabled", True)
         self.declare_parameter("lane_roi_y_min_ratio", 0.52)
         self.declare_parameter("lane_hsv_lower", [75, 35, 40])
@@ -104,6 +105,7 @@ class ReverseDocking(Node):
         self.declare_parameter("marker_search_settle_sec", 0.20)
         self.declare_parameter("align_rotation_step_sec", 0.18)
         self.declare_parameter("marker_search_hint_timeout_sec", 6.0)
+        self.declare_parameter("target_marker_reacquire_timeout_sec", 6.0)
         self.declare_parameter("marker_0_default_search_direction", 1.0)
         self.declare_parameter("marker_1_default_search_direction", -1.0)
 
@@ -122,6 +124,12 @@ class ReverseDocking(Node):
         self.declare_parameter("reverse_success_max_axis_error_px", 180.0)
         self.declare_parameter("yaw_hold_kp", 1.2)
         self.declare_parameter("reverse_lane_axis_enabled", True)
+        self.declare_parameter("reverse_axis_target", "camera")
+        self.declare_parameter("reverse_camera_yaw_hold_kp", 0.3)
+        self.declare_parameter("reverse_camera_axis_kp", 0.0015)
+        self.declare_parameter("reverse_camera_axis_angle_kp", 0.0020)
+        self.declare_parameter("reverse_camera_axis_max_correction", 0.12)
+        self.declare_parameter("reverse_camera_max_angular_vel", 0.18)
         self.declare_parameter("reverse_lane_axis_kp", 0.0025)
         self.declare_parameter("reverse_lane_axis_angle_kp", 0.0)
         self.declare_parameter("reverse_lane_axis_max_correction", 0.22)
@@ -231,6 +239,14 @@ class ReverseDocking(Node):
             0.0,
             float(self.get_parameter("marker_search_hint_timeout_sec").value),
         )
+        self._target_marker_reacquire_timeout = max(
+            0.0,
+            float(
+                self.get_parameter(
+                    "target_marker_reacquire_timeout_sec"
+                ).value
+            ),
+        )
         self._marker_search_directions = {
             0: float(
                 self.get_parameter("marker_0_default_search_direction").value
@@ -282,6 +298,31 @@ class ReverseDocking(Node):
         self._yaw_hold_kp = float(self.get_parameter("yaw_hold_kp").value)
         self._reverse_lane_axis_enabled = bool(
             self.get_parameter("reverse_lane_axis_enabled").value
+        )
+        self._reverse_axis_target = str(
+            self.get_parameter("reverse_axis_target").value
+        ).strip().lower()
+        if self._reverse_axis_target not in ("lane", "camera"):
+            self.get_logger().warn(
+                "Unknown reverse_axis_target="
+                f"{self._reverse_axis_target!r}; using camera"
+            )
+            self._reverse_axis_target = "camera"
+        self._reverse_camera_yaw_hold_kp = float(
+            self.get_parameter("reverse_camera_yaw_hold_kp").value
+        )
+        self._reverse_camera_axis_kp = float(
+            self.get_parameter("reverse_camera_axis_kp").value
+        )
+        self._reverse_camera_axis_angle_kp = float(
+            self.get_parameter("reverse_camera_axis_angle_kp").value
+        )
+        self._reverse_camera_axis_max_correction = float(
+            self.get_parameter("reverse_camera_axis_max_correction").value
+        )
+        self._reverse_camera_max_ang = max(
+            0.0,
+            float(self.get_parameter("reverse_camera_max_angular_vel").value),
         )
         self._reverse_lane_axis_kp = float(
             self.get_parameter("reverse_lane_axis_kp").value
@@ -488,9 +529,13 @@ class ReverseDocking(Node):
 
             result = self._detect_from_latest_frame(marker_id, "OBSERVE_MARKER")
             if result is None:
+                target_w = self._recent_target_alignment_cmd(marker_id)
                 hint_w = self._marker_search_hint(marker_id)
                 twist = Twist()
-                if hint_w is not None:
+                if target_w is not None:
+                    twist.angular.z = target_w
+                    reason = "recent_target"
+                elif hint_w is not None:
                     twist.angular.z = hint_w
                     reason = f"wrong_marker={self._last_seen_marker_id}"
                 else:
@@ -778,27 +823,48 @@ class ReverseDocking(Node):
                         lane_axis_used = True
                     else:
                         self.get_logger().warn(
-                            "REVERSE_INSERT: lane axis ignored for control "
+                            "REVERSE_INSERT: reverse axis ignored for control "
                             f"(axis_err={lane_axis_error:.1f}px > "
                             f"{self._reverse_lane_axis_control_max_error:.1f}px)"
                         )
 
                 if lane_axis_used:
+                    axis_kp = (
+                        self._reverse_camera_axis_kp
+                        if self._reverse_axis_target == "camera"
+                        else self._reverse_lane_axis_kp
+                    )
+                    axis_max_correction = (
+                        self._reverse_camera_axis_max_correction
+                        if self._reverse_axis_target == "camera"
+                        else self._reverse_lane_axis_max_correction
+                    )
                     lane_axis_raw_correction = (
-                        -self._reverse_lane_axis_kp * lane_axis_error
+                        -axis_kp * lane_axis_error
                     )
                     if lane_axis_angle_error is not None:
+                        angle_kp = (
+                            self._reverse_camera_axis_angle_kp
+                            if self._reverse_axis_target == "camera"
+                            else self._reverse_lane_axis_angle_kp
+                        )
                         lane_axis_raw_correction += (
-                            self._reverse_lane_axis_angle_kp
-                            * lane_axis_angle_error
+                            angle_kp * lane_axis_angle_error
                         )
                     lane_axis_correction = self._clamp_abs(
                         lane_axis_raw_correction,
-                        self._reverse_lane_axis_max_correction,
+                        axis_max_correction,
                     )
 
             if not lane_axis_used:
                 marker_lat_correction = -self._reverse_marker_lat_kp * marker_lat
+
+            reverse_yaw_hold_kp = self._yaw_hold_kp
+            reverse_max_ang = self._max_ang
+            if self._reverse_axis_target == "camera":
+                reverse_yaw_hold_kp = self._reverse_camera_yaw_hold_kp
+                reverse_max_ang = self._reverse_camera_max_ang
+            yaw_hold_correction = reverse_yaw_hold_kp * yaw_err
 
             if moved >= self._reverse_distance:
                 self._stop()
@@ -823,10 +889,11 @@ class ReverseDocking(Node):
 
             twist = Twist()
             twist.linear.x = -self._reverse_speed
-            twist.angular.z = self._clamp(
-                self._yaw_hold_kp * yaw_err
+            twist.angular.z = self._clamp_abs(
+                yaw_hold_correction
                 + marker_lat_correction
-                + lane_axis_correction
+                + lane_axis_correction,
+                reverse_max_ang,
             )
             self._cmd_pub.publish(twist)
 
@@ -849,6 +916,7 @@ class ReverseDocking(Node):
                     )
                     + f", axis_cmd={lane_axis_correction:.3f}"
                     + f", axis_used={lane_axis_used}"
+                    + f", axis_target={self._reverse_axis_target}"
                     if lane_axis_error is not None
                     else ""
                 )
@@ -863,6 +931,7 @@ class ReverseDocking(Node):
                     f"moved={moved:.3f}/{self._reverse_distance:.3f}m, "
                     f"yaw_err={math.degrees(yaw_err):.1f}deg, "
                     f"cmd=({twist.linear.x:.3f},{twist.angular.z:.3f})"
+                    f", yaw_hold_cmd={yaw_hold_correction:.3f}"
                     f"{marker_text}"
                     f"{lane_text}"
                     f"{marker_lat_text}"
@@ -1015,6 +1084,14 @@ class ReverseDocking(Node):
             center = marker_corners.mean(axis=0)
             detection = (tvec.flatten(), rvec.flatten(), center)
             self._remember_target_detection(int(marker_id), float(detection[0][0]))
+            alignment = None
+            if phase == "REVERSE_INSERT" and self._reverse_lane_axis_enabled:
+                alignment = self._update_lane_axis_error(
+                    frame,
+                    corners,
+                    ids,
+                    target_id,
+                )
             self._record_debug_frame(
                 frame,
                 phase,
@@ -1023,6 +1100,7 @@ class ReverseDocking(Node):
                 ids=ids,
                 detection=detection,
                 status="target detected",
+                alignment=alignment,
             )
             return detection
 
@@ -1053,14 +1131,17 @@ class ReverseDocking(Node):
         """Center using the last target pose before falling back to scan."""
         if self._last_target_marker_id != int(target_id):
             return None
-        if time.time() - self._last_target_seen_time > 1.0:
+        if (
+            time.time() - self._last_target_seen_time
+            > self._target_marker_reacquire_timeout
+        ):
             return None
         if self._last_target_lat_err is None:
             return None
 
         lat_err = float(self._last_target_lat_err)
         if abs(lat_err) <= self._align_tol:
-            return 0.0
+            return None
 
         cmd = -self._align_kp * lat_err
         if abs(cmd) < self._align_reacquire_rotate_speed:
@@ -1576,6 +1657,96 @@ class ReverseDocking(Node):
         cross = float(axis[0] * lane[1] - axis[1] * lane[0])
         return math.degrees(math.atan2(cross, dot))
 
+    def _camera_axis_target_point(self, frame):
+        height, width = frame.shape[:2]
+        return (float(width) / 2.0, float(height - 1))
+
+    def _compute_lane_axis_alignment(
+        self,
+        frame,
+        corners,
+        ids,
+        target_id: int,
+        include_lane: bool = True,
+    ):
+        lane = self._detect_lane_center(frame) if include_lane else None
+        axis = None
+        axis_error = None
+        axis_angle_error = None
+        closest = None
+        target_point = None
+        target_line = None
+
+        target_corners = self._target_marker_corners(corners, ids, target_id)
+        marker_axis = self._marker_normal_axis_px(target_corners)
+        if marker_axis is not None:
+            axis_origin, axis_direction = marker_axis
+            axis = (axis_origin, axis_direction)
+            if (
+                self._reverse_axis_target == "lane"
+                and lane is not None
+                and lane["lane_center_point"] is not None
+            ):
+                target_point = lane["lane_center_point"]
+                axis_error, closest = self._axis_error_px(
+                    target_point,
+                    axis_origin,
+                    axis_direction,
+                )
+                if lane["lane_centerline"] is not None:
+                    target_line = lane["lane_centerline"]
+                    axis_angle_error = self._axis_angle_error_deg(
+                        target_line["direction"],
+                        axis_direction,
+                    )
+            elif self._reverse_axis_target == "camera":
+                height, width = frame.shape[:2]
+                target_point = self._camera_axis_target_point(frame)
+                target_line = {
+                    "top": (float(width) / 2.0, 0.0),
+                    "bottom": (float(width) / 2.0, float(height - 1)),
+                    "direction": np.array([0.0, 1.0], dtype=np.float64),
+                }
+                axis_error, closest = self._axis_error_px(
+                    target_point,
+                    axis_origin,
+                    axis_direction,
+                )
+                axis_angle_error = self._axis_angle_error_deg(
+                    target_line["direction"],
+                    axis_direction,
+                )
+
+        return {
+            "lane": lane,
+            "axis": axis,
+            "axis_error": axis_error,
+            "axis_angle_error": axis_angle_error,
+            "closest": closest,
+            "axis_target": self._reverse_axis_target,
+            "target_point": target_point,
+            "target_line": target_line,
+        }
+
+    def _update_lane_axis_error(self, frame, corners, ids, target_id: int):
+        include_lane = (
+            self._reverse_axis_target == "lane" or self._debug_frame_due()
+        )
+        alignment = self._compute_lane_axis_alignment(
+            frame,
+            corners,
+            ids,
+            target_id,
+            include_lane=include_lane,
+        )
+        axis_error = alignment["axis_error"]
+        self._last_lane_axis_error_px = axis_error
+        self._last_lane_axis_angle_error_deg = (
+            alignment["axis_angle_error"] if axis_error is not None else None
+        )
+        self._last_lane_axis_error_time = time.time() if axis_error is not None else 0.0
+        return alignment
+
     # ------------------------------------------------------------------ #
     # Debug image helpers
     # ------------------------------------------------------------------ #
@@ -1602,6 +1773,7 @@ class ReverseDocking(Node):
         ids,
         detection,
         status: str,
+        alignment=None,
     ) -> None:
         if not self._debug_enabled:
             return
@@ -1615,7 +1787,14 @@ class ReverseDocking(Node):
         height, width = overlay.shape[:2]
         center_x = width // 2
         center_y = height // 2
-        lane = self._detect_lane_center(frame)
+        if alignment is None:
+            alignment = self._compute_lane_axis_alignment(
+                frame,
+                corners,
+                ids,
+                target_id,
+            )
+        lane = alignment["lane"]
 
         cv2.line(overlay, (center_x, 0), (center_x, height), (0, 255, 255), 1)
         cv2.line(overlay, (0, center_y), (width, center_y), (80, 80, 80), 1)
@@ -1704,76 +1883,87 @@ class ReverseDocking(Node):
 
         axis_error = None
         axis_angle_error = None
-        if detection is not None:
-            target_corners = self._target_marker_corners(corners, ids, target_id)
-            axis = self._marker_normal_axis_px(target_corners)
-            if axis is not None:
-                axis_origin, axis_direction = axis
-                axis_end = self._ray_end_in_image(
-                    axis_origin,
-                    axis_direction,
-                    width,
-                    height,
+        if detection is not None and alignment["axis"] is not None:
+            axis_origin, axis_direction = alignment["axis"]
+            axis_error = alignment["axis_error"]
+            axis_angle_error = alignment["axis_angle_error"]
+            axis_target = alignment.get("axis_target", self._reverse_axis_target)
+            axis_end = self._ray_end_in_image(
+                axis_origin,
+                axis_direction,
+                width,
+                height,
+            )
+            cv2.line(
+                overlay,
+                tuple(axis_origin.astype(int)),
+                tuple(axis_end.astype(int)),
+                (0, 255, 0),
+                3,
+            )
+            cv2.putText(
+                overlay,
+                "marker normal axis",
+                tuple((axis_origin + axis_direction * 36.0).astype(int)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (0, 255, 0),
+                2,
+                cv2.LINE_AA,
+            )
+
+            if (
+                alignment.get("target_point") is not None
+                and alignment["closest"] is not None
+            ):
+                closest = alignment["closest"]
+                target_point = np.array(
+                    alignment["target_point"],
+                    dtype=np.float64,
                 )
                 cv2.line(
                     overlay,
-                    tuple(axis_origin.astype(int)),
-                    tuple(axis_end.astype(int)),
-                    (0, 255, 0),
-                    3,
-                )
-                cv2.putText(
-                    overlay,
-                    "marker normal axis",
-                    tuple((axis_origin + axis_direction * 36.0).astype(int)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.55,
-                    (0, 255, 0),
+                    tuple(target_point.astype(int)),
+                    tuple(closest.astype(int)),
+                    (255, 255, 255),
                     2,
-                    cv2.LINE_AA,
                 )
-
-                if lane is not None and lane["lane_center_point"] is not None:
-                    axis_error, closest = self._axis_error_px(
-                        lane["lane_center_point"],
-                        axis_origin,
-                        axis_direction,
-                    )
-                    lane_point = np.array(
-                        lane["lane_center_point"],
-                        dtype=np.float64,
-                    )
-                    cv2.line(
+                target_color = (
+                    (0, 255, 255)
+                    if axis_target == "lane"
+                    else (255, 0, 255)
+                )
+                cv2.circle(
+                    overlay,
+                    tuple(target_point.astype(int)),
+                    9,
+                    target_color,
+                    -1,
+                )
+                cv2.circle(
+                    overlay,
+                    tuple(closest.astype(int)),
+                    7,
+                    (255, 255, 255),
+                    -1,
+                )
+                if axis_target == "camera":
+                    cv2.putText(
                         overlay,
-                        tuple(lane_point.astype(int)),
-                        tuple(closest.astype(int)),
-                        (255, 255, 255),
+                        "camera centerline target",
+                        (center_x + 10, height - 24),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.55,
+                        (255, 0, 255),
                         2,
+                        cv2.LINE_AA,
                     )
-                    cv2.circle(
-                        overlay,
-                        tuple(closest.astype(int)),
-                        7,
-                        (255, 255, 255),
-                        -1,
-                    )
-                    if lane["lane_centerline"] is not None:
-                        axis_angle_error = self._axis_angle_error_deg(
-                            lane["lane_centerline"]["direction"],
-                            axis_direction,
-                        )
-
-        if phase == "REVERSE_INSERT":
-            self._last_lane_axis_error_px = axis_error
-            self._last_lane_axis_angle_error_deg = (
-                axis_angle_error if axis_error is not None else None
-            )
-            self._last_lane_axis_error_time = now if axis_error is not None else 0.0
 
         lines = [
             f"phase={phase}",
             f"target_id={target_id} status={status}",
             f"source={self._camera_source} flip_180={self._flip_180}",
+            f"axis_target={alignment.get('axis_target', self._reverse_axis_target)}",
         ]
 
         if lane is not None:
@@ -1809,6 +1999,12 @@ class ReverseDocking(Node):
                     f"screen_err={lane['error_px']:.1f}px"
                     f"{sep_text}{axis_text}{angle_text}"
                 )
+
+        if axis_error is not None:
+            axis_line = f"axis: err={axis_error:.1f}px"
+            if axis_angle_error is not None:
+                axis_line += f", angle={axis_angle_error:.1f}deg"
+            lines.append(axis_line)
 
         if detection is not None:
             tvec, rvec, marker_center = detection
@@ -1853,7 +2049,7 @@ class ReverseDocking(Node):
         try:
             msg = self._bridge.cv2_to_imgmsg(overlay, encoding="bgr8")
             msg.header.stamp = self.get_clock().now().to_msg()
-            msg.header.frame_id = "picky2/front_camera_link"
+            msg.header.frame_id = "front_camera_link"
             self._debug_image_pub.publish(msg)
         except Exception as exc:
             self.get_logger().warn(f"Debug image publish failed: {exc}")

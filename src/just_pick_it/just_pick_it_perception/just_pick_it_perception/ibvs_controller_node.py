@@ -186,7 +186,7 @@ class AreaJacobianIBVSNode(Node):
         # center 도달 전에 사용하지 않도록 한다.
         # 실제 로봇은 명령각에서 수 도(deg)의 정착 오차가 있어 2도는 너무 빡빡하다.
         self.declare_parameter("arrival_threshold_deg", 5.0)
-        self.declare_parameter("arrival_settle_sec", 1.0)
+        self.declare_parameter("arrival_settle_sec", 2.0)
         # 도달 미확인 시 fallback 대기. 길면 시작이 느리므로 줄인다.
         self.declare_parameter("search_move_timeout_sec", 4.0)
         self.declare_parameter("search_status_poll_rate_hz", 5.0)
@@ -522,6 +522,10 @@ class AreaJacobianIBVSNode(Node):
         self.area_window = deque(maxlen=self.area_window_size)
 
         self.target_track_id = None
+        # 안정화(settle) 완료 전에는 target track_id를 lock 하지 않는다. pregrasp
+        # 자세(center/left/right) 도달 후 arrival_settle_sec가 지나야 detection_callback이
+        # 가장 중심에 가까운 대상을 lock 한다(이동/안정화 중 조기 확정 방지).
+        self._target_lock_enabled = False
         self.latest_track_id = -1
         self.latest_class_id = -1
         self.latest_class_label = ""
@@ -801,6 +805,7 @@ class AreaJacobianIBVSNode(Node):
         self._search_wait_skip_robot_wait = False
         self._search_arrived = False
         self._search_arrived_time = None
+        self._target_lock_enabled = False
         self.set_phase(Phase.INIT)
 
     # ============================================================
@@ -813,7 +818,6 @@ class AreaJacobianIBVSNode(Node):
             return
 
         best_obj = None
-        best_score = -1.0
 
         if self.lock_track_id and self.target_track_id is not None:
             for obj in msg.objects:
@@ -823,6 +827,10 @@ class AreaJacobianIBVSNode(Node):
                     break
 
         if best_obj is None:
+            # 우선순위: confidence는 min_confidence만 넘으면 충분하고, 그 중에서
+            # 이미지 프레임 중심(desired_cx/cy)에 가장 가까운 객체를 추종한다.
+            # 거리는 get_center_feature와 동일하게 image_w/h로 정규화해 잰다.
+            best_center_dist = float("inf")
             for obj in msg.objects:
                 class_label = str(obj.class_label)
                 conf = float(obj.confidence)
@@ -831,15 +839,26 @@ class AreaJacobianIBVSNode(Node):
                     continue
                 if conf < self.min_confidence:
                     continue
-                if conf > best_score:
-                    best_score = conf
+                center = self._object_image_center(obj)
+                if center is None:
+                    continue
+                du = (center[0] - self.desired_cx) / self.image_w
+                dv = (center[1] - self.desired_cy) / self.image_h
+                center_dist = math.hypot(du, dv)
+                if center_dist < best_center_dist:
+                    best_center_dist = center_dist
                     best_obj = obj
 
-            if best_obj is not None and self.lock_track_id:
+            if (
+                best_obj is not None
+                and self.lock_track_id
+                and self._target_lock_enabled
+            ):
                 self.target_track_id = int(best_obj.track_id)
                 self.get_logger().info(
                     f"Locked target track_id={self.target_track_id}, "
-                    f"class={best_obj.class_label}, conf={best_obj.confidence:.3f}"
+                    f"class={best_obj.class_label}, conf={best_obj.confidence:.3f}, "
+                    f"center_dist={best_center_dist:.4f}"
                 )
 
         if best_obj is None:
@@ -943,6 +962,46 @@ class AreaJacobianIBVSNode(Node):
     # ============================================================
     # Detection utilities
     # ============================================================
+    def _object_image_center(self, obj):
+        # 후보 객체의 이미지 좌표 중심(cx, cy)을 center_source/bbox_xy_mode 규칙대로
+        # 계산한다(detection_callback의 best_obj 중심 계산과 동일 규칙). 유효한 중심이
+        # 없으면 None. 우선순위(중심 최근접) 선정 전용.
+        bbox_x = float(obj.bbox_x)
+        bbox_y = float(obj.bbox_y)
+        bbox_w = float(obj.bbox_w)
+        bbox_h = float(obj.bbox_h)
+        if self.bbox_xy_mode == "center":
+            bbox_cx = bbox_x
+            bbox_cy = bbox_y
+        else:
+            bbox_cx = bbox_x + bbox_w * 0.5
+            bbox_cy = bbox_y + bbox_h * 0.5
+        bbox_valid = (
+            math.isfinite(bbox_cx)
+            and math.isfinite(bbox_cy)
+            and math.isfinite(bbox_w)
+            and math.isfinite(bbox_h)
+            and bbox_w > 0.0
+            and bbox_h > 0.0
+            and 0.0 <= bbox_cx <= self.image_w
+            and 0.0 <= bbox_cy <= self.image_h
+        )
+        mask_cx = float(obj.mask_cx)
+        mask_cy = float(obj.mask_cy)
+        mask_valid = (
+            math.isfinite(mask_cx)
+            and math.isfinite(mask_cy)
+            and 0.0 <= mask_cx <= self.image_w
+            and 0.0 <= mask_cy <= self.image_h
+        )
+        if self.center_source == "mask" and mask_valid:
+            return mask_cx, mask_cy
+        if bbox_valid:
+            return bbox_cx, bbox_cy
+        if mask_valid:
+            return mask_cx, mask_cy
+        return None
+
     def has_fresh_detection(self):
         if self.latest_detection_time is None:
             return False
@@ -1212,7 +1271,11 @@ class AreaJacobianIBVSNode(Node):
         # detection lost 후 재진입: 이미 그 자세에 있으므로 도달 확인 없이
         # 즉시 detection 을 다시 기다린다.
         if self._search_wait_skip_robot_wait:
-            if self.has_fresh_detection():
+            # 이미 안정된 자세(detection lost 후 재진입)이므로 즉시 lock 을 허용한다.
+            self._target_lock_enabled = True
+            if self.has_fresh_detection() and (
+                self.target_track_id is not None or not self.lock_track_id
+            ):
                 self.start_pick_sequence()
                 return
             if self.elapsed_in_phase() >= self.search_timeout_sec:
@@ -1266,15 +1329,23 @@ class AreaJacobianIBVSNode(Node):
                 self._search_arrived_time = self.get_clock().now()
             return
 
-        # 도달 후 안정화 시간 동안 대기. 이 구간의 detection 은 아직 유효로 보지 않는다.
+        # 도달 후 안정화 시간 동안 대기. 이 구간의 detection 은 아직 유효로 보지 않고,
+        # target track_id 도 lock 하지 않는다(이동/안정화 중 조기 확정 방지).
         settle_elapsed = (
             self.get_clock().now() - self._search_arrived_time
         ).nanoseconds * 1e-9
         if settle_elapsed < self.arrival_settle_sec:
             return
 
-        # 안정화 후에만 detection 을 유효로 판정한다.
-        if self.has_fresh_detection():
+        # 안정화가 끝나야 비로소 가장 중심에 가까운 대상을 lock 하도록 허용한다.
+        self._target_lock_enabled = True
+
+        # 안정화 후에만 detection 을 유효로 판정한다. lock_track_id 사용 시에는 실제로
+        # 대상이 lock 된(안정화된 프레임에서 선정된) 뒤에만 픽을 시작하고, lock 미사용이면
+        # 안정화 후 바로 시작한다.
+        if self.has_fresh_detection() and (
+            self.target_track_id is not None or not self.lock_track_id
+        ):
             self.start_pick_sequence()
             return
 
@@ -1348,6 +1419,7 @@ class AreaJacobianIBVSNode(Node):
                     f"Search: moving to '{name}': {target_angles}"
                 )
                 self.target_track_id = None
+                self._target_lock_enabled = False
                 self.filtered_initialized = False
                 self.publish_joint_command(target_angles, self.pregrasp_speed)
                 self._search_target_angles = list(target_angles)

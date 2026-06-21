@@ -23,11 +23,12 @@ from .cobot_controller import CobotController
 # task_type → 작업 단계에서 순서대로 거치는 cobot_state 목록.
 # STOWING_ARM 은 모든 task 에서 공통으로 마지막에 발행된다.
 # 상태값은 DB cobot_state ENUM 과 일치해야 한다.
+# DISPLAY_PLACE 는 picky 에 실린 해당 product 개수만큼 [슬롯 재파지 -> 빈자리 스캔 ->
+# IBVS+NN 배치] 를 반복한다(스캔은 PLACING 내부 단계라 별도 task 가 아니다).
 TASK_PHASE_STATES = {
     'SORTING_AND_LOAD': ['SORTING', 'LOADING'],
     'INSPECTION':       ['INSPECTING'],
     'UNLOAD':           ['UNLOADING'],
-    'DISPLAY_SCAN':     ['SCANNING'],
     'DISPLAY_PLACE':    ['PLACING']
 }
 
@@ -73,9 +74,8 @@ class CobotStateManager(Node):
         self._lock = threading.Lock()
         self._cobot_state  = 'STANDBY'
         self._emergency_stop = False
-        # DISPLAY_SCAN 에서 받은 좌표를 DISPLAY_PLACE task 까지 보관한다.
-        # 두 task 가 별도 Action goal 로 전달되므로 노드 내부에서 유지한다.
-        self._scan_result = None
+        self._resume_event = threading.Event()
+        self._resume_event.set()
 
         # Action 과 서비스, 타이머를 동시에 처리하기 위해 ReentrantCallbackGroup 사용
         cb_group = ReentrantCallbackGroup()
@@ -98,7 +98,7 @@ class CobotStateManager(Node):
         # 이머전시 정지/재개 서비스 서버
         self._emergency_srv = self.create_service(
             EmergencyControl,
-            'emergency_control',
+            f'{self._robot_id.lower()}/emergency_control',
             self._handle_emergency,
             callback_group=cb_group,
         )
@@ -106,8 +106,19 @@ class CobotStateManager(Node):
         # picky 적재 슬롯 수동 flush 서비스(UNLOADING 미연동 시 가득 참 해소용).
         self._flush_srv = self.create_service(
             Trigger,
-            f'{self._robot_id}/flush_loadout',
+            f'{self._robot_id.lower()}/flush_loadout',
             self._handle_flush_loadout,
+            callback_group=cb_group,
+        )
+
+        # [디버그] 가상 적재 주입 토픽. SORTING_AND_LOAD 없이 INSPECTION/UNLOAD/DISPLAY_PLACE
+        # 를 단독 테스트할 때, 쉼표로 구분한 상품 목록(예: "water,water,cream_bread")을 발행하면
+        # 적재 DB 를 그 순서대로 채운다(빈 문자열 발행 시 초기화).
+        self._seed_sub = self.create_subscription(
+            String,
+            f'{self._robot_id.lower()}/seed_loadout',
+            self._handle_seed_loadout,
+            10,
             callback_group=cb_group,
         )
 
@@ -253,16 +264,18 @@ class CobotStateManager(Node):
                     )
 
                 with self._lock:
-                    if self._emergency_stop:
-                        self._set_state('SAFETY_STOPPED')
-                        goal_handle.abort()
-                        return ExecuteTask.Result(
-                            success=False,
-                            status='FAILED',
-                            message='emergency stop triggered',
-                            processed_quantity=processed_qty,
-                            stock_delta=0,
-                        )
+                    paused = self._emergency_stop
+                if paused:
+                    self._set_state('SAFETY_STOPPED')
+                    feedback.state   = 'SAFETY_STOPPED'
+                    feedback.message = 'emergency stop — waiting for resume'
+                    feedback.processed_quantity = processed_qty
+                    goal_handle.publish_feedback(feedback)
+                    self.get_logger().info(
+                        '[CobotStateManager] 비상정지 대기 — resume 시 작업 재개')
+                    self._resume_event.wait()
+                    self.get_logger().info(
+                        '[CobotStateManager] resume 수신 — 작업 재개')
 
                 self._set_state(phase)
                 feedback.state              = phase
@@ -375,12 +388,10 @@ class CobotStateManager(Node):
             return self._controller.run_unloading()
 
         elif phase == 'PLACING':
-            success, qty = self._controller.run_placing(
+            # picky 에 실린 product 개수만큼 [슬롯 재파지 -> 빈자리 스캔 -> IBVS+NN 배치] 반복.
+            return self._controller.run_placing(
                 request.product_name, request.target_zone_name
             )
-            if success:
-                self._scan_result = None
-            return success, qty
 
         return True, 0
 
@@ -395,23 +406,29 @@ class CobotStateManager(Node):
         request: EmergencyControl.Request,
         response: EmergencyControl.Response,
     ) -> EmergencyControl.Response:
-        # [구현 필요] EmergencyControl.Request 필드 확인 후 플래그 처리
-        #   정지 요청 시: self._emergency_stop = True, cobot_state → SAFETY_STOPPED
-        #                 robot.robot_status 는 Fleet Manager 가 EMERGENCY_STOP 으로 갱신
-        #   재개 요청 시: self._emergency_stop = False, cobot_state → STANDBY
+        stop = request.emergency_stop
+
         with self._lock:
-            # [구현 필요] EmergencyControl.Request 필드명 확정 후 조건 교체
-            # 아래는 request.stop (bool) 필드를 가정한 예시
-            stop = getattr(request, 'stop', True)
             self._emergency_stop = stop
 
         if stop:
+            self._resume_event.clear()
             self._controller.emergency_stop()
             self._set_state('SAFETY_STOPPED')
+            response.accepted = True
+            response.status = 'SAFETY_STOPPED'
+            response.message = f'emergency stop activated: {request.reason}'
+            self.get_logger().warn(
+                f'[CobotStateManager] 비상정지 — reason={request.reason}')
         else:
+            self._controller.emergency_resume()
             self._set_state('STANDBY')
+            self._resume_event.set()
+            response.accepted = True
+            response.status = 'STANDBY'
+            response.message = 'resumed from emergency stop'
+            self.get_logger().info('[CobotStateManager] 비상정지 해제 — 작업 재개')
 
-        # [구현 필요] response 필드 채워서 반환
         return response
 
     # ── 적재 슬롯 flush 서비스 콜백 ───────────────────────────────────────
@@ -426,6 +443,13 @@ class CobotStateManager(Node):
         response.message = f'{cleared} slot(s) cleared'
         self.get_logger().info(f'[CobotStateManager] 적재 flush — {cleared}개 슬롯 비움')
         return response
+
+    # ── 가상 적재 주입 콜백(디버그) ──────────────────────────────────────
+    def _handle_seed_loadout(self, msg: String) -> None:
+        products = [p for p in msg.data.split(',') if p.strip()]
+        seeded = self._controller.seed_loadout(products)
+        self.get_logger().info(
+            f'[CobotStateManager] 가상 적재 — {seeded}개: {products}')
 
     # ── 주기 상태 publish ──────────────────────────────────────────────
 
