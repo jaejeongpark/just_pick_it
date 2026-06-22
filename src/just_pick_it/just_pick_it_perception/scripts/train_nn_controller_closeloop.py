@@ -401,6 +401,13 @@ def main():
                              "녹화 시점 박제가 아니라 det_age_sec 로 재계산하므로 자유롭게 조정.")
     parser.add_argument("--include-area", choices=["true", "false"], default="true",
                         help="입력에 area_norm 포함 여부. false 면 입력 7차원.")
+    parser.add_argument("--blind-frames", choices=["freeze", "zero", "exclude"],
+                        default="freeze",
+                        help="detection 소실(blind) 프레임의 policy 학습 처리. "
+                             "freeze(기존): 마지막 유효 시각오차(frozen) 사용. "
+                             "zero: blind 프레임 시각오차를 0으로(q dead-reckoning만 사용해 "
+                             "frozen 스냅샷의 OOD 노이즈 제거). "
+                             "exclude: blind 프레임을 policy 학습에서 제외.")
     parser.add_argument("--target-cx", type=float, default=-1.0,
                         help="off-center 그립 목표점 cx(px). 음수면 데이터에서 자동 추출.")
     parser.add_argument("--target-cy", type=float, default=-1.0,
@@ -486,6 +493,7 @@ def main():
     for label, frames, q_final, lv in loaded:
         if label == "success":
             seen_valid = False
+            nvis = 3 if include_area else 2
             for f in frames:
                 valid = is_valid_det(f, args.det_valid_timeout)
                 # 첫 유효 detection 이전(시각 컨텍스트 없음)은 제외.
@@ -494,8 +502,13 @@ def main():
                 if not seen_valid:
                     continue
                 if not valid:
+                    if args.blind_frames == "exclude":
+                        continue
                     n_open_frames += 1
-                pX.append(build_input(f, target_cx, target_cy, include_area))
+                inp = build_input(f, target_cx, target_cy, include_area)
+                if args.blind_frames == "zero" and not valid:
+                    inp[:nvis] = 0.0
+                pX.append(inp)
                 pY.append(goal_label(f["joints"], q_final, args.max_delta_deg))
 
         # grip predictor: last-visible 프레임 state.
@@ -506,14 +519,16 @@ def main():
     print(f"\n에피소드: {len(loaded)} (success="
           f"{sum(1 for l,_,_,_ in loaded if l=='success')}, "
           f"fail={sum(1 for l,_,_,_ in loaded if l=='fail')}), skipped={skipped}")
-    print(f"policy 샘플={len(pX)} (그중 open-loop frozen frame={n_open_frames}), "
-          f"grip 샘플={len(gX)}")
+    print(f"policy 샘플={len(pX)} (blind_frames={args.blind_frames}, "
+          f"그중 blind frame={n_open_frames}), grip 샘플={len(gX)}")
 
     # --- config 저장 (추론 노드가 재사용) ---
     config = {
         "model_kind": "closeloop",
         "input_dim": input_dim,
         "include_area": include_area,
+        # blind(소실) 프레임 처리. 추론 노드가 동일 규칙으로 입력을 구성해야 일관.
+        "blind_frames": args.blind_frames,
         "input_layout": (["e_u", "e_v"] + (["area_norm"] if include_area else [])
                          + ["q1n", "q2n", "q3n", "q4n", "q5n"]),
         "target_cx": target_cx,

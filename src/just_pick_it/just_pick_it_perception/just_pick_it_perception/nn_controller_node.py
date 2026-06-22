@@ -229,6 +229,9 @@ class NNControllerNode(Node):
             self.target_cx = float(self.config.get("target_cx", self.image_w * 0.5))
             self.target_cy = float(self.config.get("target_cy", self.image_h * 0.5))
             self.include_area = bool(self.config.get("include_area", True))
+            # blind(소실) 프레임 시각오차 처리. 학습 config 와 동일해야 일관.
+            # freeze: 마지막 유효값 / zero: 0 / exclude: 학습 미포함이므로 추론은 freeze 동작.
+            self.blind_frames = str(self.config.get("blind_frames", "freeze")).lower()
             dv = float(self.get_parameter("det_valid_timeout").value)
             self.det_valid_timeout = (
                 dv if dv > 0.0 else float(self.config.get("det_valid_timeout", 0.3))
@@ -603,6 +606,10 @@ class NNControllerNode(Node):
         # 검출 소실 시에도 마지막 값을 유지하므로 frozen 입력이 자동 구성된다.
         cx, cy, area = self.latest_valid_det
         inp = self._build_closeloop_input(cx, cy, area, q)
+        # blind_frames=zero: 학습과 동일하게 소실 프레임은 시각오차 차원을 0으로 둔다.
+        if self.blind_frames == "zero" and not det_fresh:
+            nvis = 3 if self.include_area else 2
+            inp[:nvis] = 0.0
         x = torch.from_numpy(inp).unsqueeze(0).to(self.device)
         with torch.no_grad():
             delta_norm = self.policy(x)[0].cpu().numpy()
