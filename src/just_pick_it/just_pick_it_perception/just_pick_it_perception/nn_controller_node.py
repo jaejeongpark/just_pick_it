@@ -667,6 +667,8 @@ class NNControllerNode(Node):
             f"{'OPEN' if self.open_loop_mode else 'CLOSED'} lost={self.lost_count}, "
             f"P={p_success:.3f}(lv={self.last_visible_p:.3f}, "
             f"consec={self.grip_consec}/{self.grip_consecutive_required}), "
+            f"det=({cx:.0f},{cy:.0f}) "
+            f"err_px=({cx - self.target_cx:+.0f},{cy - self.target_cy:+.0f}), "
             f"{'SETTLED ' if settled else ''}"
             f"delta(J1~J5)={np.round(delta_deg, 2).tolist()}"
         )
