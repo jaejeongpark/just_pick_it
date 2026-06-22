@@ -470,10 +470,14 @@ def main():
         target_cx, target_cy = DEFAULT_IMAGE_W * 0.5, DEFAULT_IMAGE_H * 0.5
         print(f"target(cx,cy) = ({target_cx:.1f}, {target_cy:.1f}) [fallback: 화면중앙]")
 
+    # open_loop_lost_frames(N): jitter 보다 크고 min blind tail 보다 작아야 한다.
+    # (N >= blind tail 이면 open-loop 전환이 안 되고, N <= jitter 면 오전환.)
+    n_open = 3
     if blind_tails:
         bt = np.array(blind_tails)
+        n_open = int(np.clip(np.median(bt) // 3, 2, max(2, int(bt.min()) - 1)))
         print(f"blind tail 프레임 수: mean={bt.mean():.1f} min={bt.min()} max={bt.max()} "
-              f"-> open_loop_lost_frames 권장 N≈{max(2, int(np.median(bt)//2))}")
+              f"-> open_loop_lost_frames N={n_open}")
 
     # --- Pass 2: 샘플 생성 ---
     pX, pY = [], []          # policy (success only, to_goal)
@@ -520,8 +524,8 @@ def main():
         "controlled_joints": CTRL_IDX,
         "default_image_w": DEFAULT_IMAGE_W,
         "default_image_h": DEFAULT_IMAGE_H,
-        # 추론 핸드오프 권장값(데이터의 jitter 0~2 vs blind tail 4~8 기준).
-        "open_loop_lost_frames": 3,
+        # 추론 closed->open 전환 임계. 데이터의 blind tail 분포에서 산출(위 n_open).
+        "open_loop_lost_frames": n_open,
         "policy_output": ["dq1..dq5 (tanh, x max_delta_deg). J6 excluded."],
         "grip_decision": "GripSuccessPredictor at last-visible frame (open-loop 전환점)",
     }
