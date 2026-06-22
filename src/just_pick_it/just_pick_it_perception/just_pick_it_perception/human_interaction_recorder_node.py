@@ -664,9 +664,10 @@ class HumanInteractionRecorderNode(Node):
         # Closed-loop NN 입력용 detection. fresh(timeout 이내)면 det_valid=true.
         # stale/없음이면 det_valid=false 로 두되 마지막 유효값은 그대로 실어 freeze 정보 보존.
         det_valid = False
+        det_age = -1.0
         if self.latest_det is not None and self.latest_det_time is not None:
-            age = now.nanoseconds * 1e-9 - self.latest_det_time
-            det_valid = age <= self.detection_timeout_sec
+            det_age = now.nanoseconds * 1e-9 - self.latest_det_time
+            det_valid = det_age <= self.detection_timeout_sec
         if self.latest_det is not None:
             det_cx, det_cy, det_area = self.latest_det
         else:
@@ -677,6 +678,7 @@ class HumanInteractionRecorderNode(Node):
         sample.det_area_norm = float(det_area)
         sample.det_image_width = float(self.image_width)
         sample.det_image_height = float(self.image_height)
+        sample.det_age_sec = float(det_age)
 
         self._write_queue.put(
             (self.bag_topic, serialize_message(sample), now.nanoseconds)
