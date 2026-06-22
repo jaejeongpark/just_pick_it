@@ -11,20 +11,25 @@
      서보만 풀고, [G] 에서 그리퍼를 열어(놓기) 종단한다.
 
 구성 노드:
+  - empty_slot_detector       (just_pick_it_perception)  : image-space 빈자리 자동 detection
+  - place_scan_seeder         (picky_cobot_1)            : detector 트리거 -> 우승 bbox 자동 seed
   - csrt_place_tracker        (just_pick_it_perception)  : 빈자리 bbox 추적 -> detection 합성
   - ibvs_controller           (just_pick_it_perception)  : 빈자리 bbox 에 IBVS 수렴 -> ibvs_done
   - visual_servo_bag_recorder (just_pick_it_perception)  : IBVS 구간(detection+관절) 기록
   - place_interaction_recorder(picky_cobot_1)            : ibvs_done 후 free-drive+놓기 기록
 
+빈자리 bbox 는 운영(cobot_controller)과 동일하게 empty_slot_detector 가 자동 선정한다.
+데이터 수집은 팔을 진열대 관측 자세(place_pregrasp) 한 곳에 고정하므로, place_scan_seeder 가
+그 한 자세에서 detector 를 1회 트리거(reset/capture_view/plan)해 우승 빈자리 bbox 를
+/place/target_bbox 로 자동 발행한다(수동 ros2 topic pub 불필요). loop_episodes 로 다음
+episode 가 시작되면(/{robot_name}/nn_episode) seeder 가 빈자리를 다시 자동 선정한다.
+
 수집 절차(요약):
-  0. 물건을 그리퍼에 쥐고, 팔을 진열대 관측 pregrasp 자세 부근에 둔다.
-  1. 빈자리 bbox 를 latched 로 1회 발행해 CSRT init (아래 예시 명령 참고).
-     ros2 topic pub --once /place/target_bbox std_msgs/msg/Float64MultiArray \
-       "{data: [320.0, 240.0, 60.0, 40.0, 0.0]}"
-     (cx, cy, w, h, angle_deg — 카메라 image space 기준)
-  2. IBVS 가 빈자리로 수렴해 ibvs_done 발행 -> GUI 가 [R] 대기로 전환.
-  3. [R] 팔 서보 해제(그리퍼 닫힘 유지) -> 손으로 물건을 빈자리 위로 이동 -> [G] 놓기 ->
-     [S]/[F] 결과 레이블. loop_episodes=true 면 다음 episode 로 자동 진행.
+  0. 물건을 그리퍼에 쥐고 launch 실행. ibvs_controller 가 팔을 place_pregrasp 로 세우면
+     place_scan_seeder 가 initial_delay_sec 후 빈자리를 자동 선정해 CSRT init.
+  1. IBVS 가 빈자리로 수렴해 ibvs_done 발행 -> GUI 가 [R] 대기로 전환.
+  2. [R] 팔 서보 해제(그리퍼 닫힘 유지) -> 손으로 물건을 빈자리 위로 이동 -> [G] 놓기 ->
+     [S]/[F] 결과 레이블. loop_episodes=true 면 다음 episode 로 자동 진행(빈자리 재선정).
 
 학습: 수집된 bag(bag_base_dir 의 success/)을 픽과 동일한 train 파이프라인에 넣어
 result/nn_controller/place 로 학습 산출물을 만든다(train_nn_controller.py --out-dir).
@@ -79,6 +84,12 @@ def launch_setup(context, *args, **kwargs):
     detection_model_path = LaunchConfiguration('detection_model_path').perform(context)
     csrt_debugger = LaunchConfiguration('csrt_debugger').perform(context)
     csrt_stale_sec = LaunchConfiguration('csrt_stale_sec').perform(context)
+    launch_slot_detector = LaunchConfiguration('launch_slot_detector').perform(context)
+    seeder_initial_delay_sec = LaunchConfiguration('seeder_initial_delay_sec').perform(context)
+    seeder_episode_delay_sec = LaunchConfiguration('seeder_episode_delay_sec').perform(context)
+    gripper_hold_value = LaunchConfiguration('gripper_hold_value').perform(context)
+    place_open_value = LaunchConfiguration('place_open_value').perform(context)
+    detector_params_file = LaunchConfiguration('detector_params_file').perform(context)
 
     if not episode_id:
         episode_id = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -103,7 +114,37 @@ def launch_setup(context, *args, **kwargs):
         }.items(),
     )
 
-    # 1. 빈자리 bbox(latched /place/target_bbox)를 CSRT 로 추적 -> /place/tracked_objects(empty_slot).
+    # 1. 빈자리 자동 detection(image-space, calibration-free). place_scan_seeder 가
+    #    reset/capture_view/plan 으로 트리거하면 /place/scan_result 로 우승 빈자리 bbox 를 낸다.
+    #    infer/image_raw, infer/tracked_objects(yolo_seg_infer 발행)를 입력으로 쓴다.
+    #    AI 컴퓨터에서 이미 상시 가동 중이면 launch_slot_detector:=false 로 중복 실행을 막는다.
+    slot_detector = Node(
+        package='just_pick_it_perception',
+        executable='empty_slot_detector',
+        name='empty_slot_detector_node',
+        output='screen',
+        parameters=[detector_params_file],
+    )
+
+    # 2. detector 트리거(reset/capture_view/plan) + 우승 빈자리 bbox 를 /place/target_bbox
+    #    (latched)로 자동 seed. 데이터 수집은 단일 자세(place_pregrasp)라 운영의 스윕/우승
+    #    자세 복귀 없이 현재 자세에서 1회 선정한다. episode advance 마다 재선정한다.
+    scan_seeder = Node(
+        package='picky_cobot_1',
+        executable='place_scan_seeder',
+        name='place_scan_seeder',
+        output='screen',
+        parameters=[
+            {
+                'robot_name': robot_name,
+                'initial_delay_sec': float(seeder_initial_delay_sec),
+                'episode_delay_sec': float(seeder_episode_delay_sec),
+                'gripper_hold_value': float(gripper_hold_value),
+            }
+        ],
+    )
+
+    # 3. 빈자리 bbox(latched /place/target_bbox)를 CSRT 로 추적 -> /place/tracked_objects(empty_slot).
     csrt = Node(
         package='just_pick_it_perception',
         executable='csrt_place_tracker',
@@ -169,6 +210,8 @@ def launch_setup(context, *args, **kwargs):
                 'displacement_threshold_deg': float(displacement_threshold_deg),
                 'loop_episodes': (loop_episodes.lower() in ('true', '1', 'yes')),
                 'shutdown_on_done': True,
+                'gripper_hold_value': float(gripper_hold_value),
+                'place_open_value': float(place_open_value),
             }
         ],
     )
@@ -193,12 +236,16 @@ def launch_setup(context, *args, **kwargs):
 
     # 픽 launch 와 달리 시작 시 gripper open 을 발행하지 않는다(물건을 쥔 채 시작).
     nodes = [
+        scan_seeder,
         csrt,
         ibvs,
         visual_servo_recorder,
         place_recorder,
         shutdown_on_recorder_exit,
     ]
+    # 빈자리 자동 detection. AI 컴퓨터에서 이미 상시 가동 중이면 launch_slot_detector:=false.
+    if launch_slot_detector.lower() in ('true', '1', 'yes'):
+        nodes.insert(0, slot_detector)
     # 영상 소스(yolo_seg_infer)를 같이 띄운다. 이미 따로 실행 중이면 launch_detection:=false.
     if launch_detection.lower() in ('true', '1', 'yes'):
         nodes.insert(0, detection)
@@ -251,6 +298,30 @@ def generate_launch_description():
         # /place/csrt_overlay 를 rqt_image_view 로 본다(ibvs_nn_place_agent 와 동일).
         DeclareLaunchArgument('csrt_debugger', default_value='false'),
         DeclareLaunchArgument('csrt_stale_sec', default_value='0.5'),
+        # 빈자리 자동 detection(empty_slot_detector) 동시 기동. AI 컴퓨터에서 이미 상시
+        # 가동 중이면 false 로 중복 실행을 막는다(scan_result/트리거 중복 충돌 방지).
+        DeclareLaunchArgument('launch_slot_detector', default_value='true'),
+        # empty_slot_detector 파라미터 파일. 운영(ibvs_nn_place_agent)과 동일한 yaml 을 써서
+        # 빈자리 선정(w_clear/ROI/엣지 파라미터)을 일치시킨다. 안 주면 노드 기본값이 적용돼
+        # 운영과 다른 빈자리를 골라 IBVS 접근 양상이 달라진다.
+        DeclareLaunchArgument(
+            'detector_params_file',
+            default_value=os.path.join(
+                get_package_share_directory('just_pick_it_perception'),
+                'config', 'empty_slot_detector_params.yaml')),
+        # place_scan_seeder 가 시작 후 첫 빈자리 자동 선정까지 대기할 시간(초). ibvs_controller
+        # 가 팔을 place_pregrasp 로 세우고 영상이 안정될 시간을 준다.
+        DeclareLaunchArgument('seeder_initial_delay_sec', default_value='4.0'),
+        # episode advance 후 빈자리 재선정까지 대기할 시간(초). ibvs 가 팔을 place_pregrasp
+        # 로 복귀시킬 시간을 준다.
+        DeclareLaunchArgument('seeder_episode_delay_sec', default_value='4.0'),
+        # 그리퍼 '물건 쥔 척' 유지값. 시작~IBVS 수렴(place_scan_seeder)과 [R] 서보 해제 후
+        # free-drive(place_interaction_recorder)에서 이 값으로 그리퍼를 유지한다.
+        # 0=완전 닫힘, 30=30% 개방 등. 물건 없이 반복 수집할 때 30 등을 준다.
+        # 확인 임계(gripper_close_confirm_value)는 recorder 에서 hold 이상으로 자동 보정된다.
+        DeclareLaunchArgument('gripper_hold_value', default_value='0.0'),
+        # [G] 놓기 시 그리퍼 개방값. 100=완전 개방. 운영 부분개방과 맞추려면 70.
+        DeclareLaunchArgument('place_open_value', default_value='100.0'),
     ]
 
     return LaunchDescription(args + [OpaqueFunction(function=launch_setup)])

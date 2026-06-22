@@ -183,7 +183,7 @@ def generate_launch_description():
         # 명령 적분 목표가 측정값보다 앞서갈 수 있는 한계(deg).
         DeclareLaunchArgument("nn_command_leash_deg", default_value="8.0"),
         # --- IBVS(탐색/정렬/접근/J6) 단계 제어 (NN과 독립) ---
-        DeclareLaunchArgument("ibvs_command_speed", default_value="10"),
+        DeclareLaunchArgument("ibvs_command_speed", default_value="20"),
         DeclareLaunchArgument("ibvs_pregrasp_speed", default_value="15"),
         DeclareLaunchArgument("ibvs_control_rate_hz", default_value="5.0"),
         # J6 장축 정렬 보정(ibvs로 전달).

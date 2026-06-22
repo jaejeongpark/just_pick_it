@@ -107,6 +107,13 @@ class EmptySlotDetectorNode(Node):
         self.declare_parameter('w_clear', 1.0)
         self.declare_parameter('w_center', 0.6)
         self.declare_parameter('w_front', 0.5)
+        # 자세(capture) 우승용 면적 가중치. candidate(초록=놓을 수 있는 공간) 면적이
+        # 넓은 자세를 선호한다. 좁은 틈보다 텅 빈 자세를 이기게 하는 주 노브.
+        self.declare_parameter('w_area', 4.0)
+
+        # clearance 정규화 기준 px(자세 간 비교용 절대 척도). <=0 이면 자동으로
+        # 2*(place_radius_px + clearance_px) 사용. 이 값 이상 여유는 만점으로 포화.
+        self.declare_parameter('clear_ref_px', 0.0)
 
         self.declare_parameter('bbox_scale', 1.0)
 
@@ -179,7 +186,8 @@ class EmptySlotDetectorNode(Node):
         else:
             self.get_logger().info(
                 f"capture #{idx}: center=({stable['cx']:.0f},{stable['cy']:.0f}), "
-                f"clear={stable['clearance']:.0f}px, score={stable['score']:.3f} "
+                f"clear={stable['clearance']:.0f}px, area={stable['area_frac']:.2f}, "
+                f"score={stable['score']:.3f} "
                 f"(안정 {stable['stable_count']}/{len(buf)} 프레임).")
 
     def _select_stable(self, buf):
@@ -204,12 +212,13 @@ class EmptySlotDetectorNode(Node):
         bh = float(np.median([c['h'] for c in best]))
         score = float(np.mean([c['score'] for c in best]))
         clearance = float(np.median([c['clearance'] for c in best]))
+        area_frac = float(np.median([c.get('area_frac', 0.0) for c in best]))
         # 오버레이용 대표 프레임: median center 에 가장 가까운 군집 멤버.
         rep = min(best, key=lambda c: (c['cx'] - cx) ** 2 + (c['cy'] - cy) ** 2)
         return {
             'cx': cx, 'cy': cy, 'w': bw, 'h': bh, 'angle': rep['angle'],
-            'score': score, 'clearance': clearance, 'debug': rep['debug'],
-            'stable_count': len(best),
+            'score': score, 'clearance': clearance, 'area_frac': area_frac,
+            'debug': rep['debug'], 'stable_count': len(best),
         }
 
     # ------------------------------------------------------------ ROI (선반 영역)
@@ -352,19 +361,38 @@ class EmptySlotDetectorNode(Node):
         if not np.any(candidate):
             return None
 
-        bcx, bcy, score = self._score_candidates(candidate, dt, w, h)
+        bcx, bcy, score = self._score_candidates(candidate, dt, w, h, place_r)
+
+        # 자세 우승은 "놓을 수 있는 공간의 양"이 많은 쪽을 선호한다. best 점 하나의
+        # 여유(clearance)만으로는 텅 빈 자세와 좁은 틈만 있는 자세를 구분 못하므로,
+        # ROI 대비 candidate(초록) 면적 비율을 score 에 더한다(자세 간 비교용 절대값).
+        top, bottom, left, right = roi_rect
+        roi_area = max((bottom - top) * (right - left), 1)
+        area_frac = float(np.count_nonzero(candidate)) / roi_area
+        score += float(self.get_parameter('w_area').value) * area_frac
+
         scale = float(self.get_parameter('bbox_scale').value)
         side = float(np.clip(2.0 * place_r * scale, 8.0, min(w, h)))
         return {
             'cx': float(bcx), 'cy': float(bcy), 'w': side, 'h': side,
             'angle': 0.0, 'score': float(score), 'clearance': float(dt[bcy, bcx]),
+            'area_frac': area_frac,
             'debug': (img, occ_dil, candidate, roi_rect),
         }
 
-    def _score_candidates(self, candidate, dt, w, h):
+    def _score_candidates(self, candidate, dt, w, h, place_r):
         rows, cols = np.where(candidate)
         clear = dt[rows, cols]
-        clear_norm = clear / (clear.max() + 1e-6)
+        # 절대 여유(px)를 고정 기준으로 정규화한다. 프레임별 max 로 나누면(상대 정규화)
+        # 모든 자세의 best 가 1.0 으로 평탄화돼 capture 간 "어디가 더 넓은가"를 구분하지
+        # 못한다. thr(=후보 최소 여유) 에서 0, ref 에서 1.0 으로 선형, 그 이상은 포화.
+        clear_px = float(self.get_parameter('clearance_px').value)
+        thr = place_r + clear_px
+        ref = float(self.get_parameter('clear_ref_px').value)
+        if ref <= 0.0:
+            ref = 2.0 * thr
+        span = max(ref - thr, 1.0)
+        clear_norm = np.clip((clear - thr) / span, 0.0, 1.0)
         center_norm = 1.0 - np.abs(cols - w * 0.5) / (w * 0.5)
         front_norm = rows / float(max(h - 1, 1))
 
@@ -444,10 +472,10 @@ class EmptySlotDetectorNode(Node):
             self._pub_edges.publish(bgr_to_imgmsg(cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)))
         if self._pub_debug.get_subscription_count() == 0:
             return
-        roi_rect, occ_dil, dt, candidate, _ = self._free_and_candidate(img)
+        roi_rect, occ_dil, dt, candidate, place_r = self._free_and_candidate(img)
         best = None
         if np.any(candidate):
-            bcx, bcy, _ = self._score_candidates(candidate, dt, w, h)
+            bcx, bcy, _ = self._score_candidates(candidate, dt, w, h, place_r)
             best = (bcx, bcy)
         vis = self._draw_overlay(img, occ_dil, candidate, roi_rect, best, edges=edges)
         n_obj = len(self._latest_objects)
