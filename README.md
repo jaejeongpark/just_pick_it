@@ -41,6 +41,9 @@ JUST PICK IT은 소형 물류 매장 또는 자동화 매대를 가정한 통합
 <p align="center">
   <img src="docs/img/Design_img/1_Map_Design.PNG" width="82%" alt="Map design and operation zones" />
 </p>
+<p align="center">
+  <img src="docs/img/Design_img/2_Real_Map.png" width="82%" alt="Real workspace map" />
+</p>
 
 ## System Architecture
 
@@ -81,6 +84,10 @@ Customer UI
 ## Technical Highlights
 
 ### Fleet Orchestration
+
+<p align="center">
+  <img src="docs/img/Design_img/6_Fleet_Manager.png" width="86%" alt="Fleet Manager architecture" />
+</p>
 
 Fleet Manager는 Web/API 요청과 실제 로봇 action 사이의 중간 계층입니다. Web은 DB를 직접 수정하지 않고 Fleet API를 통해 주문과 작업을 요청하며, Fleet Manager 내부에서 Task Manager, Traffic Manager, RobotCommandGateway, RobotStateMonitor가 각 책임을 나눠 처리합니다.
 
@@ -154,6 +161,10 @@ PICKY1은 매대 정밀 접근 시 Nav2로 근처까지 이동한 뒤, precision
 #### Reverse Docking
 
 좁은 charging dock에 후진 삽입하는 동작도 두 로봇이 서로 다른 정렬 방식을 사용합니다.
+
+<p align="center">
+  <img src="docs/img/Design_img/9_Precision_Reverse_Docking.png" width="86%" alt="Precision reverse docking alignment for PICKY1 and PICKY2" />
+</p>
 
 | 항목 | PICKY1 | PICKY2 |
 |---|---|---|
