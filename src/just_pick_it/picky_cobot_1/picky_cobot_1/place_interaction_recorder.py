@@ -42,15 +42,25 @@ class PlaceInteractionRecorderNode(HumanInteractionRecorderNode):
         # place 종단(놓기) 시 그리퍼 개방값. DISPLAY_PLACE 의 부분개방(70)과 일치시킨다.
         self.declare_parameter('place_open_value', 70.0)
         self.declare_parameter('place_open_speed', 50)
+        # [R] 서보 해제 시 유지할 그리퍼 닫힘값. 0=완전 닫힘(실제 물건 쥠). 물건 없이
+        # 반복 수집할 때 '물었다는 가정'으로 30 등 부분 닫힘값을 주면 그리퍼가 끝까지
+        # 닫히지 않고 그 위치를 유지한다(매번 실제 물건을 물리지 않아도 됨).
+        self.declare_parameter('gripper_hold_value', 0.0)
         # RELEASING 확인 방향 반전: 픽은 그리퍼 open(>=open_confirm)을 기다리지만,
         # place 는 닫힘(<=close_confirm, 물건 쥠 유지)을 확인하고 free-drive 로 넘어간다.
         self.declare_parameter('gripper_close_confirm_value', 20.0)
 
         self.place_open_value = float(self.get_parameter('place_open_value').value)
         self.place_open_speed = int(self.get_parameter('place_open_speed').value)
+        self.gripper_hold_value = float(self.get_parameter('gripper_hold_value').value)
         self.gripper_close_confirm_value = float(
             self.get_parameter('gripper_close_confirm_value').value
         )
+        # 부분 닫힘 hold(예: 30)를 닫힘으로 인정하려면 확인 임계가 hold 이상이어야 한다.
+        # 그리퍼 피드백 흔들림을 감안해 margin 을 더해 자동 보정한다(hold=0 이면 기본 유지).
+        min_confirm = self.gripper_hold_value + 5.0
+        if self.gripper_close_confirm_value < min_confirm:
+            self.gripper_close_confirm_value = min_confirm
 
         self.get_logger().info(
             'PlaceInteractionRecorderNode 시작 — 물건을 쥔 채 시작. '
@@ -60,7 +70,7 @@ class PlaceInteractionRecorderNode(HumanInteractionRecorderNode):
     # ── 그리퍼 닫힘(물건 쥠) 발행 ─────────────────────────────────────────
     def _publish_gripper_hold(self):
         msg = Float64MultiArray()
-        msg.data = [0.0, float(self.gripper_open_speed)]
+        msg.data = [self.gripper_hold_value, float(self.gripper_open_speed)]
         self.set_gripper_pub.publish(msg)
 
     # ── [R]: 팔 서보만 해제, 그리퍼는 닫힌 채 유지 ────────────────────────
@@ -96,7 +106,7 @@ class PlaceInteractionRecorderNode(HumanInteractionRecorderNode):
         self._gripper_reopen_done = True
         self._publish_gripper_hold()
         self.get_logger().info(
-            '서보 해제 후 그리퍼 close(0) 재발행 — 물건 쥠 유지.'
+            f'서보 해제 후 그리퍼 close({self.gripper_hold_value:.0f}) 재발행 — 물건 쥠 유지.'
         )
 
     # ── RELEASING 확인: 그리퍼가 닫힘(<=confirm)인지 본다 ─────────────────

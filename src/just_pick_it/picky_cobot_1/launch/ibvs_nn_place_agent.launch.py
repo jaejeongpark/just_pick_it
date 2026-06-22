@@ -66,6 +66,8 @@ def generate_launch_description():
     place_timeout_sec = LaunchConfiguration('place_timeout_sec')
     place_request_topic = LaunchConfiguration('place_request_topic')
     place_result_topic = LaunchConfiguration('place_result_topic')
+    rviz = LaunchConfiguration('rviz')
+    rviz_config = LaunchConfiguration('rviz_config')
 
     home = os.path.expanduser('~')
     default_model_path = os.path.join(
@@ -75,6 +77,9 @@ def generate_launch_description():
     perception_share = get_package_share_directory('just_pick_it_perception')
     default_detector_params = os.path.join(
         perception_share, 'config', 'empty_slot_detector_params.yaml')
+    picky_share = get_package_share_directory('picky_cobot_1')
+    default_rviz_config = os.path.join(
+        picky_share, 'config', 'place_empty_detection.rviz')
 
     args = [
         DeclareLaunchArgument('robot_name', default_value='jetcobot1'),
@@ -91,6 +96,9 @@ def generate_launch_description():
         DeclareLaunchArgument('place_timeout_sec', default_value='120.0'),
         DeclareLaunchArgument('place_request_topic', default_value='/display_place/request'),
         DeclareLaunchArgument('place_result_topic', default_value='/display_place/result'),
+        # rviz 디버그 시각화. 기본값은 csrt_debugger 를 따라가며 rviz:= 로 독립 제어 가능.
+        DeclareLaunchArgument('rviz', default_value=csrt_debugger),
+        DeclareLaunchArgument('rviz_config', default_value=default_rviz_config),
     ]
 
     detection_launch = os.path.join(
@@ -143,4 +151,15 @@ def generate_launch_description():
         condition=IfCondition(csrt_debugger),
     )
 
-    return LaunchDescription(args + [detection, detector, place_agent, csrt_debug])
+    # 5. rviz 디버그 뷰(place debug image / csrt overlay / edges) — rviz=true 일 때만.
+    rviz_node = Node(
+        package='rviz2',
+        executable='rviz2',
+        name='rviz2',
+        output='screen',
+        arguments=['-d', rviz_config],
+        condition=IfCondition(rviz),
+    )
+
+    return LaunchDescription(
+        args + [detection, detector, place_agent, csrt_debug, rviz_node])

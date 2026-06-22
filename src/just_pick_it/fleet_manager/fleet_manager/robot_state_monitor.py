@@ -23,23 +23,27 @@ def _quat_to_yaw(q: Any) -> float:
 
 
 class RobotStateMonitor:
-    """PICKY 텔레메트리(picky_state / battery / pose)를 구독해 DB와 TrafficManager에 반영한다.
+    """로봇 텔레메트리/상태 topic을 구독해 DB와 TrafficManager에 반영한다.
 
     System Architecture 기준 Fleet Manager <-> AMR Controller 통신은 ROS2이므로,
     로봇 상태는 HTTP가 아니라 ROS2 토픽으로만 들어온다.
 
-    구독 토픽(각 robot namespace 기준):
+    PICKY 구독 토픽(각 robot namespace 기준):
     - `/pickyX/picky_state` (std_msgs/String): 상태 머신 출력. State Manager가 발행.
     - `/pickyX/battery/percent` (std_msgs/Float32): 이미 % 값. pinky_bringup이 발행.
     - `/pickyX/amcl_pose` (geometry_msgs/PoseWithCovarianceStamped): map frame 위치.
+
+    COBOT 구독 토픽:
+    - `/cobotX/cobot_state` (std_msgs/String): Cobot State Manager가 발행.
 
     반영 정책:
     - picky_state는 경로/도크 자동 해제가 지연되면 안 되므로 수신 즉시 `on_state_change`
       (TrafficManager.notify_state)로 전달한다.
     - battery/pose는 고빈도라 최신값만 캐시하고, db_flush_period_sec 주기로 변경분만
       한 번에 DB에 반영한다(coalesce). picky_state도 같은 주기에 함께 반영한다.
+    - cobot_state는 저빈도 상태 heartbeat라 변경될 때 즉시 DB에 반영한다.
     - **robot_status는 절대 기록하지 않는다.** robot_status는 task 전이(workflow_service)
-      전용이며, 텔레메트리는 picky_state / battery_level / pos_* 만 갱신한다.
+      전용이며, 텔레메트리는 picky_state / cobot_state / battery_level / pos_* 만 갱신한다.
     - battery_level이 임계값(기본 30%)을 **초과하는 구간에서 robot별 1회만**
       `on_battery_update`(TaskManager.handle_battery_update)를 호출한다(충전 완료 트리거).
       임계값 이하로 떨어지면 플래그가 해제되어 다음 초과 진입 때 다시 1회 호출된다.
@@ -52,6 +56,7 @@ class RobotStateMonitor:
         robot_ids: list[str],
         fleet_repo: Any,
         on_state_change: StateCallback,
+        cobot_robot_ids: list[str] | None = None,
         on_battery_update: BatteryCallback | None = None,
         db_flush_period_sec: float = 1.0,
         battery_notify_threshold: int = 30,
@@ -73,6 +78,7 @@ class RobotStateMonitor:
         # battery_threshold 초과 구간에서 on_battery_update 를 이미 1회 호출한 robot 집합.
         # threshold 이하로 떨어지면 제거되어, 다음 초과 진입 때 다시 1회 호출된다.
         self._battery_notified: set[str] = set()
+        self._last_cobot_state: dict[str, str] = {}
         # bringup 이 죽어 battery 텔레메트리가 timeout 이상 끊기면 배터리를 0% 로 떨어뜨려
         # offline 로봇이 stale battery 로 신규 주문을 배정받는 것을 막는다(기존
         # battery<=30 배정 게이팅 재사용). monotonic 기준, 시작 시각으로 초기화해
@@ -103,11 +109,21 @@ class RobotStateMonitor:
                 10,
             )
 
+        for robot_id in cobot_robot_ids or []:
+            ns = robot_id.lower()
+            node.create_subscription(
+                String,
+                f'/{ns}/cobot_state',
+                lambda msg, rid=robot_id: self._on_cobot_state(rid, msg),
+                10,
+            )
+
         self._flush_timer = node.create_timer(db_flush_period_sec, self._flush_to_db)
 
         node.get_logger().info(
             f'[RobotStateMonitor] 텔레메트리 구독 시작 — {robot_ids} '
-            f'(picky_state/battery/amcl_pose), DB flush {db_flush_period_sec:.1f}s'
+            f'(picky_state/battery/amcl_pose), cobot={cobot_robot_ids or []} '
+            f'(cobot_state), DB flush {db_flush_period_sec:.1f}s'
         )
 
     # ==================================================================
@@ -134,6 +150,19 @@ class RobotStateMonitor:
             cache['pos_x'] = float(pose.position.x)
             cache['pos_y'] = float(pose.position.y)
             cache['pos_theta'] = _quat_to_yaw(pose.orientation)
+
+    def _on_cobot_state(self, robot_id: str, msg: String) -> None:
+        state = str(msg.data or "").strip()
+        if not state:
+            return
+        with self._lock:
+            if self._last_cobot_state.get(robot_id) == state:
+                return
+
+        updated = self._repo.update_robot_state(robot_id, cobot_state=state)
+        if updated is not None:
+            with self._lock:
+                self._last_cobot_state[robot_id] = state
 
     # ==================================================================
     # 주기 DB 반영 (timer thread)

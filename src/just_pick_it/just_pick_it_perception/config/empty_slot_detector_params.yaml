@@ -27,9 +27,19 @@ empty_slot_detector_node:
     edge_margin_px: 6.0
 
     # 스코어 가중치.
-    w_clear: 3.0
-    w_center: 0.6
-    w_front: 0.5
+    w_clear: 4.0
+    w_center: 0.3
+    w_front: 0.3
+
+    # 자세 우승용 면적 가중치. candidate(초록=놓을 수 있는 공간) 면적 비율(0~1)에 곱한다.
+    # 초록이 많은(텅 빈) 자세를 우승시키는 주 노브. 좁은 틈이 이기면 이 값을 키운다.
+    w_area: 6.0
+
+    # clearance 정규화 기준 px(자세 간 비교용 절대 척도). 후보 최소 여유(place_radius_px
+    # + clearance_px)에서 0, 이 값에서 1.0 으로 선형, 그 이상은 만점 포화.
+    # 0 이면 자동으로 2*(place_radius_px + clearance_px). 좁은 틈이 텅 빈 공간을 이기면
+    # 이 값을 키워(여유 차이를 더 벌려) 넓은 자리를 강하게 선호하게 만든다.
+    clear_ref_px: 100.0
 
     bbox_scale: 1.0
 
