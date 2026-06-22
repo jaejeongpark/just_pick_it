@@ -63,6 +63,7 @@ def launch_setup(context, *args, **kwargs):
     ibvs_control_rate_hz = LaunchConfiguration("ibvs_control_rate_hz").perform(context)
     j6_angle_sign = LaunchConfiguration("j6_angle_sign").perform(context)
     j6_angle_offset_deg = LaunchConfiguration("j6_angle_offset_deg").perform(context)
+    j6_square_aspect_thresh = LaunchConfiguration("j6_square_aspect_thresh").perform(context)
     # IBVS DONE 판정 area_norm 임계값(클수록 물체에 더 가까이 접근 후 grip).
     desired_area_norm = LaunchConfiguration("desired_area_norm").perform(context)
 
@@ -82,6 +83,7 @@ def launch_setup(context, *args, **kwargs):
             "image_height": image_height,
             "j6_angle_sign": j6_angle_sign,
             "j6_angle_offset_deg": j6_angle_offset_deg,
+            "j6_square_aspect_thresh": j6_square_aspect_thresh,
             "desired_area_norm": desired_area_norm,
             # IBVS 단계 속도/주기 (NN 단계와 독립).
             "command_speed": ibvs_command_speed,
@@ -189,6 +191,7 @@ def generate_launch_description():
         # J6 장축 정렬 보정(ibvs로 전달).
         DeclareLaunchArgument("j6_angle_sign", default_value="1.0"),
         DeclareLaunchArgument("j6_angle_offset_deg", default_value="0.0"),
+        DeclareLaunchArgument("j6_square_aspect_thresh", default_value="1.2"),
         # DONE 판정 area_norm 임계값(ibvs_controller로 전달). 기본값은
         # ibvs_controller.launch.py 와 동일하게 0.23.
         DeclareLaunchArgument("desired_area_norm", default_value="0.23"),

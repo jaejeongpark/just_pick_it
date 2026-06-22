@@ -109,6 +109,7 @@ def generate_launch_description():
         DeclareLaunchArgument("enable_j6_grip_align", default_value="true"),
         DeclareLaunchArgument("j6_angle_sign", default_value="1.0"),
         DeclareLaunchArgument("j6_angle_offset_deg", default_value="0.0"),
+        DeclareLaunchArgument("j6_square_aspect_thresh", default_value="1.2"),
     ]
 
     node = Node(
@@ -191,6 +192,7 @@ def generate_launch_description():
                 "enable_j6_grip_align": LaunchConfiguration("enable_j6_grip_align"),
                 "j6_angle_sign": LaunchConfiguration("j6_angle_sign"),
                 "j6_angle_offset_deg": LaunchConfiguration("j6_angle_offset_deg"),
+                "j6_square_aspect_thresh": LaunchConfiguration("j6_square_aspect_thresh"),
             }
         ],
     )

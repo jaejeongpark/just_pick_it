@@ -206,6 +206,10 @@ class AreaJacobianIBVSNode(Node):
         self.declare_parameter("j6_grip_index", 5)
         self.declare_parameter("j6_angle_sign", 1.0)
         self.declare_parameter("j6_angle_offset_deg", 0.0)
+        # OBB 종횡비(장축/단축)가 이 값 미만이면 정사각형에 가까운 물체로 보고,
+        # 장축 정렬 대신 회전을 최소화한다(가까운 grip 축으로 정렬). 1.0이면 항상
+        # 장축 정렬과 동일.
+        self.declare_parameter("j6_square_aspect_thresh", 1.2)
         self.declare_parameter("j6_align_settle_sec", 2.0)
         self.declare_parameter("grip_j6_topic", "")
         # 연속 에피소드: human_recorder가 nn_episode를 발행하면 재시작한다.
@@ -402,6 +406,9 @@ class AreaJacobianIBVSNode(Node):
         self.j6_grip_index = int(self.get_parameter("j6_grip_index").value)
         self.j6_angle_sign = float(self.get_parameter("j6_angle_sign").value)
         self.j6_angle_offset_deg = float(self.get_parameter("j6_angle_offset_deg").value)
+        self.j6_square_aspect_thresh = float(
+            self.get_parameter("j6_square_aspect_thresh").value
+        )
         self.j6_align_settle_sec = float(self.get_parameter("j6_align_settle_sec").value)
         self.gripper_open_speed = int(self.get_parameter("gripper_open_speed").value)
         grip_j6_topic = str(self.get_parameter("grip_j6_topic").value)
@@ -539,6 +546,9 @@ class AreaJacobianIBVSNode(Node):
         self.latest_mask_cy = 0.0
         self.latest_area_norm = 0.0
         self.latest_orientation_angle = 0.0
+        # OBB 종횡비(장축/단축, >=1). 마스크 폴리곤이 없거나 계산 불가 시 inf로 두어
+        # 기본은 장축 정렬(비정사각형) 동작을 유지한다.
+        self.latest_obb_aspect = float("inf")
 
         # ============================================================
         # Status state
@@ -566,6 +576,8 @@ class AreaJacobianIBVSNode(Node):
         self._search_last_move_pub_time = None
         # OBB orientation latched at search detection. None until first latch.
         self.grasp_orientation_anchor = None
+        # orientation anchor와 동일 시점에 latch되는 OBB 종횡비(장축/단축).
+        self.grasp_obb_aspect_anchor = None
 
         self.q0 = None
         self.q_base = np.array(self.pregrasp_angles, dtype=np.float64)
@@ -801,6 +813,7 @@ class AreaJacobianIBVSNode(Node):
         self._ibvs_done_published = False
         self._last_done_status_request_time = None
         self.grasp_orientation_anchor = None
+        self.grasp_obb_aspect_anchor = None
         self.current_search_idx = 0
         self._search_wait_skip_robot_wait = False
         self._search_arrived = False
@@ -956,6 +969,9 @@ class AreaJacobianIBVSNode(Node):
         self.latest_mask_cy = mask_cy
         self.latest_area_norm = filtered_area_norm
         self.latest_orientation_angle = float(best_obj.orientation_angle)
+        self.latest_obb_aspect = self._compute_obb_aspect(
+            best_obj.mask_polygon, self.latest_orientation_angle
+        )
 
         self.area_window.append(float(filtered_area_norm))
 
@@ -1224,6 +1240,29 @@ class AreaJacobianIBVSNode(Node):
         max_err = float(np.max(np.abs(self.latest_angles - target)))
         return max_err <= self.arrival_threshold_deg
 
+    @staticmethod
+    def _compute_obb_aspect(mask_polygon, angle_deg: float) -> float:
+        """마스크 폴리곤을 OBB 장축/단축 방향에 투영해 종횡비(장축/단축)를 구한다.
+
+        angle_deg는 detection 노드가 minAreaRect로 구한 OBB 장축 각도이므로,
+        그 방향과 수직 방향으로 점들을 투영한 extent가 곧 OBB의 w, h다. cv2 없이
+        numpy만으로 계산한다. 점이 부족하거나 단축이 0이면 inf(비정사각형으로 간주).
+        """
+        if mask_polygon is None or len(mask_polygon) < 6:
+            return float("inf")
+        pts = np.asarray(mask_polygon, dtype=np.float64).reshape(-1, 2)
+        a = math.radians(angle_deg)
+        ux, uy = math.cos(a), math.sin(a)
+        proj_long = pts[:, 0] * ux + pts[:, 1] * uy
+        proj_short = -pts[:, 0] * uy + pts[:, 1] * ux
+        long_ext = float(proj_long.max() - proj_long.min())
+        short_ext = float(proj_short.max() - proj_short.min())
+        if short_ext <= 1e-6 or long_ext <= 1e-6:
+            return float("inf")
+        # 투영 축 라벨이 뒤바뀌어도 항상 >=1 이 되도록 큰 쪽/작은 쪽으로 나눈다.
+        hi, lo = (long_ext, short_ext) if long_ext >= short_ext else (short_ext, long_ext)
+        return hi / lo
+
     def latch_grasp_orientation_anchor(self):
         # search 시점(유리한 시야)에서 단 한 번만 latch한다. detection을 잃었다가
         # 근접 자세에서 재검출되어 start_pick_sequence가 다시 호출될 때는, 이미 latch된
@@ -1232,11 +1271,13 @@ class AreaJacobianIBVSNode(Node):
         if self.grasp_orientation_anchor is not None:
             return
         self.grasp_orientation_anchor = float(self.latest_orientation_angle)
+        self.grasp_obb_aspect_anchor = float(self.latest_obb_aspect)
         self.grasp_orientation_pub.publish(
             Float64(data=self.grasp_orientation_anchor)
         )
         self.get_logger().info(
             f"Latched grasp_orientation_anchor={self.grasp_orientation_anchor:.1f} deg "
+            f"(obb_aspect={self.grasp_obb_aspect_anchor:.2f}) "
             f"at '{self.search_position_names[self.current_search_idx]}'"
         )
 
@@ -1430,6 +1471,7 @@ class AreaJacobianIBVSNode(Node):
                 self._last_search_status_request_time = None
                 # 새 search 위치(유리한 시야)로 이동하므로 orientation anchor를 재latch 허용.
                 self.grasp_orientation_anchor = None
+                self.grasp_obb_aspect_anchor = None
                 self.set_phase(Phase.SEARCH_WAIT)
 
             elif self.phase == Phase.SEARCH_WAIT:
@@ -1647,8 +1689,21 @@ class AreaJacobianIBVSNode(Node):
                 # 180도로 접어 base에서 ±90도 이내의 "동일 grasp"로 만든다. 이렇게 하면
                 # obb가 0/180 경계에서 흔들려도(예: 5도 vs 175도) J6가 튀지 않고 일관되며,
                 # ±180 clamp로 인한 왜곡도 없다. (어느 축으로 잡을지는 offset이 결정)
+                #
+                # 단, OBB 가로세로 차이가 작은(정사각형에 가까운) 물체는 장축/단축이
+                # 둘 다 유효한 grip 축(90도 차이)이라 어느 쪽으로 잡아도 무방하다. 이때는
+                # 90도 주기로 접어 base에서 ±45도 이내, 즉 더 가까운 축으로 정렬해 J6
+                # 회전량을 최소화한다.
+                aspect = self.grasp_obb_aspect_anchor
+                is_square = (
+                    aspect is not None
+                    and math.isfinite(aspect)
+                    and aspect < self.j6_square_aspect_thresh
+                )
+                fold = 90.0 if is_square else 180.0
+                half = fold / 2.0
                 delta = self.j6_angle_sign * obb + self.j6_angle_offset_deg
-                delta = ((delta + 90.0) % 180.0) - 90.0   # [-90, 90)
+                delta = ((delta + half) % fold) - half   # [-half, half)
                 j6_target = j6_base + delta
                 # 관절 한계 내로: 180도 등가(grasp 동일)로 접는다.
                 while j6_target > 180.0:
@@ -1656,8 +1711,10 @@ class AreaJacobianIBVSNode(Node):
                 while j6_target < -180.0:
                     j6_target += 180.0
                 q_cmd[idx] = j6_target
+                aspect_str = f"{aspect:.2f}" if aspect is not None else "n/a"
                 self.get_logger().info(
                     f"GRIP J6 align: obb={obb:.1f} deg, base={j6_base:.1f}, "
+                    f"aspect={aspect_str} square={is_square} fold={fold:.0f}, "
                     f"folded_delta={delta:.1f} -> j6_target={j6_target:.1f} deg "
                     f"(sign={self.j6_angle_sign}, offset={self.j6_angle_offset_deg})"
                 )
