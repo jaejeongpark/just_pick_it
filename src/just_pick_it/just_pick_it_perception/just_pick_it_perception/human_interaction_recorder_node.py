@@ -24,7 +24,7 @@ from rclpy.qos import QoSProfile, QoSDurabilityPolicy
 
 from std_msgs.msg import Empty, Float64MultiArray, Int32, String
 
-from just_pick_it_interfaces.msg import HumanInteractionSample
+from just_pick_it_interfaces.msg import HumanInteractionSample, TrackedObjectArray
 
 
 PHASE_WAITING = 0
@@ -126,6 +126,16 @@ class HumanInteractionRecorderNode(Node):
         self.declare_parameter("displacement_threshold_deg", 2.0)
         # 한 step 변위가 임계값의 이 배수를 넘으면 경고(status 공백/과속 시연 의심).
         self.declare_parameter("displacement_warn_factor", 2.5)
+        # Closed-loop NN 재수집: human 정밀보정 구간에 대상 물체 detection을 함께 기록한다.
+        # 선택 규칙은 inference(nn_controller_node) / visual_servo_bag_recorder 와 동일한
+        # nearest_center(class/confidence 필터 후 화면 중심 최근접).
+        self.declare_parameter("detection_topic", "/infer/tracked_objects")
+        self.declare_parameter("target_class_label", "watermelon")
+        self.declare_parameter("min_confidence", 0.5)
+        self.declare_parameter("image_width", 640.0)
+        self.declare_parameter("image_height", 480.0)
+        # 이 시간보다 오래된 detection은 stale로 보고 det_valid=false(freeze 대상)로 기록.
+        self.declare_parameter("detection_timeout_sec", 0.5)
 
         self.robot_name = str(self.get_parameter("robot_name").value)
         self.episode_id = str(self.get_parameter("episode_id").value)
@@ -167,6 +177,14 @@ class HumanInteractionRecorderNode(Node):
         self.displacement_warn_factor = float(
             self.get_parameter("displacement_warn_factor").value
         )
+        self.detection_topic = str(self.get_parameter("detection_topic").value)
+        self.target_class_label = str(self.get_parameter("target_class_label").value)
+        self.min_confidence = float(self.get_parameter("min_confidence").value)
+        self.image_width = float(self.get_parameter("image_width").value)
+        self.image_height = float(self.get_parameter("image_height").value)
+        self.detection_timeout_sec = float(
+            self.get_parameter("detection_timeout_sec").value
+        )
 
         self.ns = f"/{self.robot_name}"
 
@@ -181,6 +199,12 @@ class HumanInteractionRecorderNode(Node):
         self.latest_angles: Optional[List[float]] = None
         self.latest_gripper_value: float = math.nan
         self.latest_status_time = None
+
+        # 최신 유효 detection (cx_px, cy_px, area_norm) 과 수신 시각(ros sec).
+        # det_valid 판정은 detection_timeout_sec 기준 freshness. stale 여도 마지막 값은
+        # 유지해 freeze 정보를 보존한다(학습/추론 일관).
+        self.latest_det: Optional[tuple] = None
+        self.latest_det_time: Optional[float] = None
 
         # release 후 gripper open 재발행용 one-shot 타이머.
         self._gripper_reopen_timer = None
@@ -260,6 +284,13 @@ class HumanInteractionRecorderNode(Node):
             Int32,
             f"{self.ns}/ibvs_phase",
             self.ibvs_phase_callback,
+            10,
+        )
+        # Closed-loop NN 입력용 대상 물체 detection 구독.
+        self.detection_sub = self.create_subscription(
+            TrackedObjectArray,
+            self.detection_topic,
+            self.detection_callback,
             10,
         )
 
@@ -418,6 +449,34 @@ class HumanInteractionRecorderNode(Node):
         self.latest_angles = angles
         self.latest_gripper_value = gripper_value
         self.latest_status_time = self.get_clock().now()
+
+    def detection_callback(self, msg: TrackedObjectArray):
+        # inference(nn_controller_node) / visual_servo_bag_recorder 와 동일한 nearest_center:
+        # class/confidence 필터 후 화면 중심에 가장 가까운 대상.
+        best = None
+        best_d2 = float("inf")
+        for obj in msg.objects:
+            if self.target_class_label and str(obj.class_label) != self.target_class_label:
+                continue
+            if float(obj.confidence) < self.min_confidence:
+                continue
+            d2 = ((float(obj.bbox_x) - self.image_width * 0.5) ** 2
+                  + (float(obj.bbox_y) - self.image_height * 0.5) ** 2)
+            if d2 < best_d2:
+                best_d2 = d2
+                best = obj
+        if best is None:
+            return
+        cx = float(best.bbox_x)
+        cy = float(best.bbox_y)
+        area_norm = (float(best.bbox_w) * float(best.bbox_h)) / max(
+            self.image_width * self.image_height, 1.0
+        )
+        if not (math.isfinite(cx) and math.isfinite(cy) and math.isfinite(area_norm)) \
+                or area_norm <= 0.0:
+            return
+        self.latest_det = (cx, cy, area_norm)
+        self.latest_det_time = self.get_clock().now().nanoseconds * 1e-9
 
     def ibvs_done_callback(self, _msg: Empty):
         if self.phase != InteractionPhase.WAITING:
@@ -601,6 +660,23 @@ class HumanInteractionRecorderNode(Node):
         sample.result_recorded = bool(result_recorded)
         sample.grip_success = bool(grip_success) if result_recorded else False
         sample.time_since_ibvs_done = float(self._time_since_ibvs_done())
+
+        # Closed-loop NN 입력용 detection. fresh(timeout 이내)면 det_valid=true.
+        # stale/없음이면 det_valid=false 로 두되 마지막 유효값은 그대로 실어 freeze 정보 보존.
+        det_valid = False
+        if self.latest_det is not None and self.latest_det_time is not None:
+            age = now.nanoseconds * 1e-9 - self.latest_det_time
+            det_valid = age <= self.detection_timeout_sec
+        if self.latest_det is not None:
+            det_cx, det_cy, det_area = self.latest_det
+        else:
+            det_cx, det_cy, det_area = 0.0, 0.0, 0.0
+        sample.det_valid = bool(det_valid)
+        sample.det_cx = float(det_cx)
+        sample.det_cy = float(det_cy)
+        sample.det_area_norm = float(det_area)
+        sample.det_image_width = float(self.image_width)
+        sample.det_image_height = float(self.image_height)
 
         self._write_queue.put(
             (self.bag_topic, serialize_message(sample), now.nanoseconds)

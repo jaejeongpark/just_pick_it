@@ -134,6 +134,12 @@ def launch_setup(context, *args, **kwargs):
                 "displacement_threshold_deg": float(displacement_threshold_deg),
                 "loop_episodes": (loop_episodes.lower() in ("true", "1", "yes")),
                 "shutdown_on_done": True,
+                # human 정밀보정 구간에 대상 물체 detection 을 함께 기록(closed-loop NN 입력).
+                "detection_topic": detection_topic,
+                "target_class_label": target_class_label,
+                "min_confidence": float(min_confidence),
+                "image_width": float(image_width),
+                "image_height": float(image_height),
             }
         ],
     )
