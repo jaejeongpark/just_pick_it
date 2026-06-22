@@ -548,6 +548,7 @@ class NNControllerNode(Node):
         self._last_proc_status_ns = None
         self.step_count = 0
         self.lost_count = 0
+        self.grip_consec = 0
         self.open_loop_mode = False
         self.last_visible_input = None
         self.last_visible_p = 0.0
@@ -653,17 +654,34 @@ class NNControllerNode(Node):
         if not settled:
             self.publish_joint_command(q_cmd.tolist(), self.command_speed)
 
+        # grip predictor 트리거(주 경로): P(success)가 임계를 연속으로 넘으면 그 시점이
+        # "실제 grip 시점"이다. closed/open, settle 여부와 무관하게 바로 닫는다.
+        if p_success >= self.grip_confidence_threshold:
+            self.grip_consec += 1
+        else:
+            self.grip_consec = 0
+
         self.step_count += 1
         self.get_logger().info(
             f"RUN(closeloop) step={self.step_count}/{self.max_fine_tune_steps}, "
             f"{'OPEN' if self.open_loop_mode else 'CLOSED'} lost={self.lost_count}, "
-            f"P_lastvis={self.last_visible_p:.3f}, "
+            f"P={p_success:.3f}(lv={self.last_visible_p:.3f}, "
+            f"consec={self.grip_consec}/{self.grip_consecutive_required}), "
             f"{'SETTLED ' if settled else ''}"
             f"delta(J1~J5)={np.round(delta_deg, 2).tolist()}"
         )
 
-        # grip: open-loop 에서 settle 하면 last-visible P 로 go/no-go commit.
-        # closed-loop(물체 보임) 중에는 grip 하지 않는다(그립은 blind 에서 일어남).
+        if self.grip_consec >= self.grip_consecutive_required:
+            self.get_logger().info(
+                f"Grip trigger: P(success)={p_success:.3f} >= "
+                f"{self.grip_confidence_threshold} for {self.grip_consecutive_required} steps. "
+                f"Gripping."
+            )
+            self.set_phase(Phase.GRIP)
+            return
+
+        # fallback: open-loop 에서 수렴(settle)했는데 P 가 임계 미달이면 commit 규칙 적용
+        # (on_low_confidence_action: grip 또는 error).
         if self.open_loop_mode and settled:
             self._closeloop_commit_grip()
             return
