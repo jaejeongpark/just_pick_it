@@ -53,12 +53,18 @@ def launch_setup(context, *args, **kwargs):
     det_valid_timeout = LaunchConfiguration("det_valid_timeout").perform(context)
     open_loop_lost_frames = LaunchConfiguration("open_loop_lost_frames").perform(context)
     on_low_confidence_action = LaunchConfiguration("on_low_confidence_action").perform(context)
+    # z-floor: base_link 기준 z 하한(get_coords 좌표계, mm). end-effector 가 shelf 아래로
+    # 못 내려가게 하는 hard constraint. effective floor = z_floor_mm + z_floor_margin_mm.
+    nn_z_floor_enable = LaunchConfiguration("nn_z_floor_enable").perform(context)
+    nn_z_floor_mm = LaunchConfiguration("nn_z_floor_mm").perform(context)
+    nn_z_floor_margin_mm = LaunchConfiguration("nn_z_floor_margin_mm").perform(context)
     # IBVS(방식 1) 단계 제어.
     ibvs_command_speed = LaunchConfiguration("ibvs_command_speed").perform(context)
     ibvs_pregrasp_speed = LaunchConfiguration("ibvs_pregrasp_speed").perform(context)
     ibvs_control_rate_hz = LaunchConfiguration("ibvs_control_rate_hz").perform(context)
     j6_angle_sign = LaunchConfiguration("j6_angle_sign").perform(context)
     j6_angle_offset_deg = LaunchConfiguration("j6_angle_offset_deg").perform(context)
+    j6_square_aspect_thresh = LaunchConfiguration("j6_square_aspect_thresh").perform(context)
     desired_area_norm = LaunchConfiguration("desired_area_norm").perform(context)
     approach_center_threshold = LaunchConfiguration("approach_center_threshold").perform(context)
 
@@ -76,6 +82,7 @@ def launch_setup(context, *args, **kwargs):
             "image_height": image_height,
             "j6_angle_sign": j6_angle_sign,
             "j6_angle_offset_deg": j6_angle_offset_deg,
+            "j6_square_aspect_thresh": j6_square_aspect_thresh,
             # 방식 1: 학습과 동일한 거친 접근 + 느슨한 정렬 인계.
             "desired_area_norm": desired_area_norm,
             "approach_center_threshold": approach_center_threshold,
@@ -113,6 +120,10 @@ def launch_setup(context, *args, **kwargs):
                 "det_valid_timeout": float(det_valid_timeout),
                 "open_loop_lost_frames": int(open_loop_lost_frames),
                 "on_low_confidence_action": on_low_confidence_action,
+                # z-floor hard constraint (base_link 기준 z 하한).
+                "z_floor_enable": (nn_z_floor_enable.lower() in ("true", "1", "yes")),
+                "z_floor_mm": float(nn_z_floor_mm),
+                "z_floor_margin_mm": float(nn_z_floor_margin_mm),
             }
         ],
     )
@@ -165,12 +176,18 @@ def generate_launch_description():
         DeclareLaunchArgument("det_valid_timeout", default_value="0.0"),
         DeclareLaunchArgument("open_loop_lost_frames", default_value="0"),
         DeclareLaunchArgument("on_low_confidence_action", default_value="grip"),
+        # z-floor: base_link 기준 z 하한(get_coords 좌표계, mm). 기본 비활성.
+        # z_floor_mm 은 gripper 가 닿으면 안 되는 표면(예: shelf) 의 z 측정값.
+        DeclareLaunchArgument("nn_z_floor_enable", default_value="false"),
+        DeclareLaunchArgument("nn_z_floor_mm", default_value="0.0"),
+        DeclareLaunchArgument("nn_z_floor_margin_mm", default_value="0.0"),
         # --- IBVS(방식 1) 단계 ---
         DeclareLaunchArgument("ibvs_command_speed", default_value="20"),
         DeclareLaunchArgument("ibvs_pregrasp_speed", default_value="15"),
         DeclareLaunchArgument("ibvs_control_rate_hz", default_value="5.0"),
         DeclareLaunchArgument("j6_angle_sign", default_value="1.0"),
         DeclareLaunchArgument("j6_angle_offset_deg", default_value="0.0"),
+        DeclareLaunchArgument("j6_square_aspect_thresh", default_value="1.2"),
         # 방식 1 인계: 학습 수집(nn_data_collection_closeloop)과 동일 기본값.
         DeclareLaunchArgument("desired_area_norm", default_value="0.14"),
         DeclareLaunchArgument("approach_center_threshold", default_value="0.25"),
