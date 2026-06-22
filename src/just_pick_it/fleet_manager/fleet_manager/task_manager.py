@@ -1172,6 +1172,10 @@ class TaskManager:
                 return False
             if not self._picky_has_work_battery(robot):
                 return False
+        elif robot.get("robot_type") == "COBOT":
+            cobot_state = robot.get("cobot_state")
+            if cobot_state not in (None, "STANDBY"):
+                return False
         return True
 
     def _picky_has_work_battery(self, robot: dict[str, Any]) -> bool:

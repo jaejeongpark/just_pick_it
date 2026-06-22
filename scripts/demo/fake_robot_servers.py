@@ -70,7 +70,7 @@ def load_demo_env_defaults(env_path: Path = DEMO_ENV_PATH) -> None:
     """Load demo defaults when fake servers are run directly.
 
     Shell-provided environment variables win. This keeps explicit overrides such
-    as `DEMO_MOCK_PICKY=true python3 ...` working while making plain direct
+    as `DEMO_MOCK_PICKY_IDS=2 python3 ...` working while making plain direct
     execution honor scripts/demo/full_flow_demo.env.
     """
     if not env_path.is_file():
@@ -133,6 +133,32 @@ def env_bool(name: str, default: bool) -> bool:
     return raw_value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def enabled_names_from_ids(
+    names: tuple[str, ...],
+    ids_env: str,
+    default_ids: str,
+) -> tuple[str, ...]:
+    """Return fake robot names listed by numeric ids, e.g. "1,2"."""
+    raw_value = os.environ.get(ids_env, default_ids)
+    tokens = [
+        token.strip()
+        for part in raw_value.replace(";", ",").split(",")
+        for token in part.split()
+        if token.strip()
+    ]
+    selected_ids = set(tokens)
+    valid_ids = {"".join(ch for ch in name if ch.isdigit()) for name in names}
+    invalid_ids = selected_ids - valid_ids
+    if invalid_ids:
+        valid_text = ",".join(sorted(valid_ids))
+        invalid_text = ",".join(sorted(invalid_ids))
+        raise ValueError(f"{ids_env} has invalid id(s): {invalid_text}; valid ids: {valid_text}")
+    return tuple(
+        name for name in names
+        if "".join(ch for ch in name if ch.isdigit()) in selected_ids
+    )
+
+
 def yaw_to_quaternion_z_w(yaw: float) -> tuple[float, float]:
     return math.sin(yaw / 2.0), math.cos(yaw / 2.0)
 
@@ -150,11 +176,13 @@ class FakeRobotServers(Node):
         self._battery_drain_per_flow = env_float("DEMO_PICKY_BATTERY_DRAIN_PER_FLOW", 0.0)
         self._charge_complete_seconds = env_float("DEMO_PICKY_CHARGE_COMPLETE_SECONDS", 5.0)
         self._cobot_auto_complete = env_bool("DEMO_COBOT_AUTO_COMPLETE", True)
-        # 실로봇 혼합 테스트용 선택 mock. 실제 AMR(picky1) 주행 테스트 중에는
-        # DEMO_MOCK_PICKY=0 으로 picky mock 을 꺼서 보드의 실제 action server 와
-        # 충돌하지 않게 하고, cobot 작업만 자동 처리(auto-complete)하게 한다.
-        self._mock_picky = env_bool("DEMO_MOCK_PICKY", True)
-        self._mock_cobot = env_bool("DEMO_MOCK_COBOT", True)
+        # 실로봇 혼합 테스트용 선택 mock. 예: DEMO_MOCK_PICKY_IDS=2 이면 PICKY2만 fake.
+        self._mock_picky_names = enabled_names_from_ids(
+            PICKY_NAMES, "DEMO_MOCK_PICKY_IDS", "1,2"
+        )
+        self._mock_cobot_names = enabled_names_from_ids(
+            COBOT_NAMES, "DEMO_MOCK_COBOT_IDS", "1,2"
+        )
         self._state_publish_interval_sec = env_float(
             "DEMO_STATE_PUBLISH_INTERVAL_SECONDS",
             1.0,
@@ -170,7 +198,7 @@ class FakeRobotServers(Node):
         self._servers: list[object] = []
         self._services: list[object] = []
 
-        for name in (PICKY_NAMES if self._mock_picky else ()):
+        for name in self._mock_picky_names:
             ns = name.lower()
             x, y, theta = INITIAL_PICKY_POSES[name]
             runtime = PickyRuntime(name=name, x=x, y=y, theta=theta, battery_percent=100.0)
@@ -229,7 +257,7 @@ class FakeRobotServers(Node):
                 )
             )
 
-        for name in (COBOT_NAMES if self._mock_cobot else ()):
+        for name in self._mock_cobot_names:
             ns = name.lower()
             runtime = CobotRuntime(name=name)
             self._cobots[name] = runtime
@@ -273,8 +301,8 @@ class FakeRobotServers(Node):
 
         self.get_logger().info(
             "fake robot servers ready: "
-            f"mock_picky={self._mock_picky}(/picky*/move_command,dock_command), "
-            f"mock_cobot={self._mock_cobot}(/cobot*/execute_task), "
+            f"mock_picky={','.join(self._mock_picky_names) or 'none'}, "
+            f"mock_cobot={','.join(self._mock_cobot_names) or 'none'}, "
             f"cobot_auto_complete={self._cobot_auto_complete}"
         )
 

@@ -62,20 +62,20 @@ INSPECTION_POSE = [20.39, -7.29, -28.82, -50.44, 5.36, -110.65]
 # 슬롯 4개 = picky 바구니 용량(공간 협소). 단위: degree, [J1..J6].
 LOAD_SLOT_ANGLES = [
     {  # slot 0 (item 1)
-        'approach': [7.99, -41.04, -8.70, -40.42, 3.16, -124.01],
-        'place':    [7.03, -35.06, -62.40, 7.20, 4.04, -124.01],
+        'approach': [4.74, -29.09, -44.29, -15.20, 2.81, -123.48],
+        'place':    [4.74, -32.87, -64.51, 7.38, 5.71, -123.48],
     },
     {  # slot 1 (item 2)
-        'approach': [6.67, -16.08, -43.24, -33.04, 3.77, -124.01],
-        'place':    [6.50, -14.58, -92.02, 13.97, 5.00, -124.01],
+        'approach': [3.69, -14.94, -53.26, -23.64, 5.44, -123.48],
+        'place':    [7.38, -10.98, -95.27, 15.46, 4.13, -126.29],
     },
     {  # slot 2 (item 3)
-        'approach': [31.20, -20.12, -28.47, -43.68, 2.63, -98.26],
-        'place':    [31.37, -14.06, -92.90, 13.71, 2.54, -98.26],
+        'approach': [27.77, -14.23, -57.39, -18.19, 3.95, -102.65],
+        'place':    [32.87, -10.98, -96.15, 14.67, -0.26, -100.28],
     },
     {  # slot 3 (item 4)
-        'approach': [23.37, -35.06, -23.73, -32.08, 4.48, -105.46],
-        'place':    [23.73, -36.38, -61.25, 7.47, 4.57, -105.46],
+        'approach': [23.90, -28.74, -45.87, -15.64, -1.23, -102.65],
+        'place':    [23.20, -31.20, -66.00, 8.52, 5.62, -108.54],
     },
 ]
 
@@ -114,11 +114,23 @@ DISPLAY_SCAN_ANGLES = [
     [94.39, 1.31, -26.19, -62.84, 3.51, -127.08],    # right
 ]
 
+# 재파지 직후 진열대로 이동할 때 거치는 안전 경유(상승) 자세. picky 슬롯 lift 만으로는
+# 상승분이 부족해 진열된 상품을 칠 위험이 있어, center pregrasp 로 가기 전에 먼저 거친다.
+REGRASP_TRANSIT_ANGLES = [49.39, -17.40, -0.79, -68.99, 5.27, -122.69]
+
 # 스캔 타이밍.
 SCAN_SETTLE_SEC   = 0.6    # 스캔 자세 도착 후 영상 안정 대기
-SCAN_CAPTURE_SEC  = 0.5    # capture_view 발행 후 detector 처리 대기
+SCAN_CAPTURE_SEC  = 1.5    # capture_view 발행 후 detector 다중프레임 샘플링 완료 대기
 SCAN_PLAN_TIMEOUT = 5.0    # plan 결과(/place/scan_result) 대기
 SCAN_MAX_RESCANS  = 2      # 빈자리 0개 시 재스캔 추가 시도 횟수
+# 우승 자세 복귀 후 CSRT init 전 안정 대기. 팔 진동이 가라앉은 안정 프레임에서 추적 시작.
+PLACE_SETTLE_SEC  = 2.0
+# NN release(gripper 70% open) 완료 후 상승 전 대기. 그리퍼가 완전히 열려 물건이
+# 안정적으로 안착할 때까지 기다린 뒤 팔을 올린다.
+PLACE_RELEASE_SETTLE_SEC = 3.0
+
+PICKUP_SLOT_APPROACH = [118.74, 11.68, -47.84, -30.76, 1.05, -112.06]
+PICKUP_SLOT_PLACE   = [118.74, 11.68, -74.35, -30.76, 1.05, -112.06]
 
 
 class CobotController:
@@ -159,6 +171,9 @@ class CobotController:
         self._inspect_min_confidence = float(inspect_min_confidence)
         self._inspect_settle_sec     = float(inspect_settle_sec)
 
+        self._e_stop_event = threading.Event()
+        self._e_stop_event.set()
+
         # SORTING 픽은 local AI 컴퓨터의 ibvs_nn_pick_agent 에 토픽으로 요청한다.
         self._pick = IbvsNnPickClient(
             node,
@@ -169,7 +184,8 @@ class CobotController:
 
         # DISPLAY_PLACE 배치는 local AI 컴퓨터의 display_place_agent 에 요청한다.
         # 픽과 동일한 토픽 RPC(IbvsNnPickClient 재사용, 토픽만 display 용으로). agent 가
-        # place_servo(csrt + IBVS + place release)를 띄우고 set_gripper open 관측을 완료로 본다.
+        # place_nn_servo(csrt + IBVS + 픽 nn_controller)를 띄우고, nn 의 grip close(=정렬 완료)
+        # 관측 후 자기가 open(70) 발행으로 release 한 걸 완료로 본다.
         self._place = IbvsNnPickClient(
             node,
             request_topic=place_request_topic,
@@ -184,6 +200,10 @@ class CobotController:
         # PLACE 시 CSRT init 용 bbox(center 기준 px) latched 발행.
         self._target_bbox_pub = node.create_publisher(
             Float64MultiArray, '/place/target_bbox', _latched_qos())
+        # 우승 스캔 자세(6 관절 deg) latched 발행. display_place_agent 가 받아 place_nn_servo
+        # 의 IBVS pregrasp 으로 주입한다(우승 자세=CSRT init 자세=IBVS pregrasp 일치 보장).
+        self._pregrasp_pub = node.create_publisher(
+            Float64MultiArray, '/place/pregrasp_angles', _latched_qos())
 
         # 스캔 plan 결과 수신.
         self._scan_lock = threading.Lock()
@@ -396,6 +416,14 @@ class CobotController:
                 self._log_err(f'slot {slot} 재파지 실패 — 진열 중단')
                 return False, placed
 
+            # 재파지 직후 진열품 충돌 회피: 안전 경유 자세 -> center pregrasp 를 거쳐 스캔으로.
+            if not self.move_to_angles(REGRASP_TRANSIT_ANGLES):
+                self._log_err('재파지 후 안전 경유 자세 이동 실패 — 진열 중단')
+                return False, placed
+            if not self.move_to_angles(PREGRASP_ANGLES['center']):
+                self._log_err('center pregrasp 이동 실패 — 진열 중단')
+                return False, placed
+
             # 선반이 바뀌었으므로 unit 마다 재스캔(빈자리 재선정).
             ok, _ = self.run_scanning(product_name, target_zone_name)
             if not ok:
@@ -409,6 +437,11 @@ class CobotController:
             self._slot_occupant[slot] = None  # 진열 성공 -> 슬롯 비움
             placed += 1
             self._log(f'진열 unit {placed} 완료 — slot {slot} 비움')
+
+            # 배치(release) 후 항상 center pregrasp 로 상승 복귀(다음 unit/task 전 진열품 충돌 회피).
+            if not self.move_to_angles(PREGRASP_ANGLES['center']):
+                self._log_err('배치 후 center pregrasp 복귀 실패 — 진열 중단')
+                return False, placed
 
         self._log(f'PLACING 완료 — 총 {placed}개 진열')
         return (placed > 0), placed
@@ -437,7 +470,8 @@ class CobotController:
         """run_scanning 이 선정한 빈자리로 IBVS+NN 배치를 1회 수행한다.
 
         우승 스캔 자세로 복귀(스캔 시점과 동일 시야) -> bbox latched 발행(CSRT init) ->
-        display_place_agent 요청(agent 가 place_servo 기동, gripper open 관측을 완료로 보고).
+        display_place_agent 요청(agent 가 place_nn_servo 기동, nn grip close 관측 후 open(70)
+        release 발행을 완료로 보고).
         """
         if self._scan_winner is None:
             self._log_err('스캔 우승 자리 없음 — 배치 불가')
@@ -448,6 +482,18 @@ class CobotController:
             self._log_err('스캔 우승 자세 복귀 실패')
             return False
 
+        # 우승 자세를 IBVS pregrasp 으로 먼저 알린다(agent 가 place_nn_servo 기동 전에 latched
+        # 수신하도록 bbox 보다 먼저 발행). 우승 자세=현재 복귀 자세=CSRT init 자세로 일치시켜
+        # IBVS 가 servo 시작 시 카메라를 다른 곳으로 옮기지 않게 한다.
+        if pose is not None:
+            pose_msg = Float64MultiArray()
+            pose_msg.data = [float(v) for v in pose]
+            self._pregrasp_pub.publish(pose_msg)
+
+        # 복귀 직후 팔 진동이 가라앉도록 안정 대기 후 bbox(CSRT init 타깃) 발행. 흔들리는
+        # 프레임에서 CSRT 가 init 되면 잘못된 패치를 잡으므로 안정 프레임에서 넘긴다.
+        time.sleep(PLACE_SETTLE_SEC)
+
         msg = Float64MultiArray()
         msg.data = [float(v) for v in bbox]
         self._target_bbox_pub.publish(msg)
@@ -456,6 +502,10 @@ class CobotController:
         if not self._place.pick(product_name):
             self._log_err('display_place_agent 미응답 또는 배치 실패')
             return False
+        # NN 이 gripper 70% open(release) 으로 내려놓은 직후 바로 올리면 물건이 딸려
+        # 올라오거나 흔들릴 수 있어, 안정 안착을 위해 상승 전 대기한다.
+        self._log(f'release 완료 — 안착 대기 {PLACE_RELEASE_SETTLE_SEC}s')
+        time.sleep(PLACE_RELEASE_SETTLE_SEC)
         self._scan_winner = None
         return True
 
@@ -674,8 +724,16 @@ class CobotController:
             return False
         if not self.move_to_angles(approach):
             return False
-        # 2) pickup-space 로 IBVS 접근 후 release(고정 자세 금지 — picky 정차 오차 보정).
-        return self._drop_at_pickup_via_ibvs(product_name)
+        # 2) PICKUP_SLOT approach -> place 2단계 접근 후 그리퍼 열어 드롭, INSPECTION_POSE 복귀.
+        if not self.move_to_angles(PICKUP_SLOT_APPROACH):
+            return False
+        if not self.move_to_angles(PICKUP_SLOT_PLACE):
+            return False
+        if not self.open_gripper():
+            return False
+        if not self.move_to_angles(INSPECTION_POSE):
+            return False
+        return True
 
     def _drop_at_pickup_via_ibvs(self, product_name: str) -> bool:
         """pickup-space 로 IBVS 접근 후 drop NN + gripper predictor 로 release 한다.
@@ -742,16 +800,25 @@ class CobotController:
         """
         timeout = self._motion_timeout if timeout is None else timeout
         deadline = time.time() + timeout
-        time.sleep(0.3)  # 이동 시작 여유(send_angles 는 비동기)
+        time.sleep(0.3)
         stable = 0
         while time.time() < deadline:
+            if not self._e_stop_event.is_set():
+                self._log('비상정지 감지 — 이동 일시정지')
+                self._e_stop_event.wait()
+                self._log('비상정지 해제 — 이동 재개')
+                self._publish_joint(target, self._default_speed)
+                deadline = time.time() + timeout
+                stable = 0
+                time.sleep(0.3)
+                continue
             self._req_status_pub.publish(Empty())
             time.sleep(STATUS_POLL_INTERVAL_SEC)
             with self._status_lock:
                 angles = list(self._latest_angles) if self._latest_angles is not None else None
             if angles is not None and self._converged(angles, target):
                 stable += 1
-                if stable >= 2:  # 연속 2회 수렴 = 안정적 도착
+                if stable >= 2:
                     return True
             else:
                 stable = 0
@@ -759,11 +826,17 @@ class CobotController:
         return False
 
     def _wait_until_coords(self, target: list[float], timeout: float | None = None) -> bool:
-        # 위치(x,y,z) 수렴만 본다(자세는 생략). 단위 mm.
         timeout = self._motion_timeout if timeout is None else timeout
         deadline = time.time() + timeout
         time.sleep(0.3)
         while time.time() < deadline:
+            if not self._e_stop_event.is_set():
+                self._log('비상정지 감지 — 이동 일시정지')
+                self._e_stop_event.wait()
+                self._log('비상정지 해제 — 이동 재개')
+                deadline = time.time() + timeout
+                time.sleep(0.3)
+                continue
             self._req_status_pub.publish(Empty())
             time.sleep(STATUS_POLL_INTERVAL_SEC)
             with self._status_lock:
@@ -830,15 +903,25 @@ class CobotController:
     # ── 비상 정지 ────────────────────────────────────────────────────────
 
     def emergency_stop(self) -> None:
+        self._e_stop_event.clear()
         if self._dry_run:
+            self._log('(dry_run) emergency_stop')
             return
         with self._status_lock:
             angles = list(self._latest_angles) if self._latest_angles is not None else None
         if angles is None:
             return
-        # 현재 측정 자세를 목표로 발행해 추가 이동을 멈춘다(임시 hold).
-        # [구현 필요] 드라이버에 정식 stop 명령이 생기면 교체.
-        self._publish_joint(angles, self._default_speed)
+        msg = Float64MultiArray()
+        msg.data = [float(CMD_JOINT)] + [float(a) for a in angles] + [float(self._default_speed)]
+        self._target_pub.publish(msg)
+        self._log('비상정지 — 현재 자세 hold')
+
+    def emergency_resume(self) -> None:
+        if self._dry_run:
+            self._log('(dry_run) emergency_resume')
+        else:
+            self._log('비상정지 해제 — 동작 재개 준비')
+        self._e_stop_event.set()
 
     # ── status / detection 콜백 ──────────────────────────────────────────
 

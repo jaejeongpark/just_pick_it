@@ -21,6 +21,15 @@ FeedbackCallback = Callable[[str, int, int], None]
 CobotFeedbackCallback = Callable[[dict[str, Any]], None]
 ResultCallback = Callable[[dict[str, Any]], None]
 
+COBOT_PRODUCT_CLASS_LABELS = {
+    "수박": "watermelon",
+    "환타": "fanta",
+    "생수": "water",
+    "식빵": "bread",
+    "크림빵": "cream_bread",
+    "초코파이": "choco_pie",
+}
+
 
 class RobotCommandGateway:
     """Fleet task를 ROS2 Action/Service 명령으로 변환하는 출력 adapter.
@@ -447,7 +456,8 @@ class RobotCommandGateway:
         task_type = str(goal.task_type)
 
         self._node.get_logger().info(
-            f"[RobotCommandGateway] {robot_name} task_id={task_id} {task_type} 전송"
+            f"[RobotCommandGateway] {robot_name} task_id={task_id} {task_type} 전송, "
+            f"product={goal.product_name}"
         )
 
         send_future = client.send_goal_async(
@@ -500,10 +510,18 @@ class RobotCommandGateway:
         self._set_goal_field(goal, "task_type", str(task.get("task_type") or ""))
         self._set_goal_field(goal, "order_id", self._int_or_zero(task.get("order_id")))
         self._set_goal_field(goal, "display_item_id", self._int_or_zero(task.get("display_item_id")))
-        self._set_goal_field(goal, "product_name", str(task.get("product_name") or ""))
+        product_name = self._cobot_product_name(str(task.get("product_name") or ""))
+        self._set_goal_field(goal, "product_name", product_name)
         self._set_goal_field(goal, "quantity", quantity)
         self._set_goal_field(goal, "target_zone_name", str(task.get("target_zone_name") or ""))
         return goal
+
+    def _cobot_product_name(self, product_name: str) -> str:
+        """Convert display product names to cobot vision class labels."""
+        normalized = product_name.strip()
+        if not normalized:
+            return ""
+        return COBOT_PRODUCT_CLASS_LABELS.get(normalized, normalized)
 
     def _on_cobot_goal_response(
         self,

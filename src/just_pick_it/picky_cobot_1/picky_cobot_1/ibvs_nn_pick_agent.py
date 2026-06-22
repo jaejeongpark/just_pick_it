@@ -52,6 +52,10 @@ class IbvsNnPickAgent(Node):
         self.declare_parameter('grip_settle_sec', 2.5)
         self.declare_parameter('request_topic', '/ibvs_nn_pick/request')
         self.declare_parameter('result_topic', '/ibvs_nn_pick/result')
+        # IBVS DONE 판정 area_norm 임계값(nn_inference.launch.py 로 전달).
+        # 클수록 물체에 더 가까이 접근한 뒤 grip. 음수면 전달하지 않고
+        # nn_inference.launch.py 의 기본값을 사용한다.
+        self.declare_parameter('desired_area_norm', -1.0)
         # nn_inference.launch.py 에 그대로 넘길 추가 인자("key:=value" 목록).
         self.declare_parameter('extra_launch_args', [''])
 
@@ -206,6 +210,9 @@ class IbvsNnPickAgent(Node):
             f'robot_name:={self._robot_name}',
             f'target_class_label:={product_name}',
         ]
+        desired_area_norm = float(self.get_parameter('desired_area_norm').value)
+        if desired_area_norm > 0.0:
+            cmd.append(f'desired_area_norm:={desired_area_norm}')
         for extra in self.get_parameter('extra_launch_args').value or []:
             if extra:
                 cmd.append(extra)

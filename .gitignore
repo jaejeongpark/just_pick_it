@@ -27,6 +27,16 @@ jetcobot1_captures/
 # YOLO 추론 결과
 runs/
 
+# 모델 export 및 가중치 백업 (생성물)
+*.onnx
+best_bak/
+
+# 영상에서 추출한 학습 프레임 (대용량)
+frames/
+
+# 실수로 복사된 데모 env 예시 파일
+full_flow_demo.env copy.example
+
 .envrc
 
 # Local study/review notes
