@@ -140,6 +140,15 @@ class NNControllerNode(Node):
         self.declare_parameter("on_max_steps_action", "grip")  # "grip" or "error"
         self.declare_parameter("grip_wait_sec", 0.5)
 
+        # --- closeloop 모델 전용 (config 값 override; 0/음수면 config 사용) ---
+        # detection 이 이 시간(sec) 이내면 fresh(live), 초과면 frozen(마지막 유효값) 처리.
+        self.declare_parameter("det_valid_timeout", 0.0)
+        # 연속 N 프레임 detection 소실 시 open-loop(blind) 전환. 잠깐 소실(jitter) 흡수.
+        self.declare_parameter("open_loop_lost_frames", 0)
+        # open-loop settle 시 last-visible P(success)가 grip_confidence_threshold 미만일 때
+        # 동작. "grip"(경고 후 grip) 또는 "error"(중단).
+        self.declare_parameter("on_low_confidence_action", "grip")
+
         self.robot_name = str(self.get_parameter("robot_name").value)
         self.ns = f"/{self.robot_name}"
         self.detection_topic = str(self.get_parameter("detection_topic").value)
@@ -205,14 +214,43 @@ class NNControllerNode(Node):
         # Model / feature builder
         # ============================================================
         self.config = load_config(self.model_dir)
-        self.builder = FeatureBuilder(self.config)
-        # zero: anchor 3차원을 0으로 고정(학습과 동일). detection 동결 불필요.
-        # 구버전 config(키 없음)는 frozen(기존 동작).
-        self.anchor_mode = str(self.config.get("anchor_mode", "frozen")).lower()
-        self.window_size = int(self.config["window"])
+        # model_kind: "closeloop"(live 시각오차 입력) 또는 "legacy"(anchor/progress/window).
+        self.model_kind = str(self.config.get("model_kind", "legacy")).lower()
         self.max_delta_deg = float(self.config["max_delta_deg"])
         self.joint_limits = [tuple(v) for v in self.config["joint_limits"]]
-        self.controlled_joints = list(self.builder.controlled_joints)
+        self.controlled_joints = list(self.config.get("controlled_joints", [0, 1, 2, 3, 4]))
+
+        if self.model_kind == "closeloop":
+            # closeloop 은 FeatureBuilder/window/anchor 를 쓰지 않는다. 입력은 매 스텝
+            # live 시각오차로 구성한다(_build_closeloop_input).
+            self.builder = None
+            self.window_size = 1
+            self.anchor_mode = "live"
+            self.target_cx = float(self.config.get("target_cx", self.image_w * 0.5))
+            self.target_cy = float(self.config.get("target_cy", self.image_h * 0.5))
+            self.include_area = bool(self.config.get("include_area", True))
+            dv = float(self.get_parameter("det_valid_timeout").value)
+            self.det_valid_timeout = (
+                dv if dv > 0.0 else float(self.config.get("det_valid_timeout", 0.3))
+            )
+            olf = int(self.get_parameter("open_loop_lost_frames").value)
+            self.open_loop_lost_frames = (
+                olf if olf > 0 else int(self.config.get("open_loop_lost_frames", 3))
+            )
+            self.on_low_confidence_action = str(
+                self.get_parameter("on_low_confidence_action").value
+            ).lower()
+            self.get_logger().info(
+                f"closeloop model: target=({self.target_cx:.0f},{self.target_cy:.0f}), "
+                f"include_area={self.include_area}, "
+                f"det_valid_timeout={self.det_valid_timeout}, "
+                f"open_loop_lost_frames={self.open_loop_lost_frames}"
+            )
+        else:
+            self.builder = FeatureBuilder(self.config)
+            # zero: anchor 3차원을 0으로 고정(학습과 동일). 구버전 config 는 frozen.
+            self.anchor_mode = str(self.config.get("anchor_mode", "frozen")).lower()
+            self.window_size = int(self.config["window"])
 
         # 추론 제어 주기 결정 (우선순위):
         #   1) control_rate_hz 파라미터 > 0 이면 그 값(launch 튜닝)
@@ -242,7 +280,8 @@ class NNControllerNode(Node):
         # ============================================================
         # Detection / status state
         # ============================================================
-        self.latest_valid_det = None   # (cx, cy, area_norm)
+        self.latest_valid_det = None   # (cx, cy, area_norm) 마지막 유효값(frozen 포함)
+        self.latest_det_time = None    # 위 값 수신 시각(closeloop freshness 판정)
         self.target_track_id = None
 
         self.latest_angles = None
@@ -262,6 +301,12 @@ class NNControllerNode(Node):
         self.start_angles = None       # 활성화 시점 자세(진행도 기준)
         self.step_count = 0
         self.grip_consec = 0
+
+        # closeloop 핸드오프 상태 (begin_run_closeloop 에서 리셋).
+        self.lost_count = 0
+        self.open_loop_mode = False
+        self.last_visible_input = None
+        self.last_visible_p = 0.0
 
         # ============================================================
         # Publishers / subscribers
@@ -355,6 +400,7 @@ class NNControllerNode(Node):
         if not (math.isfinite(cx) and math.isfinite(cy) and math.isfinite(area_norm)) or area_norm <= 0.0:
             return
         self.latest_valid_det = (cx, cy, area_norm)
+        self.latest_det_time = self.get_clock().now()
 
     def ibvs_done_callback(self, _msg: Empty):
         if self._activated:
@@ -415,7 +461,8 @@ class NNControllerNode(Node):
                     return
                 if not self.has_fresh_status():
                     return
-                if self.anchor_mode != "zero" and self.latest_valid_det is None:
+                need_det = (self.model_kind == "closeloop") or (self.anchor_mode != "zero")
+                if need_det and self.latest_valid_det is None:
                     self.get_logger().warn(
                         "Activated but no valid detection captured yet. Waiting..."
                     )
@@ -443,6 +490,9 @@ class NNControllerNode(Node):
             self.set_phase(Phase.ERROR)
 
     def begin_run(self):
+        if self.model_kind == "closeloop":
+            self.begin_run_closeloop()
+            return
         if self.anchor_mode == "zero":
             # anchor 미사용 모델: 학습과 동일하게 0 벡터.
             cx, cy, area_norm = float("nan"), float("nan"), float("nan")
@@ -482,6 +532,160 @@ class NNControllerNode(Node):
             f"q0={np.round(q, 1).tolist()}"
         )
         self.set_phase(Phase.RUN)
+
+    # ============================================================
+    # closeloop (live 시각오차 + closed/open hysteresis)
+    # ============================================================
+    def begin_run_closeloop(self):
+        q = self.latest_angles.copy()
+        self.start_angles = q.copy()
+        self.prev_step_angles = q
+        self.cmd_ref = q.copy()
+        self._delta_filt = None
+        self._last_proc_status_ns = None
+        self.step_count = 0
+        self.lost_count = 0
+        self.open_loop_mode = False
+        self.last_visible_input = None
+        self.last_visible_p = 0.0
+        # z-floor RLS 초기화 (legacy begin_run 과 동일).
+        n_ctrl = len(self.controlled_joints)
+        self._jz = np.zeros(n_ctrl)
+        self._jz_P = np.eye(n_ctrl) * 1.0e3
+        self._jz_n = 0
+        self._prev_est_q = q[self.controlled_joints].copy()
+        self._prev_est_z = self.latest_z
+        self._z_floor_warned = False
+        det = self.latest_valid_det
+        self.get_logger().info(
+            f"Begin RUN (closeloop). det(cx,cy,area)="
+            f"({det[0]:.0f},{det[1]:.0f},{det[2]:.3f}), q0={np.round(q, 1).tolist()}"
+        )
+        self.set_phase(Phase.RUN)
+
+    def _build_closeloop_input(self, cx, cy, area, q):
+        e_u = (cx - self.target_cx) / max(self.image_w, 1.0)
+        e_v = (cy - self.target_cy) / max(self.image_h, 1.0)
+        vis = [e_u, e_v, area] if self.include_area else [e_u, e_v]
+        qn = []
+        for j in self.controlled_joints:
+            lo, hi = self.joint_limits[j]
+            span = max(hi - lo, 1e-6)
+            qn.append(float(np.clip(2.0 * (float(q[j]) - lo) / span - 1.0, -1.0, 1.0)))
+        return np.array(vis + qn, dtype=np.float32)
+
+    def run_step_closeloop(self):
+        # 측정값 갱신 시에만 1 step (legacy run_step 과 동일한 과적분 방지).
+        if self.require_fresh_status and self.latest_status_time is not None:
+            st = self.latest_status_time.nanoseconds
+            if st == self._last_proc_status_ns:
+                return
+            self._last_proc_status_ns = st
+
+        q = self.latest_angles.copy()
+
+        # detection freshness 로 live/frozen + closed/open hysteresis 결정.
+        det_fresh = False
+        if self.latest_valid_det is not None and self.latest_det_time is not None:
+            age = (self.get_clock().now() - self.latest_det_time).nanoseconds * 1e-9
+            det_fresh = age <= self.det_valid_timeout
+        if det_fresh:
+            self.lost_count = 0
+        else:
+            self.lost_count += 1
+        if self.lost_count >= self.open_loop_lost_frames and not self.open_loop_mode:
+            self.open_loop_mode = True
+            self.get_logger().info(
+                f"Detection lost {self.lost_count} frames -> OPEN-LOOP (blind)."
+            )
+
+        # 시각오차: live(fresh) 또는 마지막 유효값(frozen). latest_valid_det 은
+        # 검출 소실 시에도 마지막 값을 유지하므로 frozen 입력이 자동 구성된다.
+        cx, cy, area = self.latest_valid_det
+        inp = self._build_closeloop_input(cx, cy, area, q)
+        x = torch.from_numpy(inp).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            delta_norm = self.policy(x)[0].cpu().numpy()
+            p_success = float(torch.sigmoid(self.grip_net(x)[0]).cpu().item())
+        if det_fresh:
+            self.last_visible_input = inp
+            self.last_visible_p = p_success
+
+        delta_deg = delta_norm * self.max_delta_deg * self.delta_scale
+        if self.delta_smooth_alpha < 1.0:
+            if self._delta_filt is None:
+                self._delta_filt = delta_deg.copy()
+            else:
+                self._delta_filt = (
+                    self.delta_smooth_alpha * delta_deg
+                    + (1.0 - self.delta_smooth_alpha) * self._delta_filt
+                )
+            delta_deg = self._delta_filt
+        delta_deg = self._apply_z_floor(q, delta_deg)
+
+        settled = (
+            self.settle_delta_deg > 0.0
+            and float(np.max(np.abs(delta_deg))) < self.settle_delta_deg
+        )
+
+        if settled:
+            q_cmd = self.cmd_ref.copy()
+        elif self.command_integration:
+            for k, j in enumerate(self.controlled_joints):
+                target = self.cmd_ref[j] + float(delta_deg[k])
+                target = float(np.clip(
+                    target, q[j] - self.command_leash_deg, q[j] + self.command_leash_deg
+                ))
+                self.cmd_ref[j] = self.clip_joint(j, target)
+            q_cmd = self.cmd_ref.copy()
+        else:
+            q_cmd = q.copy()
+            for k, j in enumerate(self.controlled_joints):
+                q_cmd[j] = self.clip_joint(j, q[j] + float(delta_deg[k]))
+
+        if not settled:
+            self.publish_joint_command(q_cmd.tolist(), self.command_speed)
+
+        self.step_count += 1
+        self.get_logger().info(
+            f"RUN(closeloop) step={self.step_count}/{self.max_fine_tune_steps}, "
+            f"{'OPEN' if self.open_loop_mode else 'CLOSED'} lost={self.lost_count}, "
+            f"P_lastvis={self.last_visible_p:.3f}, "
+            f"{'SETTLED ' if settled else ''}"
+            f"delta(J1~J5)={np.round(delta_deg, 2).tolist()}"
+        )
+
+        # grip: open-loop 에서 settle 하면 last-visible P 로 go/no-go commit.
+        # closed-loop(물체 보임) 중에는 grip 하지 않는다(그립은 blind 에서 일어남).
+        if self.open_loop_mode and settled:
+            self._closeloop_commit_grip()
+            return
+
+        if self.step_count >= self.max_fine_tune_steps:
+            self.get_logger().warn("max_fine_tune_steps reached (closeloop).")
+            self._closeloop_commit_grip(forced=True)
+
+    def _closeloop_commit_grip(self, forced=False):
+        p = self.last_visible_p
+        if p >= self.grip_confidence_threshold:
+            self.get_logger().info(
+                f"Grip commit: last-visible P(success)={p:.3f} >= "
+                f"{self.grip_confidence_threshold}. Gripping."
+            )
+            self.set_phase(Phase.GRIP)
+            return
+        if self.on_low_confidence_action == "error" and not forced:
+            self.get_logger().error(
+                f"last-visible P(success)={p:.3f} < {self.grip_confidence_threshold}. "
+                f"Aborting (on_low_confidence_action=error)."
+            )
+            self.set_phase(Phase.ERROR)
+        else:
+            self.get_logger().warn(
+                f"last-visible P(success)={p:.3f} < {self.grip_confidence_threshold}. "
+                f"Gripping anyway (forced={forced})."
+            )
+            self.set_phase(Phase.GRIP)
 
     def _apply_z_floor(self, q, delta_deg):
         # z-floor: dz/dq를 측정 z로 RLS 추정한 뒤, commanded z가 floor 아래로 가면
@@ -536,6 +740,9 @@ class NNControllerNode(Node):
         return delta_deg
 
     def run_step(self):
+        if self.model_kind == "closeloop":
+            self.run_step_closeloop()
+            return
         # 측정값이 갱신됐을 때만 1 step 진행한다. stale q로 반복 적분 시 과적분으로
         # overshoot/진동이 생기므로(status가 제어 주기보다 느릴 때), fresh일 때만 명령.
         if self.require_fresh_status and self.latest_status_time is not None:
