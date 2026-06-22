@@ -9,12 +9,12 @@ Local AI 컴퓨터(192.168.1.70)용 launch — detection 파이프라인 + ibvs_
      - IBVS/NN 은 이 토픽을 구독하므로 픽보다 먼저 떠 있어야 한다.
   2. ibvs_nn_pick_agent
      - cobot 호스트의 cobot_state_manager 가 보내는 픽 요청(/ibvs_nn_pick/request)을 받아
-       이 머신에서 nn_inference.launch.py(사용자 ibvs+nn)를 on-demand 로 실행한다.
+       이 머신에서 nn_inference_closeloop.launch.py(사용자 ibvs+nn)를 on-demand 로 실행한다.
 
 NN/IBVS 튜닝 기본값:
   - 아래 nn_*/ibvs_*/grip_*/model_dir/max_fine_tune_steps/j6_* 기본값은 수동 검증에서
-    가장 잘 동작한 nn_inference.launch.py 인자 조합과 동일하게 맞춰 두었다.
-  - agent 가 픽 요청을 받으면 이 값들을 extra_launch_args 로 nn_inference.launch.py 에
+    가장 잘 동작한 nn_inference_closeloop.launch.py 인자 조합과 동일하게 맞춰 두었다.
+  - agent 가 픽 요청을 받으면 이 값들을 extra_launch_args 로 nn_inference_closeloop.launch.py 에
     그대로 전달하므로, 별도 인자 없이 실행해도 수동 검증과 같은 동작을 재현한다.
   - 재튜닝이 필요하면 해당 인자만 nn_command_speed:= 처럼 덮어쓴다.
 
@@ -42,8 +42,8 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.descriptions import ParameterValue
 
-# nn_inference.launch.py 로 그대로 전달할 튜닝 인자.
-# (launch arg 이름, nn_inference.launch.py arg 이름) — 둘은 동일하게 둔다.
+# nn_inference_closeloop.launch.py 로 그대로 전달할 튜닝 인자.
+# (launch arg 이름, nn_inference_closeloop.launch.py arg 이름) — 둘은 동일하게 둔다.
 # robot_name / target_class_label / desired_area_norm 은 agent 가 직접 넣으므로 제외.
 _FORWARDED_ARGS = [
     "model_dir",
@@ -56,6 +56,11 @@ _FORWARDED_ARGS = [
     "nn_delta_smooth_alpha",
     "nn_settle_delta_deg",
     "nn_command_leash_deg",
+    # closeloop 전용.
+    "det_valid_timeout",
+    "open_loop_lost_frames",
+    "on_low_confidence_action",
+    "approach_center_threshold",
     "nn_z_floor_enable",
     "nn_z_floor_mm",
     "nn_z_floor_margin_mm",
@@ -93,13 +98,13 @@ def launch_setup(context, *args, **kwargs):
     )
 
     # 검증된 튜닝 인자를 "key:=value" 목록으로 만들어 agent 에 전달한다.
-    # agent 는 픽 요청 시 이 목록을 nn_inference.launch.py 명령에 그대로 덧붙인다.
+    # agent 는 픽 요청 시 이 목록을 nn_inference_closeloop.launch.py 명령에 그대로 덧붙인다.
     extra_launch_args = [
         f"{name}:={LaunchConfiguration(name).perform(context)}"
         for name in _FORWARDED_ARGS
     ]
 
-    # 픽 트리거 agent. 픽 요청 시 nn_inference.launch.py 를 로컬에서 on-demand 실행.
+    # 픽 트리거 agent. 픽 요청 시 nn_inference_closeloop.launch.py 를 로컬에서 on-demand 실행.
     agent = Node(
         package="picky_cobot_1",
         executable="ibvs_nn_pick_agent",
@@ -107,6 +112,8 @@ def launch_setup(context, *args, **kwargs):
         output="screen",
         parameters=[
             {"robot_name": robot_name},
+            # closeloop 추론 launch 를 on-demand 실행한다.
+            {"launch_file": "nn_inference_closeloop.launch.py"},
             {"pick_timeout_sec": ParameterValue(pick_timeout_sec, value_type=float)},
             {"request_topic": pick_request_topic},
             {"result_topic": pick_result_topic},
@@ -122,7 +129,7 @@ def generate_launch_description():
     home = os.path.expanduser("~")
     default_model_dir = os.path.join(
         home,
-        "just_pick_it/src/just_pick_it/just_pick_it_perception/result/nn_controller",
+        "just_pick_it/src/just_pick_it/just_pick_it_perception/result/nn_controller/pick",
     )
     default_detection_model = os.path.join(
         home,
@@ -130,7 +137,7 @@ def generate_launch_description():
     )
 
     args = [
-        # nn_inference.launch.py 의 robot_name 및 cobot 호스트 드라이버와 일치해야 한다.
+        # nn_inference_closeloop.launch.py 의 robot_name 및 cobot 호스트 드라이버와 일치해야 한다.
         DeclareLaunchArgument("robot_name", default_value="jetcobot1"),
         # 카메라 UDP 송신 포트(camera_dest_port)와 반드시 일치.
         DeclareLaunchArgument("udp_port", default_value="5003"),
@@ -145,24 +152,29 @@ def generate_launch_description():
         DeclareLaunchArgument("pick_request_topic", default_value="/ibvs_nn_pick/request"),
         DeclareLaunchArgument("pick_result_topic", default_value="/ibvs_nn_pick/result"),
         # IBVS DONE 판정 area_norm 임계값. 클수록 물체에 더 가까이 접근한 뒤 grip.
-        # 음수(기본값)면 agent 가 전달하지 않아 nn_inference.launch.py 기본값(0.23)을 쓴다.
-        DeclareLaunchArgument("desired_area_norm", default_value="-1.0"),
-        # --- nn_inference.launch.py 로 전달할 검증된 튜닝 인자 ---
-        # 기본값은 수동 검증에서 가장 잘 동작한 조합. 재튜닝 시 개별 덮어쓰기.
+        # closeloop 학습 수집과 동일한 0.16 (인계 분포 일치). 음수면 launch 기본값 사용.
+        DeclareLaunchArgument("desired_area_norm", default_value="0.16"),
+        # --- nn_inference_closeloop.launch.py 로 전달할 검증된 튜닝 인자 ---
+        # 기본값은 수동 검증에서 가장 잘 동작한 closeloop 조합. 재튜닝 시 개별 덮어쓰기.
         DeclareLaunchArgument("model_dir", default_value=default_model_dir),
-        DeclareLaunchArgument("grip_confidence_threshold", default_value="0.8"),
-        DeclareLaunchArgument("grip_consecutive_required", default_value="8"),
-        DeclareLaunchArgument("max_fine_tune_steps", default_value="300"),
-        DeclareLaunchArgument("nn_control_rate_hz", default_value="6.0"),
-        DeclareLaunchArgument("nn_command_speed", default_value="60"),
-        DeclareLaunchArgument("nn_delta_scale", default_value="0.6"),
+        DeclareLaunchArgument("grip_confidence_threshold", default_value="0.55"),
+        DeclareLaunchArgument("grip_consecutive_required", default_value="3"),
+        DeclareLaunchArgument("max_fine_tune_steps", default_value="100"),
+        DeclareLaunchArgument("nn_control_rate_hz", default_value="0.0"),
+        DeclareLaunchArgument("nn_command_speed", default_value="10"),
+        DeclareLaunchArgument("nn_delta_scale", default_value="1.0"),
         DeclareLaunchArgument("nn_delta_smooth_alpha", default_value="0.5"),
         DeclareLaunchArgument("nn_settle_delta_deg", default_value="0.8"),
-        DeclareLaunchArgument("nn_command_leash_deg", default_value="6.0"),
+        DeclareLaunchArgument("nn_command_leash_deg", default_value="8.0"),
+        # closeloop 전용.
+        DeclareLaunchArgument("det_valid_timeout", default_value="0.0"),
+        DeclareLaunchArgument("open_loop_lost_frames", default_value="3"),
+        DeclareLaunchArgument("on_low_confidence_action", default_value="grip"),
+        DeclareLaunchArgument("approach_center_threshold", default_value="0.30"),
         DeclareLaunchArgument("nn_z_floor_enable", default_value="true"),
-        DeclareLaunchArgument("nn_z_floor_mm", default_value="220.0"),
-        DeclareLaunchArgument("nn_z_floor_margin_mm", default_value="0.0"),
-        DeclareLaunchArgument("ibvs_command_speed", default_value="10"),
+        DeclareLaunchArgument("nn_z_floor_mm", default_value="200.0"),
+        DeclareLaunchArgument("nn_z_floor_margin_mm", default_value="10.0"),
+        DeclareLaunchArgument("ibvs_command_speed", default_value="20"),
         DeclareLaunchArgument("j6_angle_sign", default_value="1.0"),
         DeclareLaunchArgument("j6_angle_offset_deg", default_value="0.0"),
     ]

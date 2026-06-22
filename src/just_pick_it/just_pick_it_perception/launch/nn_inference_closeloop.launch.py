@@ -48,6 +48,7 @@ def launch_setup(context, *args, **kwargs):
     nn_command_leash_deg = LaunchConfiguration("nn_command_leash_deg").perform(context)
     nn_status_poll_rate_hz = LaunchConfiguration("nn_status_poll_rate_hz").perform(context)
     grip_confidence_threshold = LaunchConfiguration("grip_confidence_threshold").perform(context)
+    grip_consecutive_required = LaunchConfiguration("grip_consecutive_required").perform(context)
     max_fine_tune_steps = LaunchConfiguration("max_fine_tune_steps").perform(context)
     # closeloop 전용. 0/음수면 모델 config 값 사용.
     det_valid_timeout = LaunchConfiguration("det_valid_timeout").perform(context)
@@ -115,6 +116,7 @@ def launch_setup(context, *args, **kwargs):
                 "command_leash_deg": float(nn_command_leash_deg),
                 "status_poll_rate_hz": float(nn_status_poll_rate_hz),
                 "grip_confidence_threshold": float(grip_confidence_threshold),
+                "grip_consecutive_required": int(grip_consecutive_required),
                 "max_fine_tune_steps": int(max_fine_tune_steps),
                 # closeloop 전용.
                 "det_valid_timeout": float(det_valid_timeout),
@@ -171,6 +173,7 @@ def generate_launch_description():
         DeclareLaunchArgument("nn_command_leash_deg", default_value="8.0"),
         DeclareLaunchArgument("nn_status_poll_rate_hz", default_value="5.0"),
         DeclareLaunchArgument("grip_confidence_threshold", default_value="0.8"),
+        DeclareLaunchArgument("grip_consecutive_required", default_value="3"),
         DeclareLaunchArgument("max_fine_tune_steps", default_value="100"),
         # closeloop 전용. 0/음수면 모델 config 값을 따른다(학습 시 저장).
         DeclareLaunchArgument("det_valid_timeout", default_value="0.0"),
