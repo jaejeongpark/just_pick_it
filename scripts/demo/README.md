@@ -51,7 +51,15 @@ fake PICKY 속도나 COBOT 작업 시간을 조절하고 싶을 때만 같은 `.
 않으므로, 임시 override가 필요하면 실행 앞에 붙여도 된다.
 
 ```bash
-DEMO_MOCK_PICKY=true python3 scripts/demo/fake_robot_servers.py
+DEMO_MOCK_PICKY_IDS=1,2 DEMO_MOCK_COBOT_IDS=1,2 python3 scripts/demo/fake_robot_servers.py
+```
+
+개별 fake 로봇만 켜고 싶으면 켤 로봇 번호만 적는다. 빈 값이면 해당 fake는 띄우지 않는다.
+
+```bash
+DEMO_MOCK_PICKY_IDS=2 DEMO_MOCK_COBOT_IDS= python3 scripts/demo/fake_robot_servers.py
+DEMO_MOCK_PICKY_IDS= DEMO_MOCK_COBOT_IDS=1 python3 scripts/demo/fake_robot_servers.py
+DEMO_MOCK_PICKY_IDS=2 DEMO_MOCK_COBOT_IDS=1 python3 scripts/demo/fake_robot_servers.py
 ```
 
 COBOT 자동 완료 모드:
