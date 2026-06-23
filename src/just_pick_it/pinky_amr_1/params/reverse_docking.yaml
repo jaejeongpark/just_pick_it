@@ -1,3 +1,21 @@
+# state_manager 노드가 DockCommand.dock_name 을 로컬 도크 marker id / map pose 로
+# 변환하는 표(같은 프로세스의 reverse_docking 과 다른 노드라 별도 블록으로 적용).
+# 도킹 성공 후 reverse_docking 이 이 pose 를 /picky1/initialpose 로 publish 해
+# AMCL 을 도크 seed 로 보정한다. map_yaw 는 주차 시 로봇 헤딩(+x_body 가 +y_world 를
+# 보므로 +pi/2=1.5708). 이 값이 없으면 코드 기본값 0.0 이 발행돼 AMCL 이 90deg 틀어진다.
+# 도크/마커는 PICKY2 와 물리적으로 공유하므로 pose 도 동일하게 둔다.
+/**/state_manager:
+  ros__parameters:
+    charging_dock_1.marker_id: 0
+    charging_dock_1.map_x: 0.11
+    charging_dock_1.map_y: 0.08
+    charging_dock_1.map_yaw: 1.5708
+
+    charging_dock_2.marker_id: 1
+    charging_dock_2.map_x: 0.28
+    charging_dock_2.map_y: 0.08
+    charging_dock_2.map_yaw: 1.5708
+
 /**/reverse_docking:
   ros__parameters:
 

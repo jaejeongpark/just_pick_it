@@ -37,6 +37,7 @@ class FleetManagerNode(Node):
 
         self.robot_ids = config["robot_ids"]
         picky_robot_ids = self._filter_picky_robot_ids(self.robot_ids)
+        cobot_robot_ids = self._filter_cobot_robot_ids(self.robot_ids)
 
         self.fleet_repo = FleetRepository(self)
         self.robot_gateway = RobotCommandGateway(self)
@@ -47,7 +48,11 @@ class FleetManagerNode(Node):
         self.task_manager = self._create_task_manager()
         # 재시작 복구(R1) 전까지 poll/dispatch 게이트를 닫는다. reconcile_timer 가 1회 해제한다.
         self.task_manager.arm_reconcile()
-        self.robot_state_monitor = self._create_robot_state_monitor(picky_robot_ids, config)
+        self.robot_state_monitor = self._create_robot_state_monitor(
+            picky_robot_ids,
+            cobot_robot_ids,
+            config,
+        )
         self.task_timer = self.create_timer(
             config["waiting_work_poll_period_sec"],
             self._poll_waiting_work_if_picky_idle,
@@ -62,6 +67,7 @@ class FleetManagerNode(Node):
         self.get_logger().info(
             f"[FleetManager] 노드 시작 — robots={self.robot_ids}, "
             f"picky={picky_robot_ids}, "
+            f"cobot={cobot_robot_ids}, "
             f"waiting_work_poll={config['waiting_work_poll_period_sec']:.1f}s"
         )
 
@@ -95,6 +101,10 @@ class FleetManagerNode(Node):
     def _filter_picky_robot_ids(robot_ids: list[str]) -> list[str]:
         return [robot_id for robot_id in robot_ids if str(robot_id).upper().startswith('PICKY')]
 
+    @staticmethod
+    def _filter_cobot_robot_ids(robot_ids: list[str]) -> list[str]:
+        return [robot_id for robot_id in robot_ids if str(robot_id).upper().startswith('COBOT')]
+
     # =====================================
     # Component wiring
     # =====================================
@@ -117,11 +127,13 @@ class FleetManagerNode(Node):
     def _create_robot_state_monitor(
         self,
         picky_robot_ids: list[str],
+        cobot_robot_ids: list[str],
         config: dict,
     ) -> RobotStateMonitor:
         return RobotStateMonitor(
             self,
             robot_ids=picky_robot_ids,
+            cobot_robot_ids=cobot_robot_ids,
             fleet_repo=self.fleet_repo,
             on_state_change=self.traffic_manager.notify_state,
             on_battery_update=self.task_manager.handle_battery_update,
