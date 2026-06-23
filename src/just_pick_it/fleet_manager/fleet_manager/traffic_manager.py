@@ -170,6 +170,15 @@ class TrafficManager:
         self._robot_reservations: dict[str, int | None] = {rid: None for rid in robot_ids}
         # robot_id -> 예약/점유 중인 충전 도크 이름 (없으면 None)
         self._robot_dock: dict[str, str | None] = {rid: None for rid in robot_ids}
+        # robot_id -> RETURN_HOME 으로 도착해 DOCK_IN 전까지 물리적으로 주차 중인
+        # STANDBY_ZONE 이름 (없으면 None). _robot_paths 와 분리해 별도로 유지하는
+        # 이유: RETURN_HOME 도착 시 picky_state 가 STANDBY(idle)가 되어
+        # notify_state 안전망이 _robot_paths 를 비우므로, path 로 점유를 들고 있으면
+        # 곧 지워진다. 또 _robot_dock 만으로는 '도크 앞 주차'와 '완충 후 도크 안
+        # 대기(CHARGING->STANDBY)'를 구분할 수 없어, 분기점 STANDBY_ZONE_2 를
+        # 잘못 막아 안쪽 도크 진입로를 끊을 위험이 있다. 그래서 도착~도킹 구간만
+        # 가리키는 명시적 필드를 따로 둔다.
+        self._robot_parked: dict[str, str | None] = {rid: None for rid in robot_ids}
         # 콜드 스타트: 로봇은 자기 충전 도크에서 부팅한다(시연 기준, seed robot pos=도크).
         # 점유로 초기화하지 않으면 다른 로봇 복귀 시 그 도크를 비었다고 보고 이미 점유된
         # 도크로 도킹해 충돌한다. robot_ids 순서 == DOCK_PRIORITY 순서 전제로 매핑하고,
@@ -224,6 +233,7 @@ class TrafficManager:
             if path is not None:
                 self._robot_paths[robot_id] = path
                 self._robot_reservations[robot_id] = task_id
+                self._robot_parked[robot_id] = None
 
         if path is None:
             self._node.get_logger().warn(
@@ -292,6 +302,7 @@ class TrafficManager:
             if best_path is not None:
                 self._robot_paths[robot_id] = best_path
                 self._robot_reservations[robot_id] = task_id
+                self._robot_parked[robot_id] = None
 
         if best_path is None:
             self._node.get_logger().warn(
@@ -406,6 +417,7 @@ class TrafficManager:
             if best_path is not None:
                 self._robot_paths[robot_id] = best_path
                 self._robot_reservations[robot_id] = task_id
+                self._robot_parked[robot_id] = None
                 if best_dock is not None:
                     self._robot_dock[robot_id] = best_dock
 
@@ -463,6 +475,10 @@ class TrafficManager:
                 self._robot_paths[robot_id] = path
                 self._robot_reservations[robot_id] = task_id
                 self._robot_dock[robot_id] = dock_name
+                # DOCK_IN 출발: 이제 path([STANDBY->DOCK])가 standby 를 막으므로
+                # 주차 점유 플래그는 해제한다. 안 풀면 도킹 후에도 standby 가
+                # 영구 차단되어 다른 로봇의 안쪽 도크 진입로가 막힌다.
+                self._robot_parked[robot_id] = None
                 chosen_path = path
                 chosen_dock = dock_name
                 break
@@ -571,6 +587,28 @@ class TrafficManager:
             f'[TrafficManager] {robot_id} 점유 유지: {zone} (경로 예약 해제, 노드 점유 유지)'
         )
 
+    def hold_standby(self, robot_id: str, zone: str) -> None:
+        """RETURN_HOME 성공 시 호출한다. 로봇이 STANDBY_ZONE 에 도착해 DOCK_IN 전까지
+        그 zone 에 물리적으로 주차한 상태의 점유를 유지한다.
+
+        hold_occupancy 와 달리 _robot_paths 가 아니라 별도 _robot_parked 에 기록한다.
+        RETURN_HOME 도착 직후 picky_state 가 STANDBY(idle)로 바뀌면 notify_state 안전망이
+        _robot_paths 를 비우므로, path 로 점유를 들고 있으면 곧 지워져 standby 가
+        무방비가 된다(다른 로봇이 그 zone 으로 경로를 만들어 충돌). _robot_parked 는
+        path 와 분리돼 있어 STANDBY 전이에도 살아남는다.
+
+        예약(task)/경로는 도착으로 끝났으므로 함께 비운다. 주차 점유는 다음 DOCK_IN 의
+        reserve_dock_path(자기 path 로 덮어씀)나 새 작업 reserve_* 또는 undock 시 풀린다.
+        """
+        with self._lock:
+            self._robot_paths[robot_id] = []
+            self._robot_reservations[robot_id] = None
+            self._robot_parked[robot_id] = zone
+        self._node.get_logger().info(
+            f'[TrafficManager] {robot_id} 주차 점유 유지: {zone} '
+            f'(RETURN_HOME 도착, DOCK_IN 전까지 노드 점유)'
+        )
+
     def get_robot_state(self, robot_id: str) -> str | None:
         with self._lock:
             return self._robot_states.get(robot_id)
@@ -656,6 +694,15 @@ class TrafficManager:
             if idle_now and was_active:
                 self._robot_paths[robot_id] = []
                 self._robot_reservations[robot_id] = None
+
+            # 주차 점유(_robot_parked)는 로봇이 실제로 이동을 시작하면 푼다(안전망).
+            # 주차는 STANDBY(idle) 구간에서만 의미가 있고, 이동 상태로 들어가면
+            # 그 standby 를 떠나거나(MOVING_TO_*/RETURNING) 도크로 들어가는 중(DOCKING)
+            # 이라 더 막을 필요가 없다. 정상 경로에선 reserve_* 가 이미 풀지만,
+            # 그 호출이 누락된 경우에도 standby 가 영구 차단되지 않게 한다.
+            # idle 상태에서는 풀지 않는다(주차 점유 유지가 이 기능의 목적).
+            if state in MOVING_STATES:
+                self._robot_parked[robot_id] = None
 
             # 도크 점유는 로봇이 실제로 도크를 빠져나갈 때만 해제한다.
             # State Manager 는 충전 후 배터리가 임계를 넘으면 picky_state 를
@@ -754,6 +801,14 @@ class TrafficManager:
         for robot_id in self._robot_states:
             if robot_id == exclude_robot_id:
                 continue
+
+            # RETURN_HOME 으로 도착해 DOCK_IN 전까지 주차 중인 STANDBY_ZONE 도 막는다.
+            # 이 구간은 picky_state 가 STANDBY(idle)라 path 점유가 안전망에 지워지므로
+            # _robot_paths 만으로는 비어 보인다. 주차 zone 을 명시적으로 차단해야
+            # 다른 로봇이 그 STANDBY 를 통과/목적지로 삼아 충돌하는 것을 막는다.
+            parked = self._robot_parked.get(robot_id)
+            if parked is not None:
+                blocked_nodes.add(parked)
 
             path = self._robot_paths.get(robot_id, [])
             if not path:

@@ -2995,6 +2995,11 @@ class TaskManager:
                 and RECOVERY_ARRIVAL_STATE.get(task_type) == "WAITING_FOR_COBOT"
             ):
                 self._traffic.hold_occupancy(robot_name, str(arrival_zone))
+            elif task_succeeded and arrival_zone and task_type == "RETURN_HOME":
+                # RETURN_HOME 도착: 로봇이 STANDBY_ZONE 에 주차하지만 picky_state 는
+                # STANDBY(idle)라 release_path 로 비우면 그 zone 이 빈 곳으로 보여
+                # DOCK_IN 전까지 다른 로봇이 통과/진입해 충돌한다. 주차 점유를 유지한다.
+                self._traffic.hold_standby(robot_name, str(arrival_zone))
             else:
                 self._traffic.release_path(robot_name, task_id)
             self._move_waypoints_by_task.pop(task_id, None)
