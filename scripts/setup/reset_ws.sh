@@ -7,8 +7,8 @@ set -euo pipefail
 # - Ubuntu 24.04
 # - ROS 2 Jazzy
 # - Python 3.12
-# - colcon build는 전체 워크스페이스를 symlink로 빌드
-# - build/install/log 전체 삭제 후 --symlink-install 사용
+# - colcon build는 기본적으로 전체 워크스페이스를 symlink로 빌드
+# - build/install/log 전체 삭제 후 빌드
 #
 # 사용법:
 #   cd ~/just_pick_it
@@ -20,6 +20,8 @@ set -euo pipefail
 #   SKIP_WEB=1 bash scripts/setup/reset_ws.sh       # web venv 세팅 생략
 #   SKIP_DB=1 bash scripts/setup/reset_ws.sh        # DB 세팅 생략
 #   SKIP_ROSDEP=1 bash scripts/setup/reset_ws.sh    # rosdep 생략
+#   bash scripts/setup/reset_ws.sh --no-symlink-install  # 일반 colcon build
+#   bash scripts/setup/reset_ws.sh --symlink-install     # symlink build 명시
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ROS_DISTRO_REQUIRED="jazzy"
@@ -35,6 +37,7 @@ RESET_VENV="${RESET_VENV:-1}"
 SKIP_WEB="${SKIP_WEB:-0}"
 SKIP_DB="${SKIP_DB:-0}"
 SKIP_ROSDEP="${SKIP_ROSDEP:-0}"
+USE_SYMLINK_INSTALL=true
 
 
 log() {
@@ -44,6 +47,44 @@ log() {
 fail() {
   echo "[ws-reset] $*" >&2
   exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage: bash scripts/setup/reset_ws.sh [--symlink-install|--no-symlink-install]
+
+Build mode:
+  --symlink-install       Use colcon build --symlink-install (default)
+  --no-symlink-install    Use plain colcon build
+
+Environment options:
+  RESET_DB=0      Keep existing DB schema/seed
+  RESET_VENV=0    Keep web/.venv
+  SKIP_WEB=1      Skip web venv setup
+  SKIP_DB=1       Skip DB setup
+  SKIP_ROSDEP=1   Skip rosdep install
+EOF
+}
+
+parse_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --symlink-install)
+        USE_SYMLINK_INSTALL=true
+        ;;
+      --no-symlink-install)
+        USE_SYMLINK_INSTALL=false
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        fail "unknown option: $1"
+        ;;
+    esac
+    shift
+  done
 }
 
 source_if_exists() {
@@ -204,13 +245,25 @@ clean_colcon_artifacts() {
   rm -rf "$ROOT_DIR/build" "$ROOT_DIR/install" "$ROOT_DIR/log"
 }
 build_workspace() {
-  log "colcon build --symlink-install"
-  colcon build --symlink-install
+  if [ "$USE_SYMLINK_INSTALL" = true ]; then
+    log "colcon build --symlink-install"
+    colcon build --symlink-install
+    return
+  fi
+
+  log "colcon build"
+  colcon build
 }
+
+parse_args "$@"
 
 cd "$ROOT_DIR"
 log "root: $ROOT_DIR"
-log "fixed target: Ubuntu 24.04 / ROS 2 Jazzy / Python 3.12 / full symlink build"
+if [ "$USE_SYMLINK_INSTALL" = true ]; then
+  log "fixed target: Ubuntu 24.04 / ROS 2 Jazzy / Python 3.12 / full symlink build"
+else
+  log "fixed target: Ubuntu 24.04 / ROS 2 Jazzy / Python 3.12 / full non-symlink build"
+fi
 
 require_ubuntu_2404
 require_python312
