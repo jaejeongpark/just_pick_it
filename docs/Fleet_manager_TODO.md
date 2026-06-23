@@ -26,7 +26,7 @@
 | D2 | `robot_status` = **task 전이 전용** | `workflow_service`만 기록. 텔레메트리는 picky_state/battery/pose만 갱신 |
 | D3 | `/api/fleet/*` = **유지** | admin UI 검증/디버그용. Fleet API→Repository→DB라 정책 위배 아님 |
 | D4 | 진열 재고 = **계획값** | `display_item.stock_delta` 기반. 비전 실측(rack check) 미구현 → legacy 완료 API 제거 |
-| D5 | 진열 처리 = **DISPLAY 흐름** | 창고 선별·적재는 주문용 `SORTING_AND_LOAD`를 재사용하고, `display_item` 기준으로 `MOVE_TO_STOCK` → `SORTING_AND_LOAD` → `MOVE_TO_DISPLAY` → `DISPLAY_SCAN` → `DISPLAY_PLACE` 순서로 처리한다. `DISPLAY_PLACE` SUCCESS 시 `stock_qty`를 반영한다. 기준: `6_Data_Structure.pdf` / `5_Picky_State_Diagram.drawio.png` ver2.0 |
+| D5 | 진열 처리 = **DISPLAY 흐름** | 창고 선별·적재는 주문용 `SORTING_AND_LOAD`를 재사용하고, `display_item` 기준으로 `MOVE_TO_STOCK` → `SORTING_AND_LOAD` → `MOVE_TO_DISPLAY` → `DISPLAY_SCAN` → `DISPLAY_PLACE` 순서로 처리한다. `DISPLAY_PLACE` SUCCESS 시 `stock_qty`를 반영한다. 기준: `6_Data_Structure.pdf` / `docs/img/Design_img/8_Picky_State_Diagram.drawio.png` ver2.0 |
 
 ---
 
