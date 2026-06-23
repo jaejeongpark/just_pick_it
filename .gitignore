@@ -28,7 +28,6 @@ jetcobot1_captures/
 runs/
 
 # 모델 export 및 가중치 백업 (생성물)
-*.onnx
 best_bak/
 
 # 영상에서 추출한 학습 프레임 (대용량)
