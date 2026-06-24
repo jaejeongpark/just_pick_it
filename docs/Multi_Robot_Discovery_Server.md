@@ -1,7 +1,7 @@
 # 멀티로봇 통신 — Fast-DDS Discovery Server (운영 런북)
 
 > picky1 + picky2 + 관제 PC(Fleet)를 같은 `ROS_DOMAIN_ID=25`에서 안정적으로 묶기 위한 설정.
-> 작성 2026-06-16 (박서우). 관련 코드: `scripts/discovery_server.sh`, `scripts/dds_env.sh`.
+> 관련 코드: `scripts/discovery_server.sh`, `scripts/dds_env.sh`.
 
 ## 1. 왜 필요한가
 
@@ -37,7 +37,7 @@ PC = 40+ participant가 서로 멀티캐스트로 전수 통보 → **nav2 lifec
 bash ~/just_pick_it/scripts/discovery_server.sh
 
 # 2) 관제 PC — Fleet (새 터미널, .bashrc env 상속)
-cd ~/just_pick_it && ./run_all.sh
+cd ~/just_pick_it && bash scripts/runtime/run_all.sh
 
 # 3) picky1 보드 (ssh)
 bash ~/just_pick_it/scripts/navigation/run_picky1_all.sh
@@ -74,8 +74,8 @@ ros2 topic echo --once /picky1/amcl_pose           # amcl 동작 확인
 - [x] **2대 동시 가동 시 보드 CPU 포화로 nav goal 이 상위 로직에서 cancel되는 현상** — **해소(2026-06-17)**.
   원인은 participant 별 Fast-DDS 전송 스레드 폴링(비composed nav2 ~13 participant)으로 인한 CPU 과부하.
   **nav2 composition**(`picky1_nav.launch.py use_composition:=True`, `component_container_isolated`)으로
-  nav2 11노드를 단일 프로세스(participant 1개)로 합쳐 해소. `nav2_params.yaml` 무수정. 상세는
-  `docs/Fleet_manager_TODO.md` §3-A 13. (scan/odom 은 보드 로컬이라 WiFi 무관.)
+  nav2 11노드를 단일 프로세스(participant 1개)로 합쳐 해소. `nav2_params.yaml` 무수정.
+  scan/odom 은 보드 로컬이라 WiFi 무관하다.
 - [x] **2대 AMR E2E 성공(2026-06-17)** — picky1+picky2 동시 가동, 주문 흐름 끝까지 완주.
 - [ ] discovery server systemd 유저서비스 자동기동 + 관제 PC IP 고정(DHCP 예약).
 - [ ] fleet→로봇 커스텀 액션(MoveCommand/DockCommand) 의 feat/amr_mj↔feature/amr_sw COBOT 연동분

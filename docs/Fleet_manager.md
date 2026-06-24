@@ -3,7 +3,7 @@
 Just Pick It의 중앙 제어 노드. 한 ROS2 프로세스 안에서 **DB 접근 + 작업 스케줄링 + 경로 관리 + 로봇 명령 + 웹 API**를 조립한다.
 
 - 인터페이스 계약(Fleet API / Traffic / 로봇 연동): `docs/Fleet_manager_interface.md`
-- 담당 분담 / 결정 / 작업 현황: `docs/Fleet_manager_TODO.md`
+- 세부 인터페이스와 실행 절차는 `docs/Fleet_manager_interface.md`, `docs/System_Execution_Runbook.md`를 함께 본다.
 
 ---
 
@@ -24,7 +24,7 @@ FleetManagerNode  --ROS2-->  PICKY / COBOT State Manager
 
 ---
 
-## 2. 구성요소 & 담당 경계
+## 2. 구성요소 & 책임 경계
 
 `fleet_manager_node.py`의 `FleetManagerNode`만 `rclpy.Node`를 상속한다. 나머지는 이 노드에 조립되는 일반 Python 클래스다.
 
@@ -38,24 +38,19 @@ FleetManagerNode
   └── TaskManager          주문/진열 polling, task 생성/전이/dispatch
 ```
 
-| 모듈 | 파일 | 책임 | 담당 |
-|---|---|---|---|
-| `Web Service` | `web/` | 화면 렌더링 + `/api/*` 프록시 (DB 코드 없음) | 이명제 |
+| 모듈 | 파일 | 책임 |
+|---|---|---|
+| `Web Service` | `web/` | 화면 렌더링 + `/api/*` 프록시 (DB 코드 없음) |
+| `FleetManagerNode` | `fleet_manager_node.py` | 컴포넌트 생성·배선·타이머·명령 전파 |
+| `FleetRepository` | `fleet_repository.py` | `just_pick_it_db` 통한 DB 조회/쓰기, snapshot, 상태 전이 |
+| `TrafficManager` | `traffic_manager.py` | zone 그래프 BFS, 점유 예약/해제, 도크 선정 |
+| `RobotStateMonitor` | `robot_state_monitor.py` | picky_state/battery/pose/cobot_state 구독 -> DB 반영 + Traffic 전달 |
+| `FleetApiServer` | `fleet_api_server.py` | REST/WebSocket endpoint 제공 |
+| `TaskManager` | `task_manager.py` | 대기 작업 polling, task 생성/전이/dispatch, 재시작 복구 |
+| `RobotCommandGateway` | `robot_command_gateway.py` | task -> PICKY/COBOT Action/Service 변환, 콜백 연결 |
+| `State Manager` | `pinky_amr_*/...` / `picky_cobot_1/...` | 실제 로봇 주행/도킹/작업/상태 발행 |
 
-|---|---|---|---|
-| `FleetManagerNode` | `fleet_manager_node.py` | 컴포넌트 생성·배선·타이머·명령 전파 | 공동 |
-| `FleetRepository` | `fleet_repository.py` | `just_pick_it_db` 통한 DB 조회/쓰기, snapshot, 상태 전이 | 박서우 |
-| `TrafficManager` | `traffic_manager.py` | zone 그래프 BFS, 점유 예약/해제, 도크 선정 | 박서우 |
-| `RobotStateMonitor` | `robot_state_monitor.py` | picky_state/battery/pose 구독 -> DB 반영 + Traffic 전달 | 박서우 |
-| `FleetApiServer` | `fleet_api_server.py` | REST/WebSocket endpoint 제공 | 이명제 |
-| `TaskManager` | `task_manager.py` | 대기 작업 polling, task 생성/전이/dispatch, 재시작 복구 | 이명제 |
-| `RobotCommandGateway` | `robot_command_gateway.py` | task -> PICKY/COBOT Action/Service 변환, 콜백 연결 | 이명제 |
-
-|---|---|---|---|
-| `State Manager` | `pinky_amr_1/.../state_manager.py` | 실제 로봇 주행/도킹/상태 발행 | 박서우 |
-|---|---|---|---|
-
-**수정 경계**: 위 표의 담당 외 파일은 직접 고치지 않고, 계약 변경이 필요하면 사유를 먼저 공유한다. 상태 전이 규칙(`just_pick_it_db/services/*`)은 양측 합의 영역.
+**책임 경계**: Fleet Manager는 task와 상태 전이를 관리하고, 실제 주행/도킹/팔 동작은 각 로봇 패키지의 State Manager가 수행한다. 상태 전이 규칙(`just_pick_it_db/services/*`)은 DB 서비스 계층에 모아 둔다.
 
 읽는 순서: `fleet_manager_node.py` → `fleet_api_server.py` → `fleet_repository.py` → `task_manager.py` → `robot_command_gateway.py` → `traffic_manager.py` → `robot_state_monitor.py`.
 
@@ -69,7 +64,7 @@ FleetManagerNode
 cd ~/just_pick_it
 source /opt/ros/jazzy/setup.bash
 source install/setup.bash
-./run_all.sh        # PostgreSQL 확인 -> Fleet Manager(+Fleet API :8100) -> Web Gateway(:8000)
+bash scripts/runtime/run_all.sh        # PostgreSQL 확인 -> Fleet Manager(+Fleet API :8100) -> Web Gateway(:8000)
 ```
 
 Web만 단독 기동은 `web/scripts/run.sh`(단, 화면 데이터는 Fleet Manager가 떠 있어야 조회됨).
@@ -178,7 +173,7 @@ Fleet Manager가 RUNNING task 도중 재시작되면 in-memory 점유가 비고,
   - 도착 신호 없이 타임아웃(기본 120s) -> FAILED + 재계획
 ```
 
-재배차/재발행을 하지 않으므로 "stale source로 되돌아가 재주행"하거나 "예약 경로 ≠ 실제 경로"가 되는 충돌 위험이 없다. 설계 배경과 대안(A/A'/B) 비교는 git 이력 및 `Fleet_manager_TODO.md`의 R1 항목 참고.
+재배차/재발행을 하지 않으므로 "stale source로 되돌아가 재주행"하거나 "예약 경로 ≠ 실제 경로"가 되는 충돌 위험이 없다.
 
 ---
 
@@ -206,4 +201,4 @@ python3 -m pytest -q src/just_pick_it/fleet_manager/test/
 web/.venv/bin/python -m compileall -q web/app
 ```
 
-남은 실로봇 검증 항목과 작업 현황은 `Fleet_manager_TODO.md` 참고.
+실로봇 검증 순서는 `docs/System_Execution_Runbook.md`를 기준으로 확인한다.

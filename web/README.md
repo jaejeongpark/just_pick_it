@@ -32,7 +32,7 @@ web/
 │   │   ├── fleet_api_proxy_router.py   # /api/* HTTP/WebSocket proxy
 │   │   └── llm_router.py               # 관리자 AI 명령 endpoint
 │   ├── services/
-│   │   └── llm_client.py               # LLM 담당자 구현 지점
+│   │   └── llm_client.py               # LLM 명령 해석 구현 지점
 │   ├── static/
 │   └── templates/
 ├── scripts/
@@ -48,10 +48,10 @@ web/
 
 ```bash
 cd ~/just_pick_it
-./reset_ws.sh
+bash scripts/setup/reset_ws.sh
 ```
 
-`reset_ws.sh`는 다음을 한 번에 수행한다.
+`scripts/setup/reset_ws.sh`는 다음을 한 번에 수행한다.
 
 ```text
 - web/.venv 재생성 및 requirements 설치
@@ -61,7 +61,7 @@ cd ~/just_pick_it
 - colcon build --symlink-install
 ```
 
-팀원 환경을 맞출 때는 web venv만 따로 만지지 말고 루트 `./reset_ws.sh`로 전체 재세팅합니다.
+팀원 환경을 맞출 때는 web venv만 따로 만지지 말고 루트에서 `bash scripts/setup/reset_ws.sh`로 전체 재세팅합니다.
 
 ## 실행
 
@@ -71,7 +71,7 @@ cd ~/just_pick_it
 cd ~/just_pick_it
 source /opt/ros/jazzy/setup.bash
 source install/setup.bash
-./run_all.sh
+bash scripts/runtime/run_all.sh
 ```
 
 Web Gateway만 실행:
@@ -99,9 +99,9 @@ DB Health   : http://localhost:8000/api/health/db
 - Web Gateway는 DB session, SQLAlchemy model, DB service를 import하지 않는다.
 - LLM route는 Web Gateway에 남긴다. 단, 진열 요청 생성은 Fleet API에 위임한다.
 
-## LLM 담당자 구현 지점
+## LLM 명령 해석 구현 지점
 
-LLM 담당자는 다음 파일만 우선 구현하면 된다.
+LLM 명령 해석 로직은 다음 파일을 우선 구현하면 된다.
 
 ```text
 web/app/services/llm_client.py
@@ -119,7 +119,7 @@ web/app/services/llm_client.py
 }
 ```
 
-그 외 라우터/DB/FleetRepository는 LLM 담당자가 직접 건드리지 않는다.
+그 외 라우터/DB/FleetRepository는 LLM 명령 해석 로직에서 직접 건드리지 않는다.
 
 ## DB 빠른 초기화
 
@@ -127,7 +127,7 @@ web/app/services/llm_client.py
 
 ```bash
 cd ~/just_pick_it
-./reset_demo_data.sh
+bash scripts/setup/reset_demo_data.sh
 ```
 
-venv/rosdep/colcon까지 다시 맞춰야 할 때만 `./reset_ws.sh`를 사용한다.
+venv/rosdep/colcon까지 다시 맞춰야 할 때만 `bash scripts/setup/reset_ws.sh`를 사용한다.

@@ -1,6 +1,6 @@
 # Fleet Manager 인터페이스 계약
 
-Fleet Manager가 외부(웹/로봇/내부 모듈)와 주고받는 모든 계약을 한 곳에 모았다. 설계·동작 개요는 `docs/Fleet_manager.md`, 작업 현황은 `docs/Fleet_manager_TODO.md`.
+Fleet Manager가 외부(웹/로봇/내부 모듈)와 주고받는 모든 계약을 한 곳에 모았다. 설계·동작 개요는 `docs/Fleet_manager.md`, 실행 순서는 `docs/System_Execution_Runbook.md`를 함께 본다.
 
 대상별:
 - 전체 구조 파악: §0 구성요소 개요
@@ -279,7 +279,7 @@ class PathResult:
 - **DOCK_IN 실패 시 도크 해제**: `_robot_dock`은 `release_path`로 풀리지 않고 오직 `notify_state`의 CHARGING 이탈 안전망으로만 해제된다(의도된 정책 — TrafficManager에 DB/외부 동기화 책임을 주지 않기 위함). 다음 MOVE dispatch로 도크 이탈 시 자연 해제된다고 가정.
 - **cost 단위**: 현재 hop 수. 필요 시 `_zone_coords` 기반 유클리드 거리로 교체.
 
-zone 그래프/좌표는 `traffic_manager.py`의 `ZONE_GRAPH`/`DEFAULT_ZONE_COORDS`, 맵은 `docs/Traffic_node_graph.jpg` 참고.
+zone 그래프/좌표는 `traffic_manager.py`의 `ZONE_GRAPH`/`DEFAULT_ZONE_COORDS`, 맵은 `docs/img/Design_img/7_Zone_Graph.jpg` 참고.
 
 ---
 
