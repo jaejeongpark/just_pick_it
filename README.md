@@ -191,6 +191,64 @@ PICKY1은 매대 정밀 접근 시 Nav2로 근처까지 이동한 뒤, precision
 - AMR state machine 로그
 - 도킹 debug image
 
+### COBOT Vision-Guided Manipulation
+
+COBOT(cobot280)은 AMR이 운반해 온 상품을 다루는 매니퓰레이션 담당입니다. 작업은 크게 **Pick task(상품 파지)**와 **Display task(파지한 상품을 빈 진열 공간에 진열)** 두 흐름으로 나뉩니다.
+
+연산 구조는 명확히 분리되어 있습니다. **YOLO-segmentation, IBVS, NN 추론 등 모든 비전/AI 연산은 AI local computer에서 수행**하고, cobot280을 구동하는 **Raspberry Pi 4 컨트롤러**에는 TCP로 관절·그리퍼 명령을 전송합니다. 두 작업 모두 **analytic IBVS(Image-Based Visual Servoing)와 학습 기반 closed-loop 제어를 결합**하며, 카메라 좌표 변환 없이 image space에서 수렴하므로 **hand-eye / 카메라 extrinsic 캘리브레이션이 필요 없습니다.**
+
+#### Pick Task
+
+상품을 인식해 그리퍼 방향까지 맞춰 파지하는 흐름입니다. segmentation 결과로 파지 방향을 잡고, analytic IBVS로 대상에 접근한 뒤, 미세 정렬과 파지 결정은 학습된 신경망이 **closed-loop -> open-loop** 두 단계로 마무리합니다.
+
+<p align="center">
+  <img src="docs/img/cobot_img/yolo_seg.gif" width="32%" alt="YOLO-segmentation 기반 대상 인식" />
+  <img src="docs/img/cobot_img/pick_analytic_ibvs.gif" width="32%" alt="Analytic IBVS 접근" />
+  <img src="docs/img/cobot_img/pick_nn_ibvs.gif" width="32%" alt="NN closed-loop/open-loop 미세 정렬 및 파지" />
+</p>
+<p align="center">
+  <em>좌: YOLO-segmentation 대상 인식 · 중: analytic IBVS 접근 · 우: NN closed-loop/open-loop 미세 정렬과 파지</em>
+</p>
+
+| 단계 | 기법 | 설명 |
+|---|---|---|
+| 대상 인식 | YOLOv8n-seg + ByteTrack | AI local computer에서 instance segmentation과 다중 객체 추적 수행. `frame_count` 일관성 필터로 1프레임 오검출 제거 |
+| 파지 방향(J6) | OBB orientation | segmentation mask에 `cv2.minAreaRect`를 적용해 OBB 각도를 산출하고, 그리퍼 J6 회전을 상품 장축에 정렬 |
+| 접근 | Analytic IBVS | SEARCH -> ALIGN -> APPROACH -> J6_ALIGN 단계형 비주얼 서보잉. 화면 중심 정렬과 면적(거리) 기반 접근을 자코비안으로 제어 |
+| 미세 정렬 (closed-loop) | NN visual servoing | 대상이 **관측 가능한 동안**, 8차원 state(시각오차 `e_u`, `e_v`, `area_norm` + 정규화 관절각 `q1~q5`)를 입력받아 Policy Net이 J1~J5 보정량을 출력하는 **closed-loop** 학습 제어 |
+| 파지 수렴 (open-loop) | NN blind convergence | 그리퍼/팔이 대상을 가려 **시각 관측이 끊기면**, 시각 state(`e_u`, `e_v`, `area_norm`)를 마지막 유효값으로 **freeze**하고 관절 state는 계속 갱신하며 grasp 지점으로 수렴하는 **open-loop(visual channel)** 제어. 전환은 hysteresis(`open_loop_lost_frames`, `det_valid_timeout`)로 jitter를 흡수 |
+| 파지 결정 | GripSuccessPredictor | 별도 분류망이 파지 성공 확률 `P(success)`를 추정해, 임계(0.8)를 연속 3회 넘는 시점(open-loop 전환점 근처)에 그리퍼 닫힘을 1회 트리거 |
+
+- **하나의 NN 컨트롤러, 두 phase:** 동일한 Policy Net과 GripSuccessPredictor가 closed-loop과 open-loop 양쪽에서 동작하며, 시각 관측 가능 여부에 따라 입력 구성만 전환됩니다.
+- **RLS 기반 충돌 회피:** 동작 중 관절 변화 `dq`와 높이 변화 `dz`의 관계(z 방향 자코비안)를 Recursive Least Squares로 온라인 추정해, 그리퍼가 바닥(`z_floor`) 아래로 내려갈 보정량을 사전에 차단합니다. 별도 캘리브레이션 없이 실행 중 학습합니다.
+
+#### Display Task
+
+파지한 상품을 진열대의 **가장 적합한 빈 공간**에 놓는 흐름입니다. 빈자리 선정은 학습 없이 scoring으로 처리하고, 진열 접근 중에는 optical flow로 목표 슬롯을 추적합니다.
+
+| 단계 | 기법 | 설명 |
+|---|---|---|
+| 빈자리 탐지 | Canny + HoughLinesP + Distance Transform | 선반 엣지를 검출하고 YOLO mask로 점유 영역을 만든 뒤, free space에 distance transform을 적용해 픽셀별 여유 공간을 계산 |
+| 빈자리 선정 | 가중 스코어링 | 여유 공간, 중심 근접도, 전면 우선, 면적 비율을 가중합해 최적 슬롯을 선정. 멀티프레임 누적으로 흔들림(jitter) 억제 |
+| 슬롯 추적 | Optical Flow (LK + affine RANSAC) | 진열 접근 중 목표 슬롯을 추적. 무특징 흰 배경 슬롯에서 CSRT가 scale을 놓치고 드리프트하는 문제를 피하기 위해, 주변 맥락(선반 레일, 라벨)을 활용하는 optical flow로 의도적으로 대체 |
+| 진열 수렴 + release | IBVS + NN place 제어 | 선정된 빈 슬롯으로 image space 수렴 후, 그리퍼를 개방해 상품을 진열 |
+
+<p align="center">
+  <img src="docs/img/cobot_img/display_scoring.png" width="80%" alt="빈 슬롯 scoring 시각화" />
+</p>
+<p align="center">
+  <em>distance transform 여유 공간에 중심 근접도, 전면 우선, 면적 비율을 가중합해 최적 빈자리를 선정</em>
+</p>
+
+<p align="center">
+  <img src="docs/img/cobot_img/display_tracking.gif" width="60%" alt="Optical flow 기반 빈 슬롯 추적" />
+</p>
+<p align="center">
+  <em>진열 접근 중 optical flow(LK + affine RANSAC)로 목표 빈 슬롯을 추적</em>
+</p>
+
+- **학습 없이 일반화되는 빈자리 선정:** 빈 공간 선정은 기하/거리 기반 스코어링이라 새로운 진열 배치에도 재학습 없이 동작합니다.
+
 ## Engineering Challenges
 
 이 프로젝트는 Web 서비스와 실제 로봇 제어를 동시에 다루기 때문에, 단순 기능 구현보다 **상태 동기화, 로봇 간 충돌 가능성, 실환경 센서/네트워크 불안정성**을 해결하는 데 많은 비중이 있었습니다.
